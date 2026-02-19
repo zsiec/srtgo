@@ -3,6 +3,7 @@ package srt
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -96,4 +97,38 @@ func (l *stdLogger) Log(level LogLevel, category LogCategory, socketID uint32, m
 	defer l.mu.Unlock()
 	fmt.Fprintf(l.w, "%s [%s] %s [%d] %s\n",
 		time.Now().Format("2006-01-02T15:04:05.000Z07:00"), level, category, socketID, msg)
+}
+
+// SlogLogger returns a Logger that emits messages through a [slog.Logger].
+// Log levels are mapped as: LogDebug→Debug, LogNote→Info, LogWarning→Warn, LogError→Error.
+// The category and socket ID are included as structured attributes.
+//
+// Example:
+//
+//	cfg := srt.DefaultConfig()
+//	cfg.Logger = srt.SlogLogger(slog.Default())
+func SlogLogger(l *slog.Logger) Logger {
+	return &slogAdapter{l: l}
+}
+
+type slogAdapter struct {
+	l *slog.Logger
+}
+
+func (a *slogAdapter) Log(level LogLevel, category LogCategory, socketID uint32, msg string) {
+	var lvl slog.Level
+	switch level {
+	case LogDebug:
+		lvl = slog.LevelDebug
+	case LogNote:
+		lvl = slog.LevelInfo
+	case LogWarning:
+		lvl = slog.LevelWarn
+	default:
+		lvl = slog.LevelError
+	}
+	a.l.LogAttrs(nil, lvl, msg,
+		slog.String("category", string(category)),
+		slog.Int("socket_id", int(socketID)),
+	)
 }

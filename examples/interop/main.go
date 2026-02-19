@@ -44,8 +44,8 @@ type connInfo struct {
 	resource  string
 	startTime time.Time
 
-	dataCh  chan []byte    // subscriber: incoming data channel
-	dropped atomic.Int64  // subscriber: dropped packets (channel full)
+	dataCh  chan []byte  // subscriber: incoming data channel
+	dropped atomic.Int64 // subscriber: dropped packets (channel full)
 
 	statsMu sync.RWMutex
 	stats   srt.ConnStats

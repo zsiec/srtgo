@@ -3,7 +3,17 @@ package srt
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 )
+
+// ErrWatcherClosed is returned when operating on a closed Watcher.
+var ErrWatcherClosed = errors.New("srt: watcher closed")
+
+// ErrAlreadyWatched is returned when adding a connection that is already watched.
+var ErrAlreadyWatched = errors.New("srt: connection already watched")
+
+// ErrNotWatched is returned when removing a connection that is not watched.
+var ErrNotWatched = errors.New("srt: connection not watched")
 
 // EventType identifies the kind of readiness event.
 type EventType int
@@ -84,10 +94,10 @@ type watchEntry struct {
 	edgeTriggered bool          // true = edge-triggered mode (ET)
 
 	// Edge-triggered state: tracks last-notified event state per type.
-	// Only accessed from the per-entry goroutines (one per event type),
-	// so no synchronization is needed.
-	lastReadState  bool // true = last notified as readable
-	lastWriteState bool // true = last notified as writable
+	// Accessed from per-entry goroutines (watchRead/watchWrite) and
+	// from ClearEvent (caller goroutine), so atomics are required.
+	lastReadState  atomic.Bool // true = last notified as readable
+	lastWriteState atomic.Bool // true = last notified as writable
 }
 
 // NewWatcher creates a Watcher ready to monitor connections.
@@ -118,11 +128,11 @@ func (w *Watcher) AddWithOpts(conn *Conn, opts WatchOpts) error {
 	defer w.mu.Unlock()
 
 	if w.closed {
-		return errors.New("srt: watcher closed")
+		return ErrWatcherClosed
 	}
 
 	if _, exists := w.entries[conn]; exists {
-		return errors.New("srt: connection already watched")
+		return ErrAlreadyWatched
 	}
 
 	readCh, writeCh := conn.registerWatch()
@@ -153,7 +163,7 @@ func (w *Watcher) Remove(conn *Conn) error {
 
 	entry, exists := w.entries[conn]
 	if !exists {
-		return errors.New("srt: connection not watched")
+		return ErrNotWatched
 	}
 
 	close(entry.cancel)
@@ -168,11 +178,11 @@ func (w *Watcher) Wait() (Event, error) {
 	select {
 	case ev, ok := <-w.eventCh:
 		if !ok {
-			return Event{}, errors.New("srt: watcher closed")
+			return Event{}, ErrWatcherClosed
 		}
 		return ev, nil
 	case <-w.done:
-		return Event{}, errors.New("srt: watcher closed")
+		return Event{}, ErrWatcherClosed
 	}
 }
 
@@ -193,7 +203,15 @@ func (w *Watcher) Close() error {
 		conn.unregisterWatch()
 	}
 	w.entries = nil
-	return nil
+
+	// Drain eventCh so goroutines blocked in emit can exit via w.done.
+	for {
+		select {
+		case <-w.eventCh:
+		default:
+			return nil
+		}
+	}
 }
 
 func (w *Watcher) watchRead(entry *watchEntry, readCh <-chan struct{}) {
@@ -202,11 +220,11 @@ func (w *Watcher) watchRead(entry *watchEntry, readCh <-chan struct{}) {
 		case <-readCh:
 			if entry.edgeTriggered {
 				// Edge-triggered: only emit when transitioning from not-ready to ready.
-				if entry.lastReadState {
+				if entry.lastReadState.Load() {
 					// Already notified as readable — suppress until cleared.
 					continue
 				}
-				entry.lastReadState = true
+				entry.lastReadState.Store(true)
 			}
 			w.emit(Event{Conn: entry.conn, Type: EventRead})
 		case <-entry.cancel:
@@ -223,11 +241,11 @@ func (w *Watcher) watchWrite(entry *watchEntry, writeCh <-chan struct{}) {
 		case <-writeCh:
 			if entry.edgeTriggered {
 				// Edge-triggered: only emit when transitioning from not-ready to ready.
-				if entry.lastWriteState {
+				if entry.lastWriteState.Load() {
 					// Already notified as writable — suppress until cleared.
 					continue
 				}
-				entry.lastWriteState = true
+				entry.lastWriteState.Store(true)
 			}
 			w.emit(Event{Conn: entry.conn, Type: EventWrite})
 		case <-entry.cancel:
@@ -278,8 +296,8 @@ func (w *Watcher) ClearEvent(conn *Conn, eventType EventType) {
 
 	switch eventType {
 	case EventRead:
-		entry.lastReadState = false
+		entry.lastReadState.Store(false)
 	case EventWrite:
-		entry.lastWriteState = false
+		entry.lastWriteState.Store(false)
 	}
 }

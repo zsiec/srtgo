@@ -287,16 +287,35 @@ func (g *Group) Mode() GroupMode {
 	return g.mode
 }
 
-// SetStabilityTimeout sets the minimum stability timeout for backup mode.
-// A member with no response for longer than this is considered unstable.
-// Default: 1s.
+// SetStabilityTimeout configures the minimum duration of silence (no data or
+// ACK received) before a backup-mode member is considered unstable. The
+// effective stability threshold is max(d, 2*SRTT + 4*RTTVar) per member, so
+// the value set here acts as a floor. When a member exceeds this threshold
+// without a response, the group's monitor loop transitions it from
+// [BackupActiveStable] to [BackupActiveUnstable], which may trigger failover
+// to a higher-weight standby link. The default is 1 second. This setting has
+// no effect in [GroupBroadcast] mode. This method is not safe for concurrent
+// use with Write; callers should set it before starting I/O.
 func (g *Group) SetStabilityTimeout(d time.Duration) {
 	g.stabTimeout = d
 }
 
-// AddConn adds an existing connected *Conn to the group.
-// token is a caller-chosen identifier for this member.
-// weight is the priority (higher = preferred for backup activation).
+// AddConn registers an already-connected [*Conn] as a member of the group and
+// starts a receive goroutine that fans packets into the group's shared receive
+// channel. token is a caller-chosen integer identifier that is stored with the
+// member and returned in [MemberInfo]; it can be any value meaningful to the
+// caller (e.g., a link index or path ID) and is not interpreted by the group.
+// weight sets the member's priority for backup mode activation: when a standby
+// link must be promoted, the highest-weight eligible member is chosen first.
+//
+// On addition the new member's TSBPD time base is synchronized with the
+// existing group members, and in [GroupBackup] or [GroupBroadcast] modes
+// the sender sequence number is aligned so that all members share a single
+// sequence space. If the group has no prior sequence, this member's ISN is
+// adopted as the group's scheduling sequence.
+//
+// Returns an error if the group is already closed or conn is nil.
+// This method is safe for concurrent use.
 func (g *Group) AddConn(conn *Conn, token int, weight uint16) error {
 	if g.closed.Load() {
 		return ErrGroupClosed
@@ -352,10 +371,17 @@ func (g *Group) AddConn(conn *Conn, token int, weight uint16) error {
 	return nil
 }
 
-// AddPendingConn adds a connection that is still completing its handshake
-// to the group as a pending member. The monitor loop will check whether
-// the handshake has completed or timed out, transitioning the member to
-// MemberIdle or MemberBroken accordingly.
+// AddPendingConn registers a connection whose handshake is still in progress
+// as a pending member of the group. Unlike [Group.AddConn], which expects an
+// already-connected [*Conn], this method records the member in [MemberPending]
+// status and lets the group's background monitor loop drive its lifecycle:
+// once the handshake completes, the monitor promotes the member to
+// [MemberIdle] and starts its receive goroutine; if the handshake does not
+// complete within pendingTimeout (5 s), the member is marked [MemberBroken]
+// and its connection is closed. token is a caller-chosen identifier for
+// locating this member later, and weight sets its backup-mode activation
+// priority (higher is preferred). Returns an error if the group is already
+// closed or conn is nil. This method is safe for concurrent use.
 func (g *Group) AddPendingConn(conn *Conn, token int, weight uint16) error {
 	if g.closed.Load() {
 		return ErrGroupClosed
@@ -385,8 +411,14 @@ func (g *Group) AddPendingConn(conn *Conn, token int, weight uint16) error {
 	return nil
 }
 
-// Connect dials a new SRT connection and adds it to the group.
-// token is a caller-chosen identifier; weight is the priority.
+// Connect dials a new SRT connection to addr using [Dial] with the given
+// [Config], and on success adds the resulting [*Conn] to the group via
+// [Group.AddConn]. This is a convenience method that combines dialing and
+// group membership in a single call. If the dial fails, the error is returned
+// and no member is added. token is a caller-chosen identifier that can be used
+// to locate this member in [Group.Members] output. weight sets the member's
+// priority for backup mode activation (higher values are preferred when
+// promoting a standby link). This method is safe for concurrent use.
 func (g *Group) Connect(addr string, cfg Config, token int, weight uint16) error {
 	if g.closed.Load() {
 		return ErrGroupClosed
@@ -494,7 +526,12 @@ func (g *Group) Close() error {
 	return firstErr
 }
 
-// Members returns current member state information.
+// Members returns a snapshot of every member connection's current state as a
+// slice of [MemberInfo] values. Each entry includes the caller-assigned token,
+// the member's lifecycle status, its backup state (meaningful only in
+// [GroupBackup] mode), its weight, local and remote addresses, and the most
+// recent RTT measurement. The returned slice is a copy; callers may read or
+// store it without synchronization. This method is safe for concurrent use.
 func (g *Group) Members() []MemberInfo {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -515,7 +552,12 @@ func (g *Group) Members() []MemberInfo {
 	return infos
 }
 
-// Stats returns aggregate group statistics.
+// Stats returns aggregate statistics for the group as a [GroupStats] value.
+// The returned struct includes the total member count, the number of members
+// in Running state, cumulative packets sent and received across all members,
+// and the number of duplicate packets discarded during receive deduplication.
+// Packet counters are read atomically and the member counts are read under
+// a read lock, so Stats is safe to call concurrently from any goroutine.
 func (g *Group) Stats() GroupStats {
 	g.mu.RLock()
 	total := len(g.members)
@@ -569,11 +611,11 @@ func (g *Group) writeBroadcast(b []byte) (int, error) {
 	if len(allMembers) > 0 {
 		srctime = allMembers[0].conn.CurrentSRTTimestamp()
 		for _, mc := range allMembers {
-			mc.conn.SetGroupSrcTime(srctime)
+			mc.conn.setGroupSrcTime(srctime)
 		}
 		defer func() {
 			for _, mc := range allMembers {
-				mc.conn.ClearGroupSrcTime()
+				mc.conn.clearGroupSrcTime()
 			}
 		}()
 	}
@@ -701,11 +743,11 @@ func (g *Group) writeBackup(b []byte) (int, error) {
 	if len(allBackupMembers) > 0 {
 		srctime = allBackupMembers[0].conn.CurrentSRTTimestamp()
 		for _, mc := range allBackupMembers {
-			mc.conn.SetGroupSrcTime(srctime)
+			mc.conn.setGroupSrcTime(srctime)
 		}
 		defer func() {
 			for _, mc := range allBackupMembers {
-				mc.conn.ClearGroupSrcTime()
+				mc.conn.clearGroupSrcTime()
 			}
 		}()
 	}
@@ -974,11 +1016,11 @@ func (g *Group) replaySenderBuf(mc *memberConn) {
 		// Preserve original source timestamp during replay so the receiver's
 		// TSBPD delivery timing matches the original send.
 		if msg.srcTime != 0 {
-			mc.conn.SetGroupSrcTime(msg.srcTime)
+			mc.conn.setGroupSrcTime(msg.srcTime)
 		}
 		mc.conn.Write(msg.data) //nolint:errcheck // best-effort replay
 		if msg.srcTime != 0 {
-			mc.conn.ClearGroupSrcTime()
+			mc.conn.clearGroupSrcTime()
 		}
 	}
 }

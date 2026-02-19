@@ -101,13 +101,9 @@ func (e *sndRateEstimator) getRate() (pktPerSec int64, bytesPerSec int64) {
 		totalBytes += e.slots[idx].bytes
 	}
 
-	// Each slot represents sndRateWindow duration
-	windowSec := float64(count) * sndRateWindow.Seconds()
-	if windowSec <= 0 {
-		return 0, 0
-	}
-
-	pktPerSec = int64(float64(totalPkts) / windowSec)
-	bytesPerSec = int64(float64(totalBytes) / windowSec)
+	// Each slot is sndRateWindow (100ms). Scale to per-second using integer arithmetic.
+	// rate = total / (count * 100ms) = total * 10 / count
+	pktPerSec = totalPkts * int64(sndRateNumSlots) / int64(count)
+	bytesPerSec = totalBytes * int64(sndRateNumSlots) / int64(count)
 	return pktPerSec, bytesPerSec
 }

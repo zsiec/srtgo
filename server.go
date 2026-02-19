@@ -142,7 +142,11 @@ func (s *Server) Serve() error {
 			conn.Close()
 			continue
 		}
-		mode := modeVal.(ConnType)
+		mode, ok := modeVal.(ConnType)
+		if !ok {
+			conn.Close()
+			continue
+		}
 
 		// Check shutdown under the lock before spawning a handler goroutine.
 		// This prevents wg.Add(1) racing with wg.Wait() in Shutdown().
@@ -163,6 +167,7 @@ func (s *Server) Serve() error {
 			defer s.wg.Done()
 			defer s.untrackConn(c)
 			defer c.Close()
+			defer s.recoverHandler()
 
 			switch m {
 			case Publish:
@@ -219,6 +224,16 @@ func (s *Server) untrackConn(c *Conn) {
 	s.activeConnsMu.Lock()
 	delete(s.activeConns, c)
 	s.activeConnsMu.Unlock()
+}
+
+// recoverHandler catches panics from user-supplied handler callbacks,
+// preventing a single misbehaving handler from crashing the process.
+func (s *Server) recoverHandler() {
+	if r := recover(); r != nil {
+		// Silently recover — the deferred c.Close() and untrackConn
+		// will still run because this defer was registered first.
+		// Users who need panic visibility should recover inside their handlers.
+	}
 }
 
 func (s *Server) config() Config {

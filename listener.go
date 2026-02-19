@@ -16,6 +16,12 @@ import (
 	"github.com/zsiec/srtgo/internal/seq"
 )
 
+// Listener internal constants.
+const (
+	listenerBacklog    = 128              // buffered channel capacity for accepted connections
+	concludedRetention = 10 * time.Second // how long to cache concluded handshake responses
+)
+
 // AcceptFunc is called for each incoming connection during the handshake.
 // It receives the connection request with the stream ID and peer address,
 // and returns whether to accept the connection.
@@ -133,7 +139,7 @@ func newListener(conn net.PacketConn, cfg Config, clk clock.Clock) (*Listener, e
 		clk:       clk,
 		pending:   make(map[uint32]*pendingConn),
 		concluded: make(map[uint32]*concludedConn),
-		backlog:   make(chan *Conn, 128),
+		backlog:   make(chan *Conn, listenerBacklog),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -158,6 +164,8 @@ func (l *Listener) Accept() (*Conn, error) {
 // SetAcceptFunc sets a callback that is invoked for each incoming connection.
 // If the callback returns false, the connection is rejected with RejPeer.
 // Must be called before any connections arrive.
+//
+// Deprecated: Use SetAcceptRejectFunc for finer-grained rejection codes.
 func (l *Listener) SetAcceptFunc(fn AcceptFunc) {
 	l.acceptMu.Lock()
 	l.acceptFn = fn
@@ -408,7 +416,7 @@ func (l *Listener) handleConclusion(p packet.Packet, hs *packet.CIFHandshake) {
 	negotiatedMSS := handshake.NegotiateMSS(hs.MaxTransmissionUnitSize, uint32(l.cfg.MSS))
 
 	// Verify effective payload size is usable
-	if int(negotiatedMSS)-44 < 32 {
+	if int(negotiatedMSS)-packet.WireHeaderSize < 32 {
 		l.sendRejection(callerAddr, hs, RejRogue)
 		p.Release()
 		return
@@ -721,7 +729,7 @@ func (l *Listener) handleConclusionV4(p packet.Packet, hs *packet.CIFHandshake) 
 	}
 
 	negotiatedMSS := handshake.NegotiateMSS(hs.MaxTransmissionUnitSize, uint32(l.cfg.MSS))
-	if int(negotiatedMSS)-44 < 32 {
+	if int(negotiatedMSS)-packet.WireHeaderSize < 32 {
 		l.sendRejection(callerAddr, hs, RejRogue)
 		p.Release()
 		return
@@ -853,10 +861,10 @@ func (l *Listener) cleanupPending() {
 	}
 	l.pendingMu.Unlock()
 
-	// Also clean up stale concluded responses (keep for 10s to handle retransmits)
+	// Also clean up stale concluded responses (keep for concludedRetention to handle retransmits)
 	l.concludedMu.Lock()
 	for id, cc := range l.concluded {
-		if now.Sub(cc.createdAt) > 10*time.Second {
+		if now.Sub(cc.createdAt) > concludedRetention {
 			cc.response.Release()
 			delete(l.concluded, id)
 		}

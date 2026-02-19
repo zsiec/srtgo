@@ -392,18 +392,17 @@ func TestFECDataTransferWithStats(t *testing.T) {
 		}
 	}
 
-	// Give time for packets to be sent and processed
-	time.Sleep(100 * time.Millisecond)
-
-	// Check sender stats: 10 data packets = 2 row FEC packets (at packet 5 and 10)
-	clientStats := clientConn.Stats(false)
-	if clientStats.SndFilterExtra == 0 {
-		t.Error("SndFilterExtra should be > 0 after sending 10 packets with cols:5")
+	// Wait for FEC packets to be sent and processed
+	if !waitFor(t, 500*time.Millisecond, func() bool {
+		return clientConn.Stats(false).SndFilterExtra > 0
+	}) {
+		t.Fatal("timed out waiting for SndFilterExtra > 0")
 	}
 
 	// Check receiver stats: FEC control packets received
-	serverStats := serverConn.Stats(false)
-	if serverStats.RcvFilterExtra == 0 {
+	if !waitFor(t, 500*time.Millisecond, func() bool {
+		return serverConn.Stats(false).RcvFilterExtra > 0
+	}) {
 		t.Error("RcvFilterExtra should be > 0 after receiving FEC packets")
 	}
 }

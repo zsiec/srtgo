@@ -668,16 +668,14 @@ func TestGroupPendingTransitionsToIdle(t *testing.T) {
 	}
 
 	// Wait for the monitor loop to pick it up (runs every 100ms).
-	time.Sleep(250 * time.Millisecond)
-
+	if !waitFor(t, 500*time.Millisecond, func() bool {
+		return g.Members()[0].Status != MemberPending
+	}) {
+		t.Errorf("Status after monitor: still pending, expected idle or running")
+	}
 	members = g.Members()
 	if len(members) == 0 {
 		t.Fatal("No members found after monitor cycle")
-	}
-	// The member should no longer be pending. It will be either Idle or Running
-	// (Running if the monitor further activated it as the best standby).
-	if members[0].Status == MemberPending {
-		t.Errorf("Status after monitor: still pending, expected idle or running")
 	}
 	if members[0].Status == MemberBroken {
 		t.Errorf("Status after monitor: broken, expected idle or running")
@@ -882,8 +880,9 @@ func TestConnIsConnected(t *testing.T) {
 
 	// After closing, should report not connected.
 	client.Close()
-	time.Sleep(50 * time.Millisecond)
-	if client.isConnected() {
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		return !client.isConnected()
+	}) {
 		t.Error("isConnected: expected false after Close")
 	}
 }
@@ -1217,13 +1216,14 @@ func TestGroupFindActive(t *testing.T) {
 
 	// Write to activate
 	g.Write([]byte("test"))
-	time.Sleep(50 * time.Millisecond)
 
 	// Now there should be an active member
-	g.mu.Lock()
-	active = g.findActive()
-	g.mu.Unlock()
-	if active == nil {
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		g.mu.Lock()
+		a := g.findActive()
+		g.mu.Unlock()
+		return a != nil
+	}) {
 		t.Error("findActive should return non-nil after Write activates member")
 	}
 }
@@ -1953,18 +1953,18 @@ func TestGroupWriteBroadcast_AllBroken(t *testing.T) {
 
 	// Write once to activate both members while still connected
 	g.Write([]byte("activate"))
-	time.Sleep(50 * time.Millisecond)
 
 	// Now close both server sides to break connections
 	s1.Close()
 	s2.Close()
 	c1.Close()
 	c2.Close()
-	time.Sleep(100 * time.Millisecond)
 
 	// Write should fail with all members broken
-	_, err := g.Write([]byte("should fail"))
-	if err == nil {
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		_, err := g.Write([]byte("should fail"))
+		return err != nil
+	}) {
 		t.Error("Write with all broken members should return error")
 	}
 }
@@ -1994,16 +1994,16 @@ func TestGroupWriteBackup_AllBroken(t *testing.T) {
 
 	// Write once to activate
 	g.Write([]byte("activate"))
-	time.Sleep(50 * time.Millisecond)
 
 	// Break the connection
 	s1.Close()
 	c1.Close()
-	time.Sleep(50 * time.Millisecond)
 
 	// Write should fail
-	_, err := g.Write([]byte("should fail"))
-	if err == nil {
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		_, err := g.Write([]byte("should fail"))
+		return err != nil
+	}) {
 		t.Error("Write with all broken backup members should return error")
 	}
 }

@@ -7,8 +7,8 @@ import (
 )
 
 // bufferStatsState holds the IIR-8 moving average state for buffer occupancy
-// tracking,AvgBufSize. It also includes the
-// send rate estimator ( for per-100ms send rate tracking.
+// tracking (matching C++ buffer_tools.h AvgBufSize). It also includes the
+// send rate estimator for per-100ms send rate tracking.
 //
 // Stored directly as a field on Conn (c.bufStats) to avoid sync.Map overhead
 // on the per-packet send path. All fields are protected by mu.
@@ -145,9 +145,8 @@ func (c *Conn) AvgRcvBufBytes() float64 {
 }
 
 // ExtendedStats returns an ExtendedConnStats containing the base ConnStats plus
-// the additional buffer and send rate statistics from the IIR filter and
-// This should be used when the caller needs the extended
-// stats that are not in the base ConnStats struct.
+// additional buffer occupancy averages and send rate statistics.
+// When clear is true, interval counters are reset (same as Stats).
 func (c *Conn) ExtendedStats(clear bool) ExtendedConnStats {
 	// Update buffer IIR averages before collecting stats
 	c.updateBufferIIR()
@@ -169,7 +168,7 @@ func (c *Conn) ExtendedStats(clear bool) ExtendedConnStats {
 }
 
 // ExtendedConnStats extends ConnStats with buffer IIR averages and send rate.
-// These fields match buffer_tools.h AvgBufSize and
+// These fields match C++ buffer_tools.h AvgBufSize and CSndRateEstimator.
 type ExtendedConnStats struct {
 	ConnStats
 

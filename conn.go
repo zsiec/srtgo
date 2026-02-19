@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -14,11 +15,17 @@ import (
 	"github.com/zsiec/srtgo/internal/congestion"
 	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/filter"
-	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/mux"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
 	"github.com/zsiec/srtgo/internal/tsbpd"
+)
+
+// Compile-time interface satisfaction checks.
+var (
+	_ net.Conn  = (*Conn)(nil)
+	_ io.Reader = (*Conn)(nil)
+	_ io.Writer = (*Conn)(nil)
 )
 
 // Connection timing constants
@@ -188,10 +195,11 @@ type Conn struct {
 	rttVar          atomic.Int64  // RTT variance in microseconds
 	lastACKRecv     atomic.Int64  // UnixNano timestamp of last ACK received (for RTO)
 	rexmitCount     atomic.Int32  // linear backoff for RTO, reset to 1 on ACK
-	ackSendTime     sync.Map      // map[uint32]ackSendInfo — ACK seq → {send time, data seqno} for RTT + ACKACK tracking
-	sndLossCount    atomic.Int64  // outstanding loss count (approximate sender loss list length)
-	flowWindowSize  atomic.Int32  // dynamic flow window from receiver's available buffer (0 = use FC)
-	bufferWasFull   atomic.Bool   // forces Full ACK when buffer transitions from full to available
+	ackSendTimeMu   sync.Mutex
+	ackSendTime     map[uint32]ackSendInfo // ACK seq → {send time, data seqno} for RTT + ACKACK tracking
+	sndLossCount    atomic.Int64           // outstanding loss count (approximate sender loss list length)
+	flowWindowSize  atomic.Int32           // dynamic flow window from receiver's available buffer (0 = use FC)
+	bufferWasFull   atomic.Bool            // forces Full ACK when buffer transitions from full to available
 
 	// Deadlines
 	readDeadline  atomic.Value // time.Time
@@ -530,6 +538,7 @@ func newConn(cfg ConnConfig) *Conn {
 		periodicNAK: !isFileMode && cfg.NAKReport, // disabled for file mode
 		peerNakReport:    cfg.PeerNakReport,
 		retransmitAlgo:   cfg.RetransmitAlgo,
+		ackSendTime:      make(map[uint32]ackSendInfo),
 
 		recvBuf:    buffer.NewRecvBuffer(cfg.RecvBufSize, cfg.RecvISN),
 		recvISN:    cfg.RecvISN,
@@ -667,14 +676,14 @@ func (c *Conn) ApplyGroupTime(tb tsbpd.GroupTimeBase) {
 	}
 }
 
-// SetGroupSrcTime sets the group-coordinated source timestamp for the next Write.
+// setGroupSrcTime sets the group-coordinated source timestamp for the next Write.
 // All members of a group should be set to the same srctime before calling Write.
-func (c *Conn) SetGroupSrcTime(ts uint32) {
+func (c *Conn) setGroupSrcTime(ts uint32) {
 	c.groupSrcTime.Store(ts)
 }
 
-// ClearGroupSrcTime clears the group source timestamp so Write uses real time.
-func (c *Conn) ClearGroupSrcTime() {
+// clearGroupSrcTime clears the group source timestamp so Write uses real time.
+func (c *Conn) clearGroupSrcTime() {
 	c.groupSrcTime.Store(0)
 }
 
@@ -1356,6 +1365,21 @@ func (c *Conn) nextMessageNumber() uint32 {
 	return c.messageNumber
 }
 
+// awaitLinger waits for the send buffer to drain (via ACKs from the peer)
+// or for the linger deadline to expire, whichever comes first.
+func (c *Conn) awaitLinger() {
+	deadline := time.NewTimer(c.linger)
+	defer deadline.Stop()
+	for c.sendBuf.Size() > 0 {
+		select {
+		case <-deadline.C:
+			return
+		case <-c.writeReady:
+			// ACK received — check again
+		}
+	}
+}
+
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		// Check if this Close is due to peer shutdown or connection timeout.
@@ -1367,19 +1391,9 @@ func (c *Conn) Close() error {
 		// Linger: wait for send buffer to drain (ACKs from peer).
 		// Skip if the peer has already shut down — no ACKs will arrive.
 		if !peerGone && c.linger > 0 && c.sendBuf.Size() > 0 {
-			deadline := time.NewTimer(c.linger)
-			defer deadline.Stop()
-			for c.sendBuf.Size() > 0 {
-				select {
-				case <-deadline.C:
-					goto shutdown
-				case <-c.writeReady:
-					// ACK received — check again
-				}
-			}
+			c.awaitLinger()
 		}
 
-	shutdown:
 		// Send shutdown control packet (skip if peer already gone or ID unknown)
 		if !peerGone && c.peerSocketID != 0 {
 			p := packet.NewControl(c.remoteAddr, packet.CtrlTypeShutdown, c.peerSocketID, c.clk.Now().SRTTimestamp())
@@ -1505,445 +1519,6 @@ func (c *Conn) SetMaxBW(bw int64) {
 	}
 	// Note: re-enabling inputRateEnabled for bw==0 is handled by the existing
 	// auto-rate logic in the timerLoop which checks inputRateEnabled.
-}
-
-// Stats returns connection statistics. If clear is true, the returned stats
-// represent the interval since the last clear=true call, and internal interval
-// counters are reset. If clear is false, cumulative totals are returned.
-// This matches the srt_bistats(sock, &perf, clear, instantaneous) API.
-func (c *Conn) Stats(clear bool) ConnStats {
-	stats := c.buildTotalStats()
-
-	if clear {
-		c.statsMu.Lock()
-		interval := c.computeInterval(stats)
-		c.updateSnapshot(stats)
-		c.statsMu.Unlock()
-		return interval
-	}
-	return stats
-}
-
-// headerOverhead is the combined IP + UDP + SRT header size per packet.
-const headerOverhead = 44
-
-// buildTotalStats computes cumulative totals from atomic counters.
-func (c *Conn) buildTotalStats() ConnStats {
-	bw := c.sendCC.EstimatedBandwidth()
-	pktRate, _ := c.sendCC.DeliveryRate()
-	flightSize := c.flightSize()
-
-	sentPackets := c.sentPackets.Load()
-	sentBytes := c.sentBytes.Load()
-	retransmits := c.retransCount.Load()
-	retransBytes := c.retransBytes.Load()
-	recvPackets := c.recvPackets.Load()
-	recvBytes := c.recvBytes.Load()
-	recvRetrans := c.recvRetrans.Load()
-	recvRetransBytes := c.recvRetransBytes.Load()
-	lostPackets := c.lostPackets.Load()
-	recvLoss := c.recvLoss.Load()
-	recvDropped := c.recvDropped.Load()
-	recvDroppedBytes := c.recvDroppedBytes.Load()
-	sentDropped := c.sentDropped.Load()
-	sentDroppedBytes := c.sentDroppedBytes.Load()
-	recvBelated := c.recvBelated.Load()
-	recvBelatedBytes := c.recvBelatedBytes.Load()
-	recvUndecrypt := c.recvUndecrypt.Load()
-	recvUndecryptBytes := c.recvUndecryptBytes.Load()
-
-	// Unique vs retransmit breakdown
-	sentUniquePackets := sentPackets - retransmits
-	sentUniqueBytes := sentBytes - retransBytes
-	recvUniquePackets := recvPackets - recvRetrans
-	recvUniqueBytes := recvBytes - recvRetransBytes
-
-	// Loss rates (as percentages)
-	var sendLossRate float64
-	if sentPackets > 0 {
-		sendLossRate = float64(lostPackets) / float64(sentPackets) * 100
-	}
-	var recvLossRate float64
-	if total := recvPackets + recvDropped; total > 0 {
-		recvLossRate = float64(recvDropped) / float64(total) * 100
-	}
-
-	// Total bytes including header overhead per packet (matches byteSentTotal semantics)
-	h := uint64(headerOverhead)
-	sentTotalBytes := sentBytes + sentPackets*h
-	recvTotalBytes := recvBytes + recvPackets*h
-
-	// RTT factor
-	rtt := time.Duration(c.rtt.Load()) * time.Microsecond
-	latency := c.tsbpdDelay.Duration()
-	var rttFactor float64
-	if latency > 0 {
-		rttFactor = float64(rtt) / float64(latency)
-	}
-
-	// Buffer state
-	sendBufSize := c.sendBuf.Size()
-	recvBufSize := c.recvBuf.Size()
-
-	// Send buffer age: time since oldest unacked packet was sent
-	var msSndBuf time.Duration
-	if oldest := c.sendBuf.OldestSendTime(); !oldest.IsZero() {
-		msSndBuf = c.clk.Now().Sub(oldest).Duration()
-	}
-
-	// Recv buffer timespan estimate: recvBufSize packets at the negotiated pacing rate
-	var msRcvBuf time.Duration
-	if pktRate > 0 && recvBufSize > 0 {
-		msRcvBuf = time.Duration(float64(recvBufSize)/float64(pktRate)*1e9) * time.Nanosecond
-	}
-
-	// Instantaneous congestion controller metrics
-	sndPeriod := float64(c.sendCC.PacketInterval())
-	maxBW := float64(c.sendCC.MaxBandwidth()) * 8 / 1_000_000 // bytes/sec → Mbps
-
-	// Sender duration: accumulated + currently pending busy span
-	sndDuration := c.sndDurationUs.Load()
-	if busySince := c.sndBusySince.Load(); busySince != 0 {
-		pending := c.clk.Now().Sub(clock.Timestamp(busySince))
-		sndDuration += int64(pending)
-	}
-
-	// Average belated arrival time (EWMA)
-	avgBelatedTime := time.Duration(c.recvBelatedTimeAvg.Load()) * time.Microsecond
-
-	// Key management state: tracked atomically/ m_RcvKmState.
-	// Values: 0=unsecured, 1=securing, 2=secured, 3=nosecret, 4=badsecret, 5=badcryptomode
-	sndKmState := int(c.sndKmState.Load())
-	rcvKmState := int(c.rcvKmState.Load())
-
-	return ConnStats{
-		StartTime:               c.startTime,
-		Duration:                time.Since(c.startTime),
-		SentPackets:             sentPackets,
-		SentBytes:               sentBytes,
-		SentUniquePackets:       sentUniquePackets,
-		SentUniqueBytes:         sentUniqueBytes,
-		Retransmits:             retransmits,
-		RetransBytes:            retransBytes,
-		RecvPackets:             recvPackets,
-		RecvBytes:               recvBytes,
-		RecvUniquePackets:       recvUniquePackets,
-		RecvUniqueBytes:         recvUniqueBytes,
-		RecvRetrans:             recvRetrans,
-		RecvRetransBytes:        recvRetransBytes,
-		LostPackets:             lostPackets,
-		RecvLoss:                recvLoss,
-		SendLossRate:            sendLossRate,
-		RecvLossRate:            recvLossRate,
-		SentTotalBytes:          sentTotalBytes,
-		RecvTotalBytes:          recvTotalBytes,
-		SentUniqueTotalBytes:    sentUniqueBytes + sentUniquePackets*h,
-		RecvUniqueTotalBytes:    recvUniqueBytes + recvUniquePackets*h,
-		RecvLossBytes:           recvLoss * (uint64(c.payloadSize) + h),
-		RetransTotalBytes:       retransBytes + retransmits*h,
-		RecvRetransTotalBytes:   recvRetransBytes + recvRetrans*h,
-		SentDropTotalBytes:      sentDroppedBytes + sentDropped*h,
-		RecvDropTotalBytes:      recvDroppedBytes + recvDropped*h,
-		RecvBelatedTotalBytes:   recvBelatedBytes + recvBelated*h,
-		RecvUndecryptTotalBytes: recvUndecryptBytes + recvUndecrypt*h,
-		RTT:                     rtt,
-		RTTVar:                  time.Duration(c.rttVar.Load()) * time.Microsecond,
-		RTTFactor:               rttFactor,
-		FlowWindow:              c.currentFlowWindow(),
-		FlightSize:              flightSize,
-		SendBufSize:             sendBufSize,
-		SendBufAvailable:        c.sendBuf.Available(),
-		SendBufBytes:            sendBufSize * c.payloadSize,
-		RecvBufSize:             recvBufSize,
-		RecvBufAvailable:        c.recvBuf.Capacity() - recvBufSize,
-		RecvBufBytes:            recvBufSize * c.payloadSize,
-		NegotiatedLatency:       latency,
-		PacketReceiveRate:       pktRate,
-		EstimatedBandwidth:      bw,
-		UsPktSndPeriod:          sndPeriod,
-		MbpsMaxBW:               maxBW,
-		MsSndBuf:                msSndBuf,
-		MsRcvBuf:                msRcvBuf,
-		SentACKs:                c.sentACKs.Load(),
-		SentNAKs:                c.sentNAKs.Load(),
-		SentACKACKs:             c.sentACKACKs.Load(),
-		RecvACKs:                c.recvACKs.Load(),
-		RecvNAKs:                c.recvNAKs.Load(),
-		RecvACKACKs:             c.recvACKACKs.Load(),
-		RecvDropped:             recvDropped,
-		RecvDroppedBytes:        recvDroppedBytes,
-		RecvBelated:             recvBelated,
-		RecvBelatedBytes:        recvBelatedBytes,
-		RecvUndecrypt:           recvUndecrypt,
-		RecvUndecryptBytes:      recvUndecryptBytes,
-		SentDropped:             sentDropped,
-		SentDroppedBytes:        sentDroppedBytes,
-		SentKM:                  c.sentKM.Load(),
-		RecvKM:                  c.recvKM.Load(),
-		SndKmState:              sndKmState,
-		RcvKmState:              rcvKmState,
-		UsSndDuration:           sndDuration,
-		CongestionWindow:        c.sendCC.CongestionWindow(),
-		ReorderTolerance:        int32(c.reorderTolerance),
-		ReorderDistance:         c.reorderDistance.Load(),
-		RcvAvgBelatedTime:       avgBelatedTime,
-		SndFilterExtra:          c.sndFilterExtra.Load(),
-		RcvFilterExtra:          c.rcvFilterExtra.Load(),
-		RcvFilterSupply:         c.rcvFilterSupply.Load(),
-		RcvFilterLoss:           c.rcvFilterLoss.Load(),
-		NegotiatedMSS:           c.payloadSize + headerOverhead,
-		NegotiatedFC:            c.fc,
-		MsSndTsbPdDelay:         c.peerTsbpdDelay.Duration(),
-		MsRcvTsbPdDelay:         latency,
-	}
-}
-
-// computeInterval returns the difference between current stats and the last snapshot.
-// Cumulative counters are subtracted; instantaneous fields are copied as-is.
-func (c *Conn) computeInterval(current ConnStats) ConnStats {
-	last := c.lastSnapshot
-
-	// Compute interval bitrates (Mbps) from delta bytes and elapsed time
-	elapsed := current.Duration - last.Duration
-	var mbpsSend, mbpsRecv float64
-	if elapsed > 0 {
-		sec := elapsed.Seconds()
-		mbpsSend = float64(current.SentTotalBytes-last.SentTotalBytes) * 8 / 1_000_000 / sec
-		mbpsRecv = float64(current.RecvTotalBytes-last.RecvTotalBytes) * 8 / 1_000_000 / sec
-	}
-
-	return ConnStats{
-		StartTime: current.StartTime,
-		Duration:  current.Duration,
-		// Cumulative counter deltas
-		SentPackets:             current.SentPackets - last.SentPackets,
-		SentBytes:               current.SentBytes - last.SentBytes,
-		SentUniquePackets:       current.SentUniquePackets - last.SentUniquePackets,
-		SentUniqueBytes:         current.SentUniqueBytes - last.SentUniqueBytes,
-		Retransmits:             current.Retransmits - last.Retransmits,
-		RetransBytes:            current.RetransBytes - last.RetransBytes,
-		RecvPackets:             current.RecvPackets - last.RecvPackets,
-		RecvBytes:               current.RecvBytes - last.RecvBytes,
-		RecvUniquePackets:       current.RecvUniquePackets - last.RecvUniquePackets,
-		RecvUniqueBytes:         current.RecvUniqueBytes - last.RecvUniqueBytes,
-		RecvRetrans:             current.RecvRetrans - last.RecvRetrans,
-		RecvRetransBytes:        current.RecvRetransBytes - last.RecvRetransBytes,
-		LostPackets:             current.LostPackets - last.LostPackets,
-		RecvLoss:                current.RecvLoss - last.RecvLoss,
-		SendLossRate:            current.SendLossRate, // instantaneous rate
-		RecvLossRate:            current.RecvLossRate, // instantaneous rate
-		SentTotalBytes:          current.SentTotalBytes - last.SentTotalBytes,
-		RecvTotalBytes:          current.RecvTotalBytes - last.RecvTotalBytes,
-		SentUniqueTotalBytes:    current.SentUniqueTotalBytes - last.SentUniqueTotalBytes,
-		RecvUniqueTotalBytes:    current.RecvUniqueTotalBytes - last.RecvUniqueTotalBytes,
-		RecvLossBytes:           current.RecvLossBytes - last.RecvLossBytes,
-		RetransTotalBytes:       current.RetransTotalBytes - last.RetransTotalBytes,
-		RecvRetransTotalBytes:   current.RecvRetransTotalBytes - last.RecvRetransTotalBytes,
-		SentDropTotalBytes:      current.SentDropTotalBytes - last.SentDropTotalBytes,
-		RecvDropTotalBytes:      current.RecvDropTotalBytes - last.RecvDropTotalBytes,
-		RecvBelatedTotalBytes:   current.RecvBelatedTotalBytes - last.RecvBelatedTotalBytes,
-		RecvUndecryptTotalBytes: current.RecvUndecryptTotalBytes - last.RecvUndecryptTotalBytes,
-		MbpsSendRate:            mbpsSend,
-		MbpsRecvRate:            mbpsRecv,
-		// Instantaneous fields — copied as-is
-		RTT:                current.RTT,
-		RTTVar:             current.RTTVar,
-		RTTFactor:          current.RTTFactor,
-		FlowWindow:         current.FlowWindow,
-		FlightSize:         current.FlightSize,
-		SendBufSize:        current.SendBufSize,
-		SendBufAvailable:   current.SendBufAvailable,
-		SendBufBytes:       current.SendBufBytes,
-		RecvBufSize:        current.RecvBufSize,
-		RecvBufAvailable:   current.RecvBufAvailable,
-		RecvBufBytes:       current.RecvBufBytes,
-		NegotiatedLatency:  current.NegotiatedLatency,
-		PacketReceiveRate:  current.PacketReceiveRate,
-		EstimatedBandwidth: current.EstimatedBandwidth,
-		UsPktSndPeriod:     current.UsPktSndPeriod,
-		MbpsMaxBW:          current.MbpsMaxBW,
-		MsSndBuf:           current.MsSndBuf,
-		MsRcvBuf:           current.MsRcvBuf,
-		// Control counter deltas
-		SentACKs:           current.SentACKs - last.SentACKs,
-		SentNAKs:           current.SentNAKs - last.SentNAKs,
-		SentACKACKs:        current.SentACKACKs - last.SentACKACKs,
-		RecvACKs:           current.RecvACKs - last.RecvACKs,
-		RecvNAKs:           current.RecvNAKs - last.RecvNAKs,
-		RecvACKACKs:        current.RecvACKACKs - last.RecvACKACKs,
-		RecvDropped:        current.RecvDropped - last.RecvDropped,
-		RecvDroppedBytes:   current.RecvDroppedBytes - last.RecvDroppedBytes,
-		RecvBelated:        current.RecvBelated - last.RecvBelated,
-		RecvBelatedBytes:   current.RecvBelatedBytes - last.RecvBelatedBytes,
-		RecvUndecrypt:      current.RecvUndecrypt - last.RecvUndecrypt,
-		RecvUndecryptBytes: current.RecvUndecryptBytes - last.RecvUndecryptBytes,
-		SentDropped:        current.SentDropped - last.SentDropped,
-		SentDroppedBytes:   current.SentDroppedBytes - last.SentDroppedBytes,
-		SentKM:             current.SentKM - last.SentKM,
-		RecvKM:             current.RecvKM - last.RecvKM,
-		SndKmState:         current.SndKmState,
-		RcvKmState:         current.RcvKmState,
-		UsSndDuration:      current.UsSndDuration - last.UsSndDuration,
-		CongestionWindow:   current.CongestionWindow,
-		ReorderTolerance:   current.ReorderTolerance,
-		ReorderDistance:    current.ReorderDistance,
-		RcvAvgBelatedTime:  current.RcvAvgBelatedTime,
-		NegotiatedMSS:      current.NegotiatedMSS,
-		NegotiatedFC:       current.NegotiatedFC,
-		MsSndTsbPdDelay:    current.MsSndTsbPdDelay,
-		MsRcvTsbPdDelay:    current.MsRcvTsbPdDelay,
-	}
-}
-
-// updateSnapshot saves the current stats as the baseline for next interval.
-func (c *Conn) updateSnapshot(current ConnStats) {
-	c.lastSnapshot = current
-}
-
-// statsCallbackState holds the registered stats callback and its interval.
-type statsCallbackState struct {
-	fn       func(ConnStats)
-	interval time.Duration
-}
-
-// OnStats registers a callback invoked periodically with connection statistics.
-// The callback receives interval stats (equivalent to Stats(true)).
-// Pass 0 interval to use the default (1 second). Call with nil fn to unregister.
-func (c *Conn) OnStats(interval time.Duration, fn func(ConnStats)) {
-	if fn == nil {
-		c.statsCallback.Store(nil)
-		return
-	}
-	if interval <= 0 {
-		interval = time.Second
-	}
-	state := &statsCallbackState{fn: fn, interval: interval}
-	c.statsCallback.Store(state)
-}
-
-// ConnStats contains connection statistics
-// Byte fields suffixed with "Total" include IP/UDP/SRT header overhead (44 bytes/pkt).
-// Payload-only byte fields omit headers.
-type ConnStats struct {
-	// Timing
-	StartTime time.Time     // connection creation time
-	Duration  time.Duration // time since connection start
-
-	// Sent packet/byte counters
-	SentPackets       uint64 // total DATA packets sent (including retransmissions)
-	SentBytes         uint64 // payload bytes sent
-	SentUniquePackets uint64 // unique DATA packets sent (SentPackets - Retransmits)
-	SentUniqueBytes   uint64 // payload bytes for unique sends
-	Retransmits       uint64 // retransmitted packets sent
-	RetransBytes      uint64 // payload bytes for retransmitted packets
-
-	// Received packet/byte counters
-	RecvPackets       uint64 // total DATA packets received (including retransmissions)
-	RecvBytes         uint64 // payload bytes received
-	RecvUniquePackets uint64 // unique DATA packets received (RecvPackets - RecvRetrans)
-	RecvUniqueBytes   uint64 // payload bytes for unique receives
-	RecvRetrans       uint64 // retransmitted packets received
-	RecvRetransBytes  uint64 // payload bytes of retransmitted packets received
-
-	// Loss
-	LostPackets  uint64  // packets reported as lost at sender side (from NAKs)
-	RecvLoss     uint64  // packets detected as missing at receiver side (gap detection)
-	SendLossRate float64 // LostPackets / SentPackets * 100
-	RecvLossRate float64 // RecvDropped / (RecvPackets + RecvDropped) * 100
-
-	// Total bytes including IP/UDP/SRT header overhead (44 bytes per packet)
-	// These match byteSentTotal/byteRecvTotal semantics.
-	SentTotalBytes          uint64 // payload + headers for all sent packets
-	RecvTotalBytes          uint64 // payload + headers for all received packets
-	SentUniqueTotalBytes    uint64 // payload + headers for unique sent packets
-	RecvUniqueTotalBytes    uint64 // payload + headers for unique received packets
-	RecvLossBytes           uint64 // estimated bytes for lost packets (pkt count * avg payload + headers)
-	RetransTotalBytes       uint64 // payload + headers for retransmitted packets
-	RecvRetransTotalBytes   uint64 // payload + headers for received retransmissions
-	SentDropTotalBytes      uint64 // payload + headers for sender-dropped packets
-	RecvDropTotalBytes      uint64 // payload + headers for receiver-dropped packets
-	RecvBelatedTotalBytes   uint64 // payload + headers for belated packets
-	RecvUndecryptTotalBytes uint64 // payload + headers for undecrypted packets
-
-	// Bitrates (interval mode: computed from interval bytes/duration)
-	MbpsSendRate float64 // send bitrate in Mbps
-	MbpsRecvRate float64 // receive bitrate in Mbps
-
-	// RTT
-	RTT       time.Duration
-	RTTVar    time.Duration
-	RTTFactor float64 // RTT / NegotiatedLatency
-
-	// Flight and buffer state
-	FlowWindow       int // flow window size in packets
-	FlightSize       int // packets in flight (sent but not ACK'd)
-	SendBufSize      int // packets in send buffer
-	SendBufAvailable int // free slots in send buffer
-	SendBufBytes     int // estimated payload bytes in send buffer
-	RecvBufSize      int // packets in receive buffer
-	RecvBufAvailable int // free slots in receive buffer
-	RecvBufBytes     int // estimated payload bytes in receive buffer
-
-	// Instantaneous measurements
-	NegotiatedLatency  time.Duration // negotiated TSBPD delay
-	PacketReceiveRate  uint32        // packets/sec
-	EstimatedBandwidth uint32        // probe link capacity (packets/sec)
-	UsPktSndPeriod     float64       // inter-packet send period in μs
-	MbpsMaxBW          float64       // configured max bandwidth in Mbps
-	MsSndBuf           time.Duration // age of oldest unacked packet in send buffer
-	MsRcvBuf           time.Duration // timespan of data in receive buffer
-
-	// Control packet counters
-	SentACKs    uint64
-	SentNAKs    uint64
-	SentACKACKs uint64
-	RecvACKs    uint64
-	RecvNAKs    uint64
-	RecvACKACKs uint64
-
-	// Receiver-side counters
-	RecvDropped        uint64 // packets dropped due to too-late arrival
-	RecvDroppedBytes   uint64 // payload bytes of receiver-dropped packets
-	RecvBelated        uint64 // packets arrived after already dropped/ACK'd
-	RecvBelatedBytes   uint64 // payload bytes of belated packets
-	RecvUndecrypt      uint64 // packets that failed decryption
-	RecvUndecryptBytes uint64 // payload bytes of undecrypted packets
-
-	// Sender-side counters
-	SentDropped      uint64 // packets dropped from send buffer (too late)
-	SentDroppedBytes uint64 // payload bytes of sender-dropped packets
-
-	// Key management counters
-	SentKM uint64 // KMREQ packets sent
-	RecvKM uint64 // KMREQ/KMRSP packets received
-
-	// Key management state (matches m_SndKmState / m_RcvKmState)
-	// 0=unsecured, 1=securing, 2=secured, 3=nosecret, 4=badsecret, 5=badcryptomode
-	SndKmState int
-	RcvKmState int
-
-	// Sender duration and congestion
-	UsSndDuration    int64 // accumulated microseconds sender had data to transmit
-	CongestionWindow int   // congestion window in packets (= FC for live mode)
-
-	// Reorder tracking
-	ReorderTolerance int32 // configured reorder tolerance (packets)
-	ReorderDistance  int32 // maximum observed reorder distance (packets)
-
-	// Belated arrival timing
-	RcvAvgBelatedTime time.Duration // average lateness of belated packets
-
-	// FEC statistics
-	SndFilterExtra  uint64 // FEC control packets sent
-	RcvFilterExtra  uint64 // FEC control packets received
-	RcvFilterSupply uint64 // packets recovered by FEC
-	RcvFilterLoss   uint64 // irrecoverable losses reported to ARQ
-
-	// Negotiated parameters
-	NegotiatedMSS   int           // negotiated maximum segment size
-	NegotiatedFC    int           // negotiated flow control window
-	MsSndTsbPdDelay time.Duration // peer's TSBPD delay (sender side,
-	MsRcvTsbPdDelay time.Duration // local TSBPD delay (receiver side,
 }
 
 // ---- Internal goroutines ----
@@ -2727,12 +2302,15 @@ func (c *Conn) handleACKACK(p packet.Packet) {
 	// ACKACK echoes the ACK sequence number in TypeSpecific.
 	// RTT = now - time_when_ACK_was_sent
 	ackSeqNo := p.Header.TypeSpecific
-	v, ok := c.ackSendTime.LoadAndDelete(ackSeqNo)
+	c.ackSendTimeMu.Lock()
+	info, ok := c.ackSendTime[ackSeqNo]
+	if ok {
+		delete(c.ackSendTime, ackSeqNo)
+	}
+	c.ackSendTimeMu.Unlock()
 	if !ok {
 		return // unknown ACK sequence — stale or duplicate
 	}
-
-	info := v.(ackSendInfo)
 
 	//: update (highest confirmed data seqno)
 	// Used by sendFullACK to suppress redundant ACKs when no new data.
@@ -3024,7 +2602,9 @@ func (c *Conn) sendFullACK() {
 	c.sentACKs.Add(1)
 
 	// Record send time + data seqno for RTT measurement and ACKACK tracking
-	c.ackSendTime.Store(ackNo, ackSendInfo{sendTime: now, dataSeq: ackSeq.Value()})
+	c.ackSendTimeMu.Lock()
+	c.ackSendTime[ackNo] = ackSendInfo{sendTime: now, dataSeq: ackSeq.Value()}
+	c.ackSendTimeMu.Unlock()
 
 	//: track whether buffer is full for next ACK decision.
 	c.bufferWasFull.Store(availSpace == 0)
@@ -3273,312 +2853,6 @@ func (c *Conn) sendKeepAlive() {
 // Used by the keepalive timer to avoid redundant keepalives during active send.
 func (c *Conn) updateLastSndTime() {
 	c.lastSndTime.Store(time.Now().UnixNano())
-}
-
-// ---- Key Rotation ----
-
-// oppositeKey returns the other encryption key slot.
-func oppositeKey(k packet.PacketEncryption) packet.PacketEncryption {
-	if k == packet.EncryptionEven {
-		return packet.EncryptionOdd
-	}
-	return packet.EncryptionEven
-}
-
-// srtMaxKMRetry is the maximum number of KMREQ retransmissions.
-const srtMaxKMRetry = 10
-
-// checkKeyRotation is called after each encrypted packet send.
-// Three phases:
-//  1. Pre-announce: generate new key, send KMREQ (retry via RTT-based timer)
-//  2. Refresh: switch active key, mark old for decommission
-//  3. Decommission: clear deprecated key after preAnnounce packets
-func (c *Conn) checkKeyRotation() {
-	c.kmPacketCount++
-
-	// Pre-announce: generate new key and send KMREQ
-	preAnnounceAt := c.kmRefreshRate - c.kmPreAnnounce
-	if c.kmPacketCount == preAnnounceAt && !c.kmAnnounced {
-		nextKey := oppositeKey(c.activeKey)
-		if err := c.cryptoCtx.GenerateSEK(nextKey); err != nil {
-			return
-		}
-		c.sendKMREQ(packet.EncryptionBoth)
-		c.kmAnnounced = true
-		c.kmConfirmed.Store(false)
-		c.sndKmState.Store(1) // SRT_KM_S_SECURING
-		c.kmRetryKey = nextKey
-		c.kmRetryCount = srtMaxKMRetry
-		c.kmLastSendTime = c.clk.Now()
-	}
-
-	// RTT-based KMREQ retry: every 1.5 × SRTT, max SRT_MAX_KMRETRY attempts.
-	//: sendKeysToPeer uses (iSRTT * 3) / 2.
-	if c.kmAnnounced && !c.kmConfirmed.Load() && c.kmRetryCount > 0 {
-		rttUs := c.rtt.Load()
-		if rttUs < 100000 {
-			rttUs = 100000 // minimum 100ms between retries
-		}
-		retryInterval := clock.Microseconds(rttUs * 3 / 2)
-		now := c.clk.Now()
-		if now.Sub(c.kmLastSendTime) >= retryInterval {
-			c.kmRetryCount--
-			c.sendKMREQ(packet.EncryptionBoth)
-			c.kmLastSendTime = now
-		}
-	}
-
-	// Refresh: switch active key
-	if c.kmPacketCount >= c.kmRefreshRate {
-		c.activeKey = oppositeKey(c.activeKey)
-		c.kmPacketCount = 0
-		c.kmAnnounced = false
-		c.kmDecommission = true
-		c.kmSwitchCount = 0
-	}
-
-	// Decommission: clear deprecated key after preAnnounce packets post-switch.
-	//: PostSwitch clears old SEK.
-	if c.kmDecommission {
-		c.kmSwitchCount++
-		if c.kmSwitchCount >= c.kmPreAnnounce {
-			oldKey := oppositeKey(c.activeKey)
-			c.cryptoCtx.ClearSEK(oldKey)
-			c.kmDecommission = false
-		}
-	}
-}
-
-// sendKMREQ sends a Key Material Request for the given key slot.
-func (c *Conn) sendKMREQ(key packet.PacketEncryption) {
-	if c.passphrase == "" {
-		return
-	}
-	km := &packet.CIFKeyMaterial{}
-	if err := c.cryptoCtx.MarshalKM(km, c.passphrase, key); err != nil {
-		return
-	}
-	data, err := km.MarshalCIF()
-	if err != nil {
-		return
-	}
-
-	p := packet.NewControl(c.remoteAddr, packet.CtrlTypeUser, c.peerSocketID, c.clk.Now().SRTTimestamp())
-	p.Header.SubType = packet.ExtTypeKMReq
-	p.SetData(data)
-	c.m.Send(p)
-	p.Release()
-	c.sentKM.Add(1)
-}
-
-// handleKMRequest processes a mid-stream KMREQ (key rotation from sender).
-func (c *Conn) handleKMRequest(p packet.Packet) {
-	c.recvKM.Add(1)
-	if c.cryptoCtx == nil || c.passphrase == "" {
-		//: no secret configured → NOSECRET(3)
-		c.rcvKmState.Store(3) // SRT_KM_S_NOSECRET
-		return
-	}
-	var km packet.CIFKeyMaterial
-	if err := km.UnmarshalCIF(p.Data); err != nil {
-		//: invalid KM message → BADSECRET(4)
-		c.rcvKmState.Store(4) // SRT_KM_S_BADSECRET
-		return
-	}
-	if err := c.cryptoCtx.UnmarshalKM(&km, c.passphrase); err != nil {
-		//: unwrap failure → BADSECRET(4)
-		// (or BADCRYPTOMODE(5) for cipher mismatch, but we map both to BADSECRET
-		// since we don't distinguish at this level)
-		c.rcvKmState.Store(4) // SRT_KM_S_BADSECRET
-		c.sndKmState.Store(4)
-		errResp := packet.NewControl(c.remoteAddr, packet.CtrlTypeUser, c.peerSocketID, c.clk.Now().SRTTimestamp())
-		errResp.Header.SubType = packet.ExtTypeKMRsp
-		errData := make([]byte, 4)
-		binary.BigEndian.PutUint32(errData, 4) // SRT_KM_S_BADSECRET
-		errResp.SetData(errData)
-		c.m.Send(errResp)
-		errResp.Release()
-		return
-	}
-
-	// Send KMRSP echoing back the key material
-	resp := &packet.CIFKeyMaterial{}
-	if err := c.cryptoCtx.MarshalKM(resp, c.passphrase, km.KeyBasedEncryption); err != nil {
-		return
-	}
-	data, err := resp.MarshalCIF()
-	if err != nil {
-		return
-	}
-
-	rp := packet.NewControl(c.remoteAddr, packet.CtrlTypeUser, c.peerSocketID, c.clk.Now().SRTTimestamp())
-	rp.Header.SubType = packet.ExtTypeKMRsp
-	rp.SetData(data)
-	c.m.Send(rp)
-	rp.Release()
-}
-
-// handleKMResponse processes a mid-stream KMRSP (confirmation of key rotation).
-func (c *Conn) handleKMResponse(p packet.Packet) {
-	c.recvKM.Add(1)
-
-	//: Check for error response (single 32-bit word = KM state).
-	// A 4-byte KMRSP contains only the error code (e.g., SRT_KM_S_BADSECRET=4).
-	// The peer rejected our key — don't confirm.
-	if len(p.Data) == 4 {
-		kmState := int32(binary.BigEndian.Uint32(p.Data))
-		//: error KMRSP sets both snd and rcv KM state
-		if kmState >= 3 && kmState <= 5 {
-			c.sndKmState.Store(kmState)
-			c.rcvKmState.Store(kmState)
-		}
-		return
-	}
-
-	// The peer confirmed the new key — stop retrying KMREQ.
-	// The key was already installed when we generated it in checkKeyRotation.
-	c.kmConfirmed.Store(true)
-	c.sndKmState.Store(2) // SRT_KM_S_SECURED
-	c.rcvKmState.Store(2) // SRT_KM_S_SECURED
-}
-
-// ---- HSv4 post-handshake extension exchange ----
-
-// sendHSv4Extensions sends HSREQ (and optionally KMREQ) via UMSG_EXT
-// for HSv4 connections where the INITIATOR (sender) must initiate
-// the SRT extension exchange after the basic UDT handshake completes.
-func (c *Conn) sendHSv4Extensions(cfg Config) {
-	// Build HSREQ with single latency value (HSv4 uses one 16-bit latency field)
-	latency := cfg.peerLatencyMS()
-	hsreq := handshake.BuildExtHSREQ(
-		c.peerSocketID,
-		handshake.SRTVersion,
-		cfg.srtFlags(),
-		latency,
-		c.remoteAddr,
-	)
-	c.m.Send(hsreq)
-	hsreq.Release()
-
-	// If encryption is configured, send KMREQ
-	if cfg.Passphrase != "" {
-		keyLen := cfg.KeyLength
-		if keyLen == 0 {
-			keyLen = 16
-		}
-		cipherMode := crypto.CipherCTR
-		if cfg.CryptoMode == 2 {
-			cipherMode = crypto.CipherGCM
-		}
-		cryptoCtx, err := crypto.NewWithMode(keyLen, cipherMode)
-		if err != nil {
-			return
-		}
-		activeKey := packet.EncryptionEven
-		km := &packet.CIFKeyMaterial{}
-		if err := cryptoCtx.MarshalKM(km, cfg.Passphrase, activeKey); err != nil {
-			return
-		}
-		kmreq := handshake.BuildExtKMREQ(c.peerSocketID, km, c.remoteAddr)
-		c.m.Send(kmreq)
-		kmreq.Release()
-
-		// Install crypto context on the connection
-		c.cryptoCtx = cryptoCtx
-		c.activeKey = activeKey
-		c.passphrase = cfg.Passphrase
-		c.kmRefreshRate = cfg.KMRefreshRate
-		c.kmPreAnnounce = cfg.KMPreAnnounce
-		c.sndKmState.Store(1) // SECURING until KMRSP
-	}
-}
-
-// handleHSREQ processes an incoming HSREQ from the peer (UMSG_EXT).
-// The RESPONDER receives HSREQ, negotiates parameters, and sends back HSRSP.
-func (c *Conn) handleHSREQ(p packet.Packet) {
-	peerVersion, peerFlags, peerLatency, err := handshake.ParseExtHSREQ(p.Data)
-	if err != nil {
-		return
-	}
-
-	c.peerSRTVersion = peerVersion
-
-	// Negotiate latency: use the larger of the two sides' values
-	localLatency := uint16(c.tsbpdDelay.Duration().Milliseconds())
-	if localLatency == 0 {
-		localLatency = uint16(DefaultLatency.Milliseconds())
-	}
-	negotiatedLatency := peerLatency
-	if localLatency > negotiatedLatency {
-		negotiatedLatency = localLatency
-	}
-
-	// Enable TSBPD on receiver side with negotiated latency
-	if peerFlags&packet.FlagTSBPDSend != 0 {
-		c.tsbpdEnabled.Store(true)
-		c.tsbpdDelay = clock.Microseconds(negotiatedLatency) * clock.Millisecond
-		if c.tsbpdTimer == nil {
-			now := c.clk.Now()
-			c.tsbpdTimer = tsbpd.New(c.tsbpdDelay, now)
-			if !c.driftTracer {
-				c.tsbpdTimer.SetDriftEnabled(false)
-			}
-		}
-	}
-
-	// Negotiate TLPKTDROP
-	if peerFlags&packet.FlagTLPktDrop != 0 {
-		c.tlpktdropEnabled.Store(true)
-	}
-
-	// Negotiate periodic NAK
-	c.peerNakReport = peerFlags&packet.FlagPeriodicNAK != 0
-
-	// Send HSRSP back to peer
-	respFlags := uint32(packet.FlagCrypt | packet.FlagRexmit)
-	if c.tsbpdEnabled.Load() {
-		respFlags |= packet.FlagTSBPDRecv
-	}
-	if c.tlpktdropEnabled.Load() {
-		respFlags |= packet.FlagTLPktDrop
-	}
-	if c.periodicNAK {
-		respFlags |= packet.FlagPeriodicNAK
-	}
-
-	hsrsp := handshake.BuildExtHSRSP(
-		c.peerSocketID,
-		handshake.SRTVersion,
-		respFlags,
-		negotiatedLatency,
-		c.remoteAddr,
-	)
-	c.m.Send(hsrsp)
-	hsrsp.Release()
-
-	c.hsExtDone.Store(true)
-}
-
-// handleHSRSP processes an incoming HSRSP from the peer (UMSG_EXT).
-// The INITIATOR receives HSRSP to confirm the negotiated parameters.
-func (c *Conn) handleHSRSP(p packet.Packet) {
-	peerVersion, peerFlags, negotiatedLatency, err := handshake.ParseExtHSREQ(p.Data)
-	if err != nil {
-		return
-	}
-
-	c.peerSRTVersion = peerVersion
-
-	// The INITIATOR (sender) enables sender-side features based on negotiated flags
-	if peerFlags&packet.FlagTSBPDRecv != 0 {
-		// Peer will use TSBPD — set peer delay for sender-side drop timing
-		c.peerTsbpdDelay = clock.Microseconds(negotiatedLatency) * clock.Millisecond
-		c.recomputeSendDropThresh()
-	}
-
-	c.peerNakReport = peerFlags&packet.FlagPeriodicNAK != 0
-
-	c.hsExtDone.Store(true)
 }
 
 // ---- Helper methods ----

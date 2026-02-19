@@ -44,6 +44,18 @@ const (
 	TransTypeFile
 )
 
+// String returns a human-readable name for the transfer type.
+func (t TransType) String() string {
+	switch t {
+	case TransTypeLive:
+		return "live"
+	case TransTypeFile:
+		return "file"
+	default:
+		return "unknown"
+	}
+}
+
 // CongestionType selects the congestion control algorithm.
 type CongestionType string
 
@@ -53,6 +65,13 @@ const (
 
 	// CongestionFile selects CUBIC-like adaptive congestion control.
 	CongestionFile CongestionType = "file"
+)
+
+// CryptoMode constants for Config.CryptoMode.
+const (
+	CryptoModeAuto int = 0 // responder adopts initiator's mode
+	CryptoModeCTR  int = 1 // AES-CTR (default for initiators)
+	CryptoModeGCM  int = 2 // AES-GCM (authenticated encryption)
 )
 
 // Config contains SRT connection configuration.
@@ -296,210 +315,210 @@ func DefaultConfig() Config {
 }
 
 // validate applies defaults and checks constraints.
-func (c *Config) validate() error {
+func (cfg *Config) validate() error {
 	// TransType overrides Congestion
-	if c.TransType == TransTypeFile {
-		c.Congestion = CongestionFile
+	if cfg.TransType == TransTypeFile {
+		cfg.Congestion = CongestionFile
 	}
-	if c.Congestion == "" {
-		c.Congestion = CongestionLive
+	if cfg.Congestion == "" {
+		cfg.Congestion = CongestionLive
 	}
-	if c.Congestion != CongestionLive && c.Congestion != CongestionFile {
+	if cfg.Congestion != CongestionLive && cfg.Congestion != CongestionFile {
 		return errors.New("srt: Congestion must be \"live\" or \"file\"")
 	}
 
-	if c.MSS == 0 {
-		c.MSS = DefaultMSS
+	if cfg.MSS == 0 {
+		cfg.MSS = DefaultMSS
 	}
-	if c.MSS < MinMSS || c.MSS > MaxMSS {
+	if cfg.MSS < MinMSS || cfg.MSS > MaxMSS {
 		return errors.New("srt: MSS must be between 76 and 1500")
 	}
 
-	if c.Latency == 0 {
-		c.Latency = DefaultLatency
+	if cfg.Latency == 0 {
+		cfg.Latency = DefaultLatency
 	}
-	if c.Latency < MinLatency {
+	if cfg.Latency < MinLatency {
 		return errors.New("srt: latency must be at least 20ms")
 	}
 
-	if c.RecvLatency == 0 {
-		c.RecvLatency = c.Latency
+	if cfg.RecvLatency == 0 {
+		cfg.RecvLatency = cfg.Latency
 	}
-	if c.RecvLatency < MinLatency {
+	if cfg.RecvLatency < MinLatency {
 		return errors.New("srt: RecvLatency must be at least 20ms")
 	}
 
-	if c.PeerLatency == 0 {
-		c.PeerLatency = c.Latency
+	if cfg.PeerLatency == 0 {
+		cfg.PeerLatency = cfg.Latency
 	}
-	if c.PeerLatency < MinLatency {
+	if cfg.PeerLatency < MinLatency {
 		return errors.New("srt: PeerLatency must be at least 20ms")
 	}
 
-	if c.FC == 0 {
-		c.FC = DefaultFC
+	if cfg.FC == 0 {
+		cfg.FC = DefaultFC
 	}
-	if c.FC < MinFC {
+	if cfg.FC < MinFC {
 		return errors.New("srt: FC must be at least 32")
 	}
 
 	// MaxBW == 0 is valid: means "auto" (use InputBW+overhead, or DefaultMaxBW).
 	// Resolved in newConn.
 
-	if c.OverheadBW == 0 {
-		c.OverheadBW = DefaultOverheadBW
+	if cfg.OverheadBW == 0 {
+		cfg.OverheadBW = DefaultOverheadBW
 	}
-	if c.OverheadBW < 5 || c.OverheadBW > 100 {
+	if cfg.OverheadBW < 5 || cfg.OverheadBW > 100 {
 		return errors.New("srt: overhead bandwidth must be between 5 and 100 percent")
 	}
 
-	if c.SendBufSize == 0 {
-		c.SendBufSize = DefaultSendBufSize
+	if cfg.SendBufSize == 0 {
+		cfg.SendBufSize = DefaultSendBufSize
 	}
-	if c.SendBufSize < MinBufSize {
+	if cfg.SendBufSize < MinBufSize {
 		return errors.New("srt: SendBufSize must be at least 32")
 	}
-	if c.RecvBufSize == 0 {
-		c.RecvBufSize = DefaultRecvBufSize
+	if cfg.RecvBufSize == 0 {
+		cfg.RecvBufSize = DefaultRecvBufSize
 	}
-	if c.RecvBufSize < MinBufSize {
+	if cfg.RecvBufSize < MinBufSize {
 		return errors.New("srt: RecvBufSize must be at least 32")
 	}
-	if c.RecvBufSize > c.FC {
-		c.RecvBufSize = c.FC // clamp to FC (matches C++)
+	if cfg.RecvBufSize > cfg.FC {
+		cfg.RecvBufSize = cfg.FC // clamp to FC (matches C++)
 	}
 
 	// PayloadSize: if set, must be <= MSS - 44 and >= MinPayload
-	maxPayload := c.MSS - 44
-	if c.PayloadSize > 0 {
-		if c.PayloadSize < MinPayload {
+	maxPayload := cfg.MSS - packet.WireHeaderSize
+	if cfg.PayloadSize > 0 {
+		if cfg.PayloadSize < MinPayload {
 			return errors.New("srt: PayloadSize must be at least 32")
 		}
-		if c.PayloadSize > maxPayload {
+		if cfg.PayloadSize > maxPayload {
 			return errors.New("srt: PayloadSize must be at most MSS - 44")
 		}
 	}
 
-	if len(c.StreamID) > 512 {
+	if len(cfg.StreamID) > 512 {
 		return errors.New("srt: stream ID must be at most 512 bytes")
 	}
 
-	if c.Passphrase != "" {
-		if len(c.Passphrase) < 10 || len(c.Passphrase) > 80 {
+	if cfg.Passphrase != "" {
+		if len(cfg.Passphrase) < 10 || len(cfg.Passphrase) > 80 {
 			return errors.New("srt: passphrase must be 10-80 bytes")
 		}
-		if c.KeyLength == 0 {
-			c.KeyLength = 16 // AES-128 default
+		if cfg.KeyLength == 0 {
+			cfg.KeyLength = 16 // AES-128 default
 		}
-		switch c.KeyLength {
+		switch cfg.KeyLength {
 		case 16, 24, 32:
 		default:
 			return errors.New("srt: key length must be 16, 24, or 32")
 		}
 	}
 
-	if c.ConnTimeout == 0 {
-		c.ConnTimeout = DefaultConnTimeout
+	if cfg.ConnTimeout == 0 {
+		cfg.ConnTimeout = DefaultConnTimeout
 	}
 
 	// File mode defaults Linger to 180s
-	if c.Linger == 0 && c.Congestion == CongestionFile {
-		c.Linger = 180 * time.Second
+	if cfg.Linger == 0 && cfg.Congestion == CongestionFile {
+		cfg.Linger = 180 * time.Second
 	}
-	if c.Linger < 0 {
-		c.Linger = 0
+	if cfg.Linger < 0 {
+		cfg.Linger = 0
 	}
-	if c.Linger > MaxLinger {
-		c.Linger = MaxLinger
+	if cfg.Linger > MaxLinger {
+		cfg.Linger = MaxLinger
 	}
 
-	if c.PeerIdleTimeout == 0 {
-		c.PeerIdleTimeout = DefaultPeerIdleTimeout
+	if cfg.PeerIdleTimeout == 0 {
+		cfg.PeerIdleTimeout = DefaultPeerIdleTimeout
 	}
-	if c.PeerIdleTimeout < 1*time.Second {
+	if cfg.PeerIdleTimeout < 1*time.Second {
 		return errors.New("srt: PeerIdleTimeout must be at least 1s")
 	}
 
 	// MessageAPI defaults to true for live mode, false for file mode
-	if c.MessageAPI == nil {
-		v := c.Congestion != CongestionFile
-		c.MessageAPI = &v
+	if cfg.MessageAPI == nil {
+		v := cfg.Congestion != CongestionFile
+		cfg.MessageAPI = &v
 	}
 
 	// Key rotation defaults (only relevant when encryption is enabled)
-	if c.KMRefreshRate == 0 && c.Passphrase != "" {
-		c.KMRefreshRate = DefaultKMRefreshRate
+	if cfg.KMRefreshRate == 0 && cfg.Passphrase != "" {
+		cfg.KMRefreshRate = DefaultKMRefreshRate
 	}
-	if c.KMPreAnnounce == 0 && c.KMRefreshRate > 0 {
-		c.KMPreAnnounce = DefaultKMPreAnnounce
+	if cfg.KMPreAnnounce == 0 && cfg.KMRefreshRate > 0 {
+		cfg.KMPreAnnounce = DefaultKMPreAnnounce
 	}
-	if c.KMRefreshRate > 0 && c.KMPreAnnounce >= c.KMRefreshRate/2 {
+	if cfg.KMRefreshRate > 0 && cfg.KMPreAnnounce >= cfg.KMRefreshRate/2 {
 		return errors.New("srt: KMPreAnnounce must be less than KMRefreshRate/2")
 	}
 
 	// MinVersion: default 0x010000 (1.0.0)
-	if c.MinVersion == 0 {
-		c.MinVersion = 0x010000
+	if cfg.MinVersion == 0 {
+		cfg.MinVersion = 0x010000
 	}
 
 	// LossMaxTTL: must be >= 0
-	if c.LossMaxTTL < 0 {
-		c.LossMaxTTL = 0
+	if cfg.LossMaxTTL < 0 {
+		cfg.LossMaxTTL = 0
 	}
 
 	// SndDropDelay: -1 = disable, 0+ = extra delay in ms
-	if c.SndDropDelay < -1 {
-		c.SndDropDelay = -1
+	if cfg.SndDropDelay < -1 {
+		cfg.SndDropDelay = -1
 	}
 
 	// EnforcedEncryption: default true
-	if c.EnforcedEncryption == nil {
+	if cfg.EnforcedEncryption == nil {
 		v := true
-		c.EnforcedEncryption = &v
+		cfg.EnforcedEncryption = &v
 	}
 
 	// NAKReport: default true (live mode sends periodic NAK)
-	if c.NAKReport == nil {
+	if cfg.NAKReport == nil {
 		v := true
-		c.NAKReport = &v
+		cfg.NAKReport = &v
 	}
 
 	// IPTTL: -1 = OS default, 1-255 valid range
-	if c.IPTTL != -1 && (c.IPTTL < 1 || c.IPTTL > 255) {
-		if c.IPTTL == 0 {
-			c.IPTTL = -1 // treat 0 as unset
+	if cfg.IPTTL != -1 && (cfg.IPTTL < 1 || cfg.IPTTL > 255) {
+		if cfg.IPTTL == 0 {
+			cfg.IPTTL = -1 // treat 0 as unset
 		} else {
 			return errors.New("srt: IPTTL must be -1 (default) or 1-255")
 		}
 	}
 
 	// IPTOS: -1 = OS default, 0-255 valid range
-	if c.IPTOS < -1 || c.IPTOS > 255 {
+	if cfg.IPTOS < -1 || cfg.IPTOS > 255 {
 		return errors.New("srt: IPTOS must be -1 (default) or 0-255")
 	}
 
 	// UDP buffer sizes: must be >= MSS when set
-	if c.UDPSendBufSize < 0 {
-		c.UDPSendBufSize = 0
+	if cfg.UDPSendBufSize < 0 {
+		cfg.UDPSendBufSize = 0
 	}
-	if c.UDPSendBufSize > 0 && c.UDPSendBufSize < c.MSS {
-		c.UDPSendBufSize = c.MSS
+	if cfg.UDPSendBufSize > 0 && cfg.UDPSendBufSize < cfg.MSS {
+		cfg.UDPSendBufSize = cfg.MSS
 	}
-	if c.UDPRecvBufSize < 0 {
-		c.UDPRecvBufSize = 0
+	if cfg.UDPRecvBufSize < 0 {
+		cfg.UDPRecvBufSize = 0
 	}
-	if c.UDPRecvBufSize > 0 && c.UDPRecvBufSize < c.MSS {
-		c.UDPRecvBufSize = c.MSS
+	if cfg.UDPRecvBufSize > 0 && cfg.UDPRecvBufSize < cfg.MSS {
+		cfg.UDPRecvBufSize = cfg.MSS
 	}
 
 	// InputBW: must be >= 0
-	if c.InputBW < 0 {
-		c.InputBW = 0
+	if cfg.InputBW < 0 {
+		cfg.InputBW = 0
 	}
 
 	// PacketFilter: validate config string early
-	if c.PacketFilter != "" {
-		if _, err := filter.ParseConfig(c.PacketFilter); err != nil {
+	if cfg.PacketFilter != "" {
+		if _, err := filter.ParseConfig(cfg.PacketFilter); err != nil {
 			return err
 		}
 	}
@@ -508,32 +527,32 @@ func (c *Config) validate() error {
 }
 
 // latencyMS returns the latency in milliseconds as uint16 for the handshake.
-func (c *Config) latencyMS() uint16 {
-	return uint16(c.Latency.Milliseconds())
+func (cfg *Config) latencyMS() uint16 {
+	return uint16(cfg.Latency.Milliseconds())
 }
 
 // recvLatencyMS returns the receive latency in milliseconds for the handshake.
-func (c *Config) recvLatencyMS() uint16 {
-	return uint16(c.RecvLatency.Milliseconds())
+func (cfg *Config) recvLatencyMS() uint16 {
+	return uint16(cfg.RecvLatency.Milliseconds())
 }
 
 // peerLatencyMS returns the peer latency in milliseconds for the handshake.
-func (c *Config) peerLatencyMS() uint16 {
-	return uint16(c.PeerLatency.Milliseconds())
+func (cfg *Config) peerLatencyMS() uint16 {
+	return uint16(cfg.PeerLatency.Milliseconds())
 }
 
 // messageAPIEnabled returns whether message API is enabled.
-func (c *Config) messageAPIEnabled() bool {
-	return c.MessageAPI == nil || *c.MessageAPI
+func (cfg *Config) messageAPIEnabled() bool {
+	return cfg.MessageAPI == nil || *cfg.MessageAPI
 }
 
 // srtFlags returns the SRT feature flags for the handshake.
 // File mode omits TSBPD and TLPKTDROP flags.
 // When MessageAPI is false, the FlagStream bit is set.
 // NAKReport=false clears the FlagPeriodicNAK bit (tells peer we won't send periodic NAKs).
-func (c *Config) srtFlags() uint32 {
+func (cfg *Config) srtFlags() uint32 {
 	var flags uint32
-	if c.Congestion == CongestionFile {
+	if cfg.Congestion == CongestionFile {
 		// File mode: no TSBPD, no TLPKTDROP
 		flags = uint32(packet.FlagCrypt | packet.FlagPeriodicNAK | packet.FlagRexmit)
 	} else {
@@ -544,10 +563,10 @@ func (c *Config) srtFlags() uint32 {
 	// If NAKReport is explicitly false, clear the FlagPeriodicNAK bit.
 	// This tells the peer that we will NOT send periodic NAK reports,
 	// which activates FASTREXMIT on their side.
-	if c.NAKReport != nil && !*c.NAKReport {
+	if cfg.NAKReport != nil && !*cfg.NAKReport {
 		flags &^= packet.FlagPeriodicNAK
 	}
-	if !c.messageAPIEnabled() {
+	if !cfg.messageAPIEnabled() {
 		flags |= packet.FlagStream
 	}
 	// SRT_OPT_FILTERCAP is always set
@@ -557,46 +576,46 @@ func (c *Config) srtFlags() uint32 {
 }
 
 // congestionString returns the congestion type string for the handshake.
-func (c *Config) congestionString() string {
-	if c.Congestion == CongestionFile {
+func (cfg *Config) congestionString() string {
+	if cfg.Congestion == CongestionFile {
 		return "file"
 	}
 	return "live"
 }
 
 // tsbpdEnabled returns whether TSBPD is enabled for this config.
-func (c *Config) tsbpdEnabled() bool {
-	return c.Congestion != CongestionFile
+func (cfg *Config) tsbpdEnabled() bool {
+	return cfg.Congestion != CongestionFile
 }
 
 // tlpktdropEnabled returns whether too-late packet drop is enabled.
-func (c *Config) tlpktdropEnabled() bool {
-	return c.Congestion != CongestionFile
+func (cfg *Config) tlpktdropEnabled() bool {
+	return cfg.Congestion != CongestionFile
 }
 
 // retransmitAlgo returns the retransmission algorithm setting.
 // Default: 1 for live mode, 0 for file mode.
-func (c *Config) retransmitAlgo() int {
-	if c.RetransmitAlgo != nil {
-		return *c.RetransmitAlgo
+func (cfg *Config) retransmitAlgo() int {
+	if cfg.RetransmitAlgo != nil {
+		return *cfg.RetransmitAlgo
 	}
-	if c.Congestion == CongestionFile {
+	if cfg.Congestion == CongestionFile {
 		return 0
 	}
 	return 1
 }
 
 // driftTracerEnabled returns whether drift correction is enabled.
-func (c *Config) driftTracerEnabled() bool {
-	return c.DriftTracer == nil || *c.DriftTracer
+func (cfg *Config) driftTracerEnabled() bool {
+	return cfg.DriftTracer == nil || *cfg.DriftTracer
 }
 
 // sndSynEnabled returns whether blocking Write mode is enabled (default true).
-func (c *Config) sndSynEnabled() bool {
-	return c.SndSyn == nil || *c.SndSyn
+func (cfg *Config) sndSynEnabled() bool {
+	return cfg.SndSyn == nil || *cfg.SndSyn
 }
 
 // rcvSynEnabled returns whether blocking Read mode is enabled (default true).
-func (c *Config) rcvSynEnabled() bool {
-	return c.RcvSyn == nil || *c.RcvSyn
+func (cfg *Config) rcvSynEnabled() bool {
+	return cfg.RcvSyn == nil || *cfg.RcvSyn
 }

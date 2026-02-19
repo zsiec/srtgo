@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/packet"
 )
 
 // Default values for live congestion control.
@@ -15,7 +16,6 @@ const (
 	DefaultOverhead   int   = 25                // 25% overhead for retransmissions
 	DefaultPacketSize int   = 1316              // typical video packet payload size
 	ProbeInterval     int   = 16                // send probe every 16th packet
-	WireHeaderSize    int   = 44                // IP(20) + UDP(8) + SRT(16) header overhead
 )
 
 // LiveCC implements the SRT live mode congestion controller.
@@ -75,7 +75,7 @@ func (cc *LiveCC) PacketInterval() clock.Microseconds {
 
 	// Include wire header overhead in packet size:
 	// pktsize = avgPayloadSize + headerSize
-	pktSize := cc.atomicAvgPayloadSize.Load() + int64(WireHeaderSize)
+	pktSize := cc.atomicAvgPayloadSize.Load() + int64(packet.WireHeaderSize)
 	interval := clock.Microseconds(int64(clock.Second) * pktSize / maxBW)
 	if interval <= 0 {
 		return 1

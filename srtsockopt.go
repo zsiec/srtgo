@@ -348,7 +348,7 @@ var ErrPreConnectOnly = errors.New("srt: socket option can only be set before co
 
 // GetOption retrieves the current value of a runtime socket option.
 // The returned value type depends on the option (see SockOpt documentation).
-func (c *Conn) GetOption(opt SockOpt) (interface{}, error) {
+func (c *Conn) GetOption(opt SockOpt) (any, error) {
 	select {
 	case <-c.done:
 		// SockOptState is allowed even after close
@@ -533,7 +533,7 @@ func (c *Conn) GetOption(opt SockOpt) (interface{}, error) {
 
 // SetOption changes the value of a runtime socket option on a live connection.
 // Only certain options support runtime changes (see SockOpt documentation).
-func (c *Conn) SetOption(opt SockOpt, val interface{}) error {
+func (c *Conn) SetOption(opt SockOpt, val any) error {
 	select {
 	case <-c.done:
 		return c.getShutdownErr()

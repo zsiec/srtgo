@@ -12,7 +12,10 @@ import (
 	"sync"
 )
 
-// MaxPayloadSize is the default maximum payload size (MTU 1500 - IP 20 - UDP 8 - SRT header 16).
+// WireHeaderSize is the combined IP + UDP + SRT header overhead per packet (20 + 8 + 16).
+const WireHeaderSize = 44
+
+// MaxPayloadSize is the default maximum payload size (MTU 1500 - WireHeaderSize).
 const MaxPayloadSize = 1456
 
 // bufferPool is a pool of byte slices for packet payloads.

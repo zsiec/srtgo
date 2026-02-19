@@ -294,7 +294,11 @@ func TestIntegrationStats(t *testing.T) {
 		client.Write([]byte("test data"))
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		return client.Stats(false).SentPackets >= 5
+	}) {
+		t.Fatal("timed out waiting for SentPackets >= 5")
+	}
 
 	stats := client.Stats(false)
 	if stats.SentPackets != 5 {
