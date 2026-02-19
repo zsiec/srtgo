@@ -161,7 +161,6 @@ func (m *Mux) readLoop() {
 			default:
 			}
 			// Unexpected error; log and continue.
-			// TODO: structured logging
 			continue
 		}
 

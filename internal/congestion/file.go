@@ -357,8 +357,8 @@ func (cc *FileCC) IsProbePacket() bool {
 // EstimatedBandwidth returns the link capacity estimate from probe pair
 // measurements, in packets per second.
 func (cc *FileCC) EstimatedBandwidth() uint32 {
-	cc.mu.RLock()
-	defer cc.mu.RUnlock()
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
 	return cc.probe.estimatedBandwidth()
 }
 

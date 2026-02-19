@@ -480,17 +480,15 @@ func (l *Listener) handleConclusion(p packet.Packet, hs *packet.CIFHandshake) {
 		// EnforcedEncryption=false: allow unencrypted connection
 	}
 
-	// Generate listener socket ID and ISN
+	// Generate listener socket ID.
+	// ISN: per C++ SRT, the listener echoes the caller's ISN (used as send ISN
+	// for both sides). The caller verifies this echo as a security check.
 	listenerSocketID, err := handshake.GenerateSocketID()
 	if err != nil {
 		p.Release()
 		return
 	}
-	listenerISN, err := handshake.GenerateISN()
-	if err != nil {
-		p.Release()
-		return
-	}
+	callerISN := hs.InitialPacketSequenceNumber
 
 	// Register with mux to receive packets for this connection
 	recvCh := l.m.Register(listenerSocketID)
@@ -545,7 +543,7 @@ func (l *Listener) handleConclusion(p packet.Packet, hs *packet.CIFHandshake) {
 	// HSRSP does NOT include FlagStream — stream/message mode
 	// is validated from the caller's HSREQ only.
 	resp := handshake.BuildConclusionResponse(
-		listenerSocketID, listenerISN,
+		listenerSocketID, callerISN,
 		negotiatedMSS, uint32(l.cfg.FC),
 		hs.SRTSocketID,
 		negotiatedRecv, negotiatedSend,
@@ -597,8 +595,8 @@ func (l *Listener) handleConclusion(p packet.Packet, hs *packet.CIFHandshake) {
 		Mux:                 l.m,
 		RecvChan:            recvCh,
 		Clock:               l.clk,
-		SendISN:             seq.Number(listenerISN),
-		RecvISN:             seq.Number(hs.InitialPacketSequenceNumber),
+		SendISN:             seq.Number(callerISN),
+		RecvISN:             seq.Number(callerISN),
 		SendBufSize:         l.cfg.SendBufSize,
 		RecvBufSize:         l.cfg.RecvBufSize,
 		MaxBW:               l.cfg.MaxBW,
@@ -740,17 +738,14 @@ func (l *Listener) handleConclusionV4(p packet.Packet, hs *packet.CIFHandshake) 
 		p.Release()
 		return
 	}
-	listenerISN, err := handshake.GenerateISN()
-	if err != nil {
-		p.Release()
-		return
-	}
+	callerISNv4 := hs.InitialPacketSequenceNumber
 
 	recvCh := l.m.Register(listenerSocketID)
 
-	// Build and send HSv4 conclusion response (no extensions)
+	// Build and send HSv4 conclusion response (no extensions).
+	// Echo caller's ISN per C++ SRT security check.
 	resp := handshake.BuildConclusionResponseV4(
-		listenerSocketID, listenerISN,
+		listenerSocketID, callerISNv4,
 		negotiatedMSS, uint32(l.cfg.FC),
 		hs.SRTSocketID,
 		callerAddr,
@@ -784,8 +779,8 @@ func (l *Listener) handleConclusionV4(p packet.Packet, hs *packet.CIFHandshake) 
 		Mux:                 l.m,
 		RecvChan:            recvCh,
 		Clock:               l.clk,
-		SendISN:             seq.Number(listenerISN),
-		RecvISN:             seq.Number(hs.InitialPacketSequenceNumber),
+		SendISN:             seq.Number(callerISNv4),
+		RecvISN:             seq.Number(callerISNv4),
 		SendBufSize:         l.cfg.SendBufSize,
 		RecvBufSize:         l.cfg.RecvBufSize,
 		MaxBW:               l.cfg.MaxBW,

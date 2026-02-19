@@ -62,20 +62,13 @@ func (c *Conn) updateBufferIIR() {
 }
 
 // recordSendRate feeds the send rate estimator with packet data.
-// Called from any send path. Thread-safe.
+// Lock-free on the hot path: just two atomic adds.
 func (c *Conn) recordSendRate(pkts int, bytes int) {
-	bs := &c.bufStats
-	bs.mu.Lock()
-	if !bs.rateEstInit {
-		bs.rateEst.init(time.Now())
-		bs.rateEstInit = true
-	}
-	bs.rateEst.onPacketSent(time.Now(), pkts, bytes)
-	bs.mu.Unlock()
+	c.bufStats.rateEst.recordLockFree(pkts, bytes)
 }
 
 // rotateSendRate advances the send rate estimator's time window.
-// Should be called periodically. Thread-safe.
+// Drains atomic accumulators and advances slots. Thread-safe.
 func (c *Conn) rotateSendRate() {
 	bs := &c.bufStats
 	bs.mu.Lock()

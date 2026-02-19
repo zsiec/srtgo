@@ -231,21 +231,20 @@ func TestRendezvousBasic(t *testing.T) {
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 3 * time.Second
 
-	// Get two ephemeral ports
-	addrA := "127.0.0.1:0"
-	addrB := "127.0.0.1:0"
+	// Bind two UDP sockets up front — avoids TOCTOU race where the OS
+	// reassigns a closed ephemeral port before DialRendezvous can rebind.
+	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind A: %v", err)
+	}
+	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		sockA.Close()
+		t.Fatalf("bind B: %v", err)
+	}
 
-	// We need actual ports, so bind temporarily to discover them
-	portA, err := getEphemeralPort()
-	if err != nil {
-		t.Fatalf("get port A: %v", err)
-	}
-	portB, err := getEphemeralPort()
-	if err != nil {
-		t.Fatalf("get port B: %v", err)
-	}
-	addrA = portA
-	addrB = portB
+	addrA := sockA.LocalAddr()
+	addrB := sockB.LocalAddr()
 
 	var connA, connB *Conn
 	var errA, errB error
@@ -254,11 +253,11 @@ func TestRendezvousBasic(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		connA, errA = DialRendezvous(addrA, addrB, cfg)
+		connA, errA = dialRendezvous(sockA, addrB, cfg, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		connB, errB = DialRendezvous(addrB, addrA, cfg)
+		connB, errB = dialRendezvous(sockB, addrA, cfg, nil)
 	}()
 	wg.Wait()
 
@@ -309,13 +308,14 @@ func TestRendezvousEncrypted(t *testing.T) {
 	cfg.ConnTimeout = 3 * time.Second
 	cfg.Passphrase = "rendezvous-secret-key"
 
-	portA, err := getEphemeralPort()
+	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port A: %v", err)
+		t.Fatalf("bind A: %v", err)
 	}
-	portB, err := getEphemeralPort()
+	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port B: %v", err)
+		sockA.Close()
+		t.Fatalf("bind B: %v", err)
 	}
 
 	var connA, connB *Conn
@@ -325,11 +325,11 @@ func TestRendezvousEncrypted(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		connA, errA = DialRendezvous(portA, portB, cfg)
+		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		connB, errB = DialRendezvous(portB, portA, cfg)
+		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
 	}()
 	wg.Wait()
 
@@ -363,13 +363,14 @@ func TestRendezvousTimeout(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ConnTimeout = 500 * time.Millisecond
 
-	portA, err := getEphemeralPort()
+	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port: %v", err)
+		t.Fatalf("bind: %v", err)
 	}
+	remoteAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:19999")
 
 	start := time.Now()
-	_, err = DialRendezvous(portA, "127.0.0.1:19999", cfg)
+	_, err = dialRendezvous(sockA, remoteAddr, cfg, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -395,13 +396,14 @@ func TestRendezvousFileMode(t *testing.T) {
 	cfg.ConnTimeout = 3 * time.Second
 	cfg.TransType = TransTypeFile
 
-	portA, err := getEphemeralPort()
+	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port A: %v", err)
+		t.Fatalf("bind A: %v", err)
 	}
-	portB, err := getEphemeralPort()
+	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port B: %v", err)
+		sockA.Close()
+		t.Fatalf("bind B: %v", err)
 	}
 
 	var connA, connB *Conn
@@ -411,11 +413,11 @@ func TestRendezvousFileMode(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		connA, errA = DialRendezvous(portA, portB, cfg)
+		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		connB, errB = DialRendezvous(portB, portA, cfg)
+		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
 	}()
 	wg.Wait()
 
@@ -448,18 +450,6 @@ func TestRendezvousFileMode(t *testing.T) {
 	if !bytes.Equal(buf[:total], payload) {
 		t.Errorf("file data mismatch: got %d bytes, want %d", total, len(payload))
 	}
-}
-
-// getEphemeralPort binds to a random port, records the address, and closes
-// the socket so DialRendezvous can rebind to it.
-func getEphemeralPort() (string, error) {
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	addr := conn.LocalAddr().String()
-	conn.Close()
-	return addr, nil
 }
 
 // --- Additional state machine edge case tests ---
@@ -596,13 +586,14 @@ func TestRendezvousWithStreamID(t *testing.T) {
 	cfg.ConnTimeout = 3 * time.Second
 	cfg.StreamID = "rendezvous/stream"
 
-	portA, err := getEphemeralPort()
+	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port A: %v", err)
+		t.Fatalf("bind A: %v", err)
 	}
-	portB, err := getEphemeralPort()
+	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get port B: %v", err)
+		sockA.Close()
+		t.Fatalf("bind B: %v", err)
 	}
 
 	var connA, connB *Conn
@@ -612,11 +603,11 @@ func TestRendezvousWithStreamID(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		connA, errA = DialRendezvous(portA, portB, cfg)
+		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		connB, errB = DialRendezvous(portB, portA, cfg)
+		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
 	}()
 	wg.Wait()
 
