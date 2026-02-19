@@ -1358,10 +1358,15 @@ func (c *Conn) nextMessageNumber() uint32 {
 
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
+		// Check if this Close is due to peer shutdown or connection timeout.
+		// If so, skip linger (peer can't ACK) and skip sending shutdown (peer is gone).
+		peerGone := c.getShutdownErr() != net.ErrClosed
+
 		c.setShutdownErr(net.ErrClosed)
 
-		// Linger: wait for send buffer to drain (ACKs from peer)
-		if c.linger > 0 && c.sendBuf.Size() > 0 {
+		// Linger: wait for send buffer to drain (ACKs from peer).
+		// Skip if the peer has already shut down — no ACKs will arrive.
+		if !peerGone && c.linger > 0 && c.sendBuf.Size() > 0 {
 			deadline := time.NewTimer(c.linger)
 			defer deadline.Stop()
 			for c.sendBuf.Size() > 0 {
@@ -1375,8 +1380,8 @@ func (c *Conn) Close() error {
 		}
 
 	shutdown:
-		// Send shutdown control packet (skip if peer ID unknown)
-		if c.peerSocketID != 0 {
+		// Send shutdown control packet (skip if peer already gone or ID unknown)
+		if !peerGone && c.peerSocketID != 0 {
 			p := packet.NewControl(c.remoteAddr, packet.CtrlTypeShutdown, c.peerSocketID, c.clk.Now().SRTTimestamp())
 			c.m.Send(p)
 			p.Release()

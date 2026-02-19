@@ -832,6 +832,383 @@ func TestGCM153Toggle(t *testing.T) {
 	}
 }
 
+func TestClearSEKEven(t *testing.T) {
+	ctx, err := New(16) // AES-128
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Verify even key works before clearing
+	original := []byte("clearSEK test data")
+	data := make([]byte, len(original))
+	copy(data, original)
+	_, err = ctx.EncryptPayload(data, nil, packet.EncryptionEven, 1)
+	if err != nil {
+		t.Fatalf("EncryptPayload before ClearSEK failed: %v", err)
+	}
+
+	// Clear even SEK
+	ctx.ClearSEK(packet.EncryptionEven)
+
+	// Verify the SEK is zeroed and nilled
+	ctx.mu.RLock()
+	if ctx.evenSEK != nil {
+		t.Error("evenSEK should be nil after ClearSEK")
+	}
+	if ctx.evenCipher != nil {
+		t.Error("evenCipher should be nil after ClearSEK")
+	}
+	if ctx.evenAEAD != nil {
+		t.Error("evenAEAD should be nil after ClearSEK")
+	}
+	ctx.mu.RUnlock()
+
+	// Encrypting with cleared key should fail
+	data2 := make([]byte, len(original))
+	copy(data2, original)
+	_, err = ctx.EncryptPayload(data2, nil, packet.EncryptionEven, 2)
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey after ClearSEK, got %v", err)
+	}
+
+	// Odd key should still work
+	data3 := make([]byte, len(original))
+	copy(data3, original)
+	_, err = ctx.EncryptPayload(data3, nil, packet.EncryptionOdd, 3)
+	if err != nil {
+		t.Errorf("odd key should still work after clearing even: %v", err)
+	}
+}
+
+func TestClearSEKOdd(t *testing.T) {
+	ctx, err := New(32) // AES-256
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Clear odd SEK
+	ctx.ClearSEK(packet.EncryptionOdd)
+
+	ctx.mu.RLock()
+	if ctx.oddSEK != nil {
+		t.Error("oddSEK should be nil after ClearSEK")
+	}
+	if ctx.oddCipher != nil {
+		t.Error("oddCipher should be nil after ClearSEK")
+	}
+	if ctx.oddAEAD != nil {
+		t.Error("oddAEAD should be nil after ClearSEK")
+	}
+	ctx.mu.RUnlock()
+
+	// Encrypting with cleared odd key should fail
+	data := []byte("test data")
+	_, err = ctx.EncryptPayload(data, nil, packet.EncryptionOdd, 1)
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey after clearing odd key, got %v", err)
+	}
+
+	// Even key should still work
+	data2 := make([]byte, len(data))
+	copy(data2, data)
+	_, err = ctx.EncryptPayload(data2, nil, packet.EncryptionEven, 2)
+	if err != nil {
+		t.Errorf("even key should still work after clearing odd: %v", err)
+	}
+}
+
+func TestClearSEKGCM(t *testing.T) {
+	ctx, err := NewWithMode(16, CipherGCM)
+	if err != nil {
+		t.Fatalf("NewWithMode failed: %v", err)
+	}
+
+	// Verify AEAD is non-nil before clear
+	ctx.mu.RLock()
+	if ctx.evenAEAD == nil {
+		ctx.mu.RUnlock()
+		t.Fatal("evenAEAD should be non-nil before ClearSEK")
+	}
+	ctx.mu.RUnlock()
+
+	ctx.ClearSEK(packet.EncryptionEven)
+
+	ctx.mu.RLock()
+	if ctx.evenAEAD != nil {
+		ctx.mu.RUnlock()
+		t.Error("evenAEAD should be nil after ClearSEK")
+	} else {
+		ctx.mu.RUnlock()
+	}
+}
+
+func TestClearSEKZerosBytes(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Save a reference to the even SEK to check it was zeroed
+	ctx.mu.RLock()
+	evenCopy := make([]byte, len(ctx.evenSEK))
+	copy(evenCopy, ctx.evenSEK)
+	ctx.mu.RUnlock()
+
+	// Verify the SEK is not all zeros before clearing
+	allZero := true
+	for _, b := range evenCopy {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Fatal("SEK should not be all zeros before ClearSEK (extremely unlikely)")
+	}
+
+	ctx.ClearSEK(packet.EncryptionEven)
+
+	// evenSEK slice should be nil now
+	ctx.mu.RLock()
+	if ctx.evenSEK != nil {
+		ctx.mu.RUnlock()
+		t.Error("evenSEK should be nil after ClearSEK")
+	} else {
+		ctx.mu.RUnlock()
+	}
+}
+
+func TestSalt(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	salt := ctx.Salt()
+
+	// Salt should not be all zeros (extremely unlikely with random generation)
+	allZero := true
+	for _, b := range salt {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Error("Salt should not be all zeros")
+	}
+
+	// Salt should be consistent across calls
+	salt2 := ctx.Salt()
+	if salt != salt2 {
+		t.Error("Salt should return the same value across calls")
+	}
+}
+
+func TestKeyLength(t *testing.T) {
+	for _, kl := range []int{16, 24, 32} {
+		ctx, err := New(kl)
+		if err != nil {
+			t.Fatalf("New(%d) failed: %v", kl, err)
+		}
+
+		got := ctx.KeyLength()
+		if got != kl {
+			t.Errorf("KeyLength for %d: got %d", kl, got)
+		}
+	}
+}
+
+func TestCipherAndSaltInvalidKey(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// EncryptPayload with invalid key type should return error
+	data := []byte("test data")
+	_, err = ctx.EncryptPayload(data, nil, packet.PacketEncryption(0), 1)
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey for invalid key type, got %v", err)
+	}
+
+	// Decrypt too
+	_, err = ctx.DecryptPayload(data, nil, packet.PacketEncryption(0), 1)
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey for invalid key type on decrypt, got %v", err)
+	}
+}
+
+func TestGCMInvalidKeyType(t *testing.T) {
+	ctx, err := NewWithMode(16, CipherGCM)
+	if err != nil {
+		t.Fatalf("NewWithMode failed: %v", err)
+	}
+
+	header := makeTestHeader(1, 1, 100, 1111)
+	data := []byte("test data")
+
+	// GCM encrypt with invalid key type
+	_, err = ctx.EncryptPayload(data, header, packet.PacketEncryption(0), 1)
+	if err != ErrInvalidKey {
+		t.Errorf("GCM encrypt: expected ErrInvalidKey for invalid key type, got %v", err)
+	}
+
+	// GCM decrypt with invalid key type
+	_, err = ctx.DecryptPayload(data, header, packet.PacketEncryption(0), 1)
+	if err != ErrInvalidKey {
+		t.Errorf("GCM decrypt: expected ErrInvalidKey for invalid key type, got %v", err)
+	}
+}
+
+func TestGCMEncryptNilHeader(t *testing.T) {
+	ctx, err := NewWithMode(16, CipherGCM)
+	if err != nil {
+		t.Fatalf("NewWithMode failed: %v", err)
+	}
+
+	original := []byte("test with nil header")
+
+	// Encrypt with nil header (AAD will be nil)
+	encrypted, err := ctx.EncryptPayload(original, nil, packet.EncryptionEven, 1)
+	if err != nil {
+		t.Fatalf("GCM encrypt with nil header failed: %v", err)
+	}
+
+	// Decrypt with nil header should succeed
+	decrypted, err := ctx.DecryptPayload(encrypted, nil, packet.EncryptionEven, 1)
+	if err != nil {
+		t.Fatalf("GCM decrypt with nil header failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, original) {
+		t.Errorf("nil header roundtrip failed")
+	}
+}
+
+func TestGCMEncryptShortHeader(t *testing.T) {
+	ctx, err := NewWithMode(16, CipherGCM)
+	if err != nil {
+		t.Fatalf("NewWithMode failed: %v", err)
+	}
+
+	original := []byte("test with short header")
+	shortHeader := []byte{1, 2, 3, 4} // less than 16 bytes
+
+	// Encrypt with short header (AAD will be nil)
+	encrypted, err := ctx.EncryptPayload(original, shortHeader, packet.EncryptionEven, 1)
+	if err != nil {
+		t.Fatalf("GCM encrypt with short header failed: %v", err)
+	}
+
+	// Decrypt with same short header should succeed
+	decrypted, err := ctx.DecryptPayload(encrypted, shortHeader, packet.EncryptionEven, 1)
+	if err != nil {
+		t.Fatalf("GCM decrypt with short header failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, original) {
+		t.Errorf("short header roundtrip failed")
+	}
+}
+
+func TestGenerateSEKInvalidKey(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	err = ctx.GenerateSEK(packet.PacketEncryption(0))
+	if err != ErrInvalidKey {
+		t.Errorf("GenerateSEK with invalid key: expected ErrInvalidKey, got %v", err)
+	}
+}
+
+func TestSetModeSameMode(t *testing.T) {
+	ctx, err := New(16) // starts as CTR
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// Setting same mode should be a no-op (early return)
+	ctx.SetMode(CipherCTR)
+	if ctx.Mode() != CipherCTR {
+		t.Error("mode should remain CTR")
+	}
+}
+
+func TestUnmarshalKMOddKey(t *testing.T) {
+	passphrase := "odd key test"
+
+	sender, err := New(16)
+	if err != nil {
+		t.Fatalf("New sender failed: %v", err)
+	}
+
+	km := &packet.CIFKeyMaterial{}
+	err = sender.MarshalKM(km, passphrase, packet.EncryptionOdd)
+	if err != nil {
+		t.Fatalf("MarshalKM odd failed: %v", err)
+	}
+
+	receiver, err := New(16)
+	if err != nil {
+		t.Fatalf("New receiver failed: %v", err)
+	}
+
+	err = receiver.UnmarshalKM(km, passphrase)
+	if err != nil {
+		t.Fatalf("UnmarshalKM odd failed: %v", err)
+	}
+
+	// Cross-context encrypt/decrypt with odd key
+	original := []byte("odd key cross-context test!")
+	data := make([]byte, len(original))
+	copy(data, original)
+
+	data, err = sender.EncryptPayload(data, nil, packet.EncryptionOdd, 1)
+	if err != nil {
+		t.Fatalf("sender encrypt odd failed: %v", err)
+	}
+
+	data, err = receiver.DecryptPayload(data, nil, packet.EncryptionOdd, 1)
+	if err != nil {
+		t.Fatalf("receiver decrypt odd failed: %v", err)
+	}
+
+	if !bytes.Equal(data, original) {
+		t.Error("odd key cross-context roundtrip failed")
+	}
+}
+
+func TestUnmarshalKMNoneKey(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	km := &packet.CIFKeyMaterial{
+		KeyBasedEncryption: packet.EncryptionNone,
+	}
+	err = ctx.UnmarshalKM(km, "passphrase")
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey for EncryptionNone, got %v", err)
+	}
+}
+
+func TestMarshalKMNoneKey(t *testing.T) {
+	ctx, err := New(16)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	km := &packet.CIFKeyMaterial{}
+	err = ctx.MarshalKM(km, "passphrase", packet.EncryptionNone)
+	if err != ErrInvalidKey {
+		t.Errorf("expected ErrInvalidKey for EncryptionNone, got %v", err)
+	}
+}
+
 // helper to create a 16-byte header for AAD testing
 func makeTestHeader(seqNo, msgNo, ts, socketID uint32) []byte {
 	var buf [16]byte

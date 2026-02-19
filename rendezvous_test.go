@@ -205,6 +205,27 @@ func TestRdvSwitchState(t *testing.T) {
 
 // --- Integration tests ---
 
+func TestRdvStateString(t *testing.T) {
+	tests := []struct {
+		state rdvState
+		want  string
+	}{
+		{rdvWaving, "WAVING"},
+		{rdvAttention, "ATTENTION"},
+		{rdvFine, "FINE"},
+		{rdvInitiated, "INITIATED"},
+		{rdvConnected, "CONNECTED"},
+		{rdvState(99), "INVALID"},
+	}
+
+	for _, tt := range tests {
+		got := tt.state.String()
+		if got != tt.want {
+			t.Errorf("rdvState(%d).String(): got %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
 func TestRendezvousBasic(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
@@ -439,4 +460,180 @@ func getEphemeralPort() (string, error) {
 	addr := conn.LocalAddr().String()
 	conn.Close()
 	return addr, nil
+}
+
+// --- Additional state machine edge case tests ---
+
+func TestRdvSwitchState_InvalidTransitions(t *testing.T) {
+	// Test invalid state machine transitions that produce rejection.
+	tests := []struct {
+		name     string
+		state    rdvState
+		recvType packet.HandshakeType
+		side     rdvSide
+	}{
+		// WAVING + AGREEMENT is not a valid transition
+		{"WAVING+AGREEMENT", rdvWaving, packet.HandshakeTypeAgreement, rdvInitiator},
+		// FINE + WAVEHAND is not handled (falls through to rejection)
+		{"FINE+WAVEHAND", rdvFine, packet.HandshakeTypeWavehand, rdvInitiator},
+		// INITIATED + WAVEHAND is not handled
+		{"INITIATED+WAVEHAND", rdvInitiated, packet.HandshakeTypeWavehand, rdvResponder},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trans := rdvSwitchState(tt.state, tt.recvType, tt.side, false)
+			if !trans.rspType.IsRejection() {
+				t.Errorf("expected rejection for invalid transition %s, got rspType=%v newState=%v",
+					tt.name, trans.rspType, trans.newState)
+			}
+		})
+	}
+}
+
+func TestRdvSwitchState_DrawInAttention(t *testing.T) {
+	// ATTENTION + CONCLUSION with DRAW side should produce rejection.
+	trans := rdvSwitchState(rdvAttention, packet.HandshakeTypeConclusion, rdvDraw, false)
+	if trans.newState != rdvWaving {
+		t.Errorf("expected newState=rdvWaving, got %v", trans.newState)
+	}
+	// The rspType should be the RejRdvCookie code
+	if uint32(trans.rspType) != uint32(RejRdvCookie) {
+		t.Errorf("expected rspType=RejRdvCookie (%d), got %d", RejRdvCookie, uint32(trans.rspType))
+	}
+}
+
+func TestRdvSwitchState_FineResponderResend(t *testing.T) {
+	// FINE + CONCLUSION for RESPONDER without ext flags should resend with HSRSP.
+	trans := rdvSwitchState(rdvFine, packet.HandshakeTypeConclusion, rdvResponder, false)
+	if trans.newState != rdvFine {
+		t.Errorf("expected newState=rdvFine, got %v", trans.newState)
+	}
+	if !trans.needsExt {
+		t.Error("expected needsExt=true")
+	}
+	if !trans.needsHSRSP {
+		t.Error("expected needsHSRSP=true for RESPONDER")
+	}
+}
+
+func TestRdvSwitchState_InitiatedConclusionResend(t *testing.T) {
+	// INITIATED + CONCLUSION should resend CONCLUSION+HSRSP.
+	trans := rdvSwitchState(rdvInitiated, packet.HandshakeTypeConclusion, rdvResponder, false)
+	if trans.newState != rdvInitiated {
+		t.Errorf("expected newState=rdvInitiated, got %v", trans.newState)
+	}
+	if !trans.needsExt {
+		t.Error("expected needsExt=true for resend")
+	}
+	if !trans.needsHSRSP {
+		t.Error("expected needsHSRSP=true for RESPONDER resend")
+	}
+}
+
+func TestRendezvousInvalidConfig(t *testing.T) {
+	// DialRendezvous with invalid config should fail at validation.
+	cfg := Config{
+		MSS: 10, // too small
+	}
+	_, err := DialRendezvous("127.0.0.1:5000", "127.0.0.1:5001", cfg)
+	if err == nil {
+		t.Error("DialRendezvous with invalid config should fail")
+	}
+}
+
+func TestRendezvousInvalidLocalAddr(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConnTimeout = 500 * time.Millisecond
+
+	_, err := DialRendezvous("invalid:addr:too:many", "127.0.0.1:5001", cfg)
+	if err == nil {
+		t.Error("DialRendezvous with invalid local address should fail")
+	}
+}
+
+func TestRendezvousInvalidRemoteAddr(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConnTimeout = 500 * time.Millisecond
+
+	_, err := DialRendezvous("127.0.0.1:0", "invalid:addr:too:many", cfg)
+	if err == nil {
+		t.Error("DialRendezvous with invalid remote address should fail")
+	}
+}
+
+func TestRendezvousCookieContest_SpecialCases(t *testing.T) {
+	// Test additional cookie contest edge cases.
+	tests := []struct {
+		name   string
+		agent  uint32
+		peer   uint32
+		expect rdvSide
+	}{
+		// Both zero => draw
+		{"both-zero", 0, 0, rdvDraw},
+		// Large gap
+		{"large-gap", 0xFFFF0000, 0x0000FFFF, rdvResponder},
+		// Adjacent values
+		{"adjacent", 100, 101, rdvResponder},
+		{"adjacent-reverse", 101, 100, rdvInitiator},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rdvCookieContest(tt.agent, tt.peer)
+			if got != tt.expect {
+				t.Errorf("rdvCookieContest(%#x, %#x) = %d, want %d",
+					tt.agent, tt.peer, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestRendezvousWithStreamID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 3 * time.Second
+	cfg.StreamID = "rendezvous/stream"
+
+	portA, err := getEphemeralPort()
+	if err != nil {
+		t.Fatalf("get port A: %v", err)
+	}
+	portB, err := getEphemeralPort()
+	if err != nil {
+		t.Fatalf("get port B: %v", err)
+	}
+
+	var connA, connB *Conn
+	var errA, errB error
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		connA, errA = DialRendezvous(portA, portB, cfg)
+	}()
+	go func() {
+		defer wg.Done()
+		connB, errB = DialRendezvous(portB, portA, cfg)
+	}()
+	wg.Wait()
+
+	if errA != nil {
+		t.Fatalf("DialRendezvous A: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("DialRendezvous B: %v", errB)
+	}
+	defer connA.Close()
+	defer connB.Close()
+
+	// Both should have the same stream ID
+	if connA.StreamID() != "rendezvous/stream" {
+		t.Errorf("A StreamID: got %q, want %q", connA.StreamID(), "rendezvous/stream")
+	}
+	if connB.StreamID() != "rendezvous/stream" {
+		t.Errorf("B StreamID: got %q, want %q", connB.StreamID(), "rendezvous/stream")
+	}
 }

@@ -2,6 +2,12 @@
 *.exe
 *.test
 *.out
+/filetransfer
+/loopback
+/receiver
+/sender
+/server
+/streaming
 
 # Reference implementations (development only)
 /srt-reference/

@@ -629,3 +629,338 @@ func TestListenerAddr(t *testing.T) {
 		t.Error("listener should have a non-zero port")
 	}
 }
+
+func TestListenWithEncryption(t *testing.T) {
+	serverCfg := DefaultConfig()
+	serverCfg.Latency = 20 * time.Millisecond
+	serverCfg.ConnTimeout = 2 * time.Second
+	serverCfg.Passphrase = "secretpassword1234"
+	serverCfg.KeyLength = 16
+
+	l, err := Listen("127.0.0.1:0", serverCfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Client with matching passphrase
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+	dialCfg.Passphrase = "secretpassword1234"
+	dialCfg.KeyLength = 16
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c, err := Dial(l.Addr().String(), dialCfg)
+		if err != nil {
+			t.Errorf("Dial with matching passphrase: %v", err)
+			return
+		}
+		c.Close()
+	}()
+
+	serverConn, err := l.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	serverConn.Close()
+	wg.Wait()
+}
+
+func TestListenWithWrongPassphrase(t *testing.T) {
+	serverCfg := DefaultConfig()
+	serverCfg.Latency = 20 * time.Millisecond
+	serverCfg.ConnTimeout = 2 * time.Second
+	serverCfg.Passphrase = "correctpassword1234"
+	serverCfg.KeyLength = 16
+
+	l, err := Listen("127.0.0.1:0", serverCfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Client with wrong passphrase
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 1 * time.Second
+	dialCfg.Passphrase = "wrongpassword12345"
+	dialCfg.KeyLength = 16
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail with wrong passphrase")
+	}
+}
+
+func TestListenWithEncryptionEnforced(t *testing.T) {
+	// Server requires encryption, client doesn't provide it
+	serverCfg := DefaultConfig()
+	serverCfg.Latency = 20 * time.Millisecond
+	serverCfg.ConnTimeout = 2 * time.Second
+	serverCfg.Passphrase = "secretpassword1234"
+	serverCfg.KeyLength = 16
+	enforced := true
+	serverCfg.EnforcedEncryption = &enforced
+
+	l, err := Listen("127.0.0.1:0", serverCfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Client without encryption
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 1 * time.Second
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail when server requires encryption and client doesn't provide it")
+	}
+}
+
+func TestListenWithLogger(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	cfg.Logger = StdLogger(nil) // nil writer — just verifies no panic
+
+	// Use a real writer for the test
+	var buf = &safeBuffer{}
+	cfg.Logger = StdLogger(buf)
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c, err := Dial(l.Addr().String(), dialCfg)
+		if err != nil {
+			t.Errorf("Dial: %v", err)
+			return
+		}
+		c.Close()
+	}()
+
+	serverConn, err := l.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	serverConn.Close()
+	wg.Wait()
+}
+
+// safeBuffer is a bytes.Buffer safe for concurrent writes (used by logger in tests).
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func TestListenWithSocketOptions(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	cfg.IPTTL = 64
+	cfg.IPTOS = 0x10
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c, err := Dial(l.Addr().String(), dialCfg)
+		if err != nil {
+			t.Errorf("Dial: %v", err)
+			return
+		}
+		c.Close()
+	}()
+
+	serverConn, err := l.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	serverConn.Close()
+	wg.Wait()
+}
+
+func TestListenRejectCongestionMismatch(t *testing.T) {
+	// Listener configured for file mode, dialer uses live mode
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	cfg.Congestion = CongestionFile
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+	// Default congestion is "live" — mismatch with "file"
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail with congestion mismatch")
+	}
+}
+
+func TestListenRejectMinVersion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	cfg.MinVersion = 0xFF0000 // impossibly high version
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail with MinVersion too high")
+	}
+}
+
+func TestListenAcceptRejectFunc(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Set a reject function that returns a rejection code
+	l.SetAcceptRejectFunc(func(req ConnRequest) RejectReason {
+		return RejPeer // always reject
+	})
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail when AcceptRejectFunc returns rejection")
+	}
+}
+
+func TestListenAcceptFuncRejectAll(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Set accept function that rejects all
+	l.SetAcceptFunc(func(req ConnRequest) bool {
+		return false
+	})
+
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail when AcceptFunc returns false")
+	}
+}
+
+func TestListenEncryptionUnsecure(t *testing.T) {
+	// Listener requires encryption, dialer does not send KM
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	cfg.Passphrase = "serverpassword"
+	enforced := true
+	cfg.EnforcedEncryption = &enforced
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Dialer has no passphrase
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+	// No Passphrase set
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail when server requires encryption but client has none")
+	}
+}
+
+func TestListenCallerEncryptionNoServer(t *testing.T) {
+	// Listener has no encryption, caller sends KM with enforced=true
+	cfg := DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 2 * time.Second
+	// No Passphrase on server
+	enforced := true
+	cfg.EnforcedEncryption = &enforced
+
+	l, err := Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer l.Close()
+
+	// Dialer sends encryption
+	dialCfg := DefaultConfig()
+	dialCfg.Latency = 20 * time.Millisecond
+	dialCfg.ConnTimeout = 2 * time.Second
+	dialCfg.Passphrase = "clientpassword"
+
+	_, err = Dial(l.Addr().String(), dialCfg)
+	if err == nil {
+		t.Error("Dial should fail when caller has encryption but server does not (enforced)")
+	}
+}

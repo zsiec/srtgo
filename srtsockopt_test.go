@@ -922,3 +922,267 @@ func TestPollEvents_AfterClose(t *testing.T) {
 		t.Error("expected EventErr to be set after close")
 	}
 }
+
+func TestConnStateString(t *testing.T) {
+	tests := []struct {
+		state ConnState
+		want  string
+	}{
+		{StateInit, "init"},
+		{StateOpened, "opened"},
+		{StateListening, "listening"},
+		{StateConnecting, "connecting"},
+		{StateConnected, "connected"},
+		{StateBroken, "broken"},
+		{StateClosing, "closing"},
+		{StateClosed, "closed"},
+		{StateNonExist, "nonexist"},
+		{ConnState(99), "unknown"},
+	}
+
+	for _, tt := range tests {
+		got := tt.state.String()
+		if got != tt.want {
+			t.Errorf("ConnState(%d).String(): got %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+func TestSetOption_InvalidOption(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOpt(9999), 42)
+	if err == nil {
+		t.Error("expected error for invalid option on SetOption")
+	}
+	if !errors.Is(err, ErrInvalidOption) {
+		t.Errorf("error = %v, want ErrInvalidOption", err)
+	}
+}
+
+func TestSetOption_InputBW_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Wrong type
+	err := c.SetOption(SockOptInputBW, "not-int64")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+
+	// Negative value
+	err = c.SetOption(SockOptInputBW, int64(-1))
+	if err == nil {
+		t.Error("expected error for negative value")
+	}
+}
+
+func TestSetOption_MinInputBW_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Wrong type
+	err := c.SetOption(SockOptMinInputBW, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+
+	// Negative value
+	err = c.SetOption(SockOptMinInputBW, int64(-1))
+	if err == nil {
+		t.Error("expected error for negative value")
+	}
+}
+
+func TestSetOption_SndDropDelay_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Wrong type
+	err := c.SetOption(SockOptSndDropDelay, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_SndDropDelay_Clamp(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Very negative value should clamp to -1
+	err := c.SetOption(SockOptSndDropDelay, -10)
+	if err != nil {
+		t.Fatalf("SetOption(SndDropDelay, -10): %v", err)
+	}
+	val, _ := c.GetOption(SockOptSndDropDelay)
+	if val.(int) != -1 {
+		t.Errorf("SndDropDelay = %d, want -1 (clamped)", val.(int))
+	}
+}
+
+func TestSetOption_LossMaxTTL_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Wrong type
+	err := c.SetOption(SockOptLossMaxTTL, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_RcvSyn_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptRcvSyn, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_Linger_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptLinger, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_SndTimeo_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptSndTimeo, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_RcvTimeo_Invalid(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptRcvTimeo, "wrong")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestSetOption_SndTimeo_ClampNeg(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptSndTimeo, -1*time.Second)
+	if err != nil {
+		t.Fatalf("SetOption(SndTimeo, -1s): %v", err)
+	}
+	val, _ := c.GetOption(SockOptSndTimeo)
+	if val.(time.Duration) != 0 {
+		t.Errorf("SndTimeo = %v, want 0 (clamped)", val)
+	}
+}
+
+func TestSetOption_RcvTimeo_ClampNeg(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	err := c.SetOption(SockOptRcvTimeo, -1*time.Second)
+	if err != nil {
+		t.Fatalf("SetOption(RcvTimeo, -1s): %v", err)
+	}
+	val, _ := c.GetOption(SockOptRcvTimeo)
+	if val.(time.Duration) != 0 {
+		t.Errorf("RcvTimeo = %v, want 0 (clamped)", val)
+	}
+}
+
+func TestSetOption_MaxBW_Zero(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// Zero should be treated as DefaultMaxBW
+	err := c.SetOption(SockOptMaxBW, int64(0))
+	if err != nil {
+		t.Fatalf("SetOption(MaxBW, 0): %v", err)
+	}
+	val, _ := c.GetOption(SockOptMaxBW)
+	if val.(int64) != DefaultMaxBW {
+		t.Errorf("MaxBW = %d, want %d (DefaultMaxBW)", val.(int64), DefaultMaxBW)
+	}
+}
+
+func TestSetOption_AfterClose(t *testing.T) {
+	c := newTestConn(t)
+	c.Close()
+
+	err := c.SetOption(SockOptMaxBW, int64(100))
+	if err == nil {
+		t.Error("expected error for SetOption after Close")
+	}
+}
+
+func TestGetOption_SndLatency(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	val, err := c.GetOption(SockOptSndLatency)
+	if err != nil {
+		t.Fatalf("GetOption(SndLatency): %v", err)
+	}
+	_, ok := val.(time.Duration)
+	if !ok {
+		t.Fatalf("SndLatency type = %T, want time.Duration", val)
+	}
+}
+
+func TestGetOption_Linger(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	val, err := c.GetOption(SockOptLinger)
+	if err != nil {
+		t.Fatalf("GetOption(Linger): %v", err)
+	}
+	_, ok := val.(time.Duration)
+	if !ok {
+		t.Fatalf("Linger type = %T, want time.Duration", val)
+	}
+}
+
+func TestGetOption_KmState_Server(t *testing.T) {
+	c := newTestConn(t)
+	defer c.Close()
+
+	// newTestConn creates a server-side conn (isServer=true)
+	val, err := c.GetOption(SockOptKmState)
+	if err != nil {
+		t.Fatalf("GetOption(KmState): %v", err)
+	}
+	// For server, KmState uses rcvKmState
+	if _, ok := val.(int32); !ok {
+		t.Fatalf("KmState type = %T, want int32", val)
+	}
+}
+
+func TestGetOption_TransType_File(t *testing.T) {
+	// Create a file-mode conn
+	c := newTestConn(t)
+	defer c.Close()
+
+	c.congestionType = "file"
+	val, err := c.GetOption(SockOptTransType)
+	if err != nil {
+		t.Fatalf("GetOption(TransType): %v", err)
+	}
+	tt, ok := val.(TransType)
+	if !ok {
+		t.Fatalf("TransType type = %T, want TransType", val)
+	}
+	if tt != TransTypeFile {
+		t.Errorf("TransType = %d, want TransTypeFile", tt)
+	}
+}

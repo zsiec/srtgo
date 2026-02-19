@@ -317,6 +317,158 @@ func TestDriftTracerReenabled(t *testing.T) {
 	}
 }
 
+func TestDelay(t *testing.T) {
+	delay := 150 * clock.Millisecond
+	timer := New(delay, clock.Timestamp(0))
+
+	got := timer.Delay()
+	if got != delay {
+		t.Errorf("Delay: got %d, want %d", got, delay)
+	}
+
+	// Verify it reflects SetDelay changes
+	newDelay := 300 * clock.Millisecond
+	timer.SetDelay(newDelay)
+	got = timer.Delay()
+	if got != newDelay {
+		t.Errorf("Delay after SetDelay: got %d, want %d", got, newDelay)
+	}
+}
+
+func TestGetInternalTimeBase(t *testing.T) {
+	delay := 100 * clock.Millisecond
+	timeBase := clock.Timestamp(5_000_000)
+	timer := New(delay, timeBase)
+
+	// Initial state: no wrap, no drift
+	tb := timer.GetInternalTimeBase()
+	if tb.TimeBase != timeBase {
+		t.Errorf("TimeBase: got %d, want %d", tb.TimeBase, timeBase)
+	}
+	if tb.WrapPeriod {
+		t.Error("WrapPeriod should be false initially")
+	}
+	if tb.Drift != 0 {
+		t.Errorf("Drift: got %d, want 0", tb.Drift)
+	}
+
+	// Enter wrap period and verify
+	timer.UpdateWrap(0xFFFFFFF0) // enter wrap
+	tb = timer.GetInternalTimeBase()
+	if !tb.WrapPeriod {
+		t.Error("WrapPeriod should be true after entering wrap")
+	}
+
+	// Test drift in a separate timer to avoid wrap-period interaction
+	timer2 := New(delay, clock.Timestamp(0))
+	for i := range driftMaxSamples {
+		pktTS := uint32(i * 10000)
+		localRecv := clock.Timestamp(int64(i*10000) + 200)
+		timer2.OnACK(pktTS, localRecv, -1)
+	}
+	tb2 := timer2.GetInternalTimeBase()
+	if tb2.Drift != 200 {
+		t.Errorf("Drift: got %d, want 200", tb2.Drift)
+	}
+}
+
+func TestApplyGroupDrift(t *testing.T) {
+	timer := New(100*clock.Millisecond, clock.Timestamp(0))
+
+	newTimeBase := clock.Timestamp(10_000_000)
+	newDrift := clock.Microseconds(500)
+
+	timer.ApplyGroupDrift(GroupTimeBase{
+		TimeBase:   newTimeBase,
+		WrapPeriod: true,
+		Drift:      newDrift,
+	})
+
+	tb := timer.GetInternalTimeBase()
+	if tb.TimeBase != newTimeBase {
+		t.Errorf("TimeBase after ApplyGroupDrift: got %d, want %d", tb.TimeBase, newTimeBase)
+	}
+	if !tb.WrapPeriod {
+		t.Error("WrapPeriod should be true after ApplyGroupDrift")
+	}
+	if tb.Drift != newDrift {
+		t.Errorf("Drift after ApplyGroupDrift: got %d, want %d", tb.Drift, newDrift)
+	}
+
+	// Verify delivery time uses the new state
+	// Small timestamp during wrap period gets carryover
+	delivery := timer.DeliveryTime(100)
+	// Expected: newTimeBase + wrapOffset(0) + timestampWrap + 100 + delay + drift
+	expected := newTimeBase.Add(clock.Microseconds(1<<32) + 100 + 100*clock.Millisecond + newDrift)
+	if delivery != expected {
+		t.Errorf("DeliveryTime after ApplyGroupDrift: got %d, want %d", delivery, expected)
+	}
+}
+
+func TestApplyGroupTime(t *testing.T) {
+	timer := New(100*clock.Millisecond, clock.Timestamp(0))
+
+	newTimeBase := clock.Timestamp(20_000_000)
+	newDrift := clock.Microseconds(300)
+	newDelay := 250 * clock.Millisecond
+
+	timer.ApplyGroupTime(GroupTimeBase{
+		TimeBase:   newTimeBase,
+		WrapPeriod: false,
+		Drift:      newDrift,
+	}, newDelay)
+
+	// Verify all fields were set
+	tb := timer.GetInternalTimeBase()
+	if tb.TimeBase != newTimeBase {
+		t.Errorf("TimeBase: got %d, want %d", tb.TimeBase, newTimeBase)
+	}
+	if tb.WrapPeriod {
+		t.Error("WrapPeriod should be false")
+	}
+	if tb.Drift != newDrift {
+		t.Errorf("Drift: got %d, want %d", tb.Drift, newDrift)
+	}
+
+	delay := timer.Delay()
+	if delay != newDelay {
+		t.Errorf("Delay: got %d, want %d", delay, newDelay)
+	}
+
+	// Verify delivery time uses the full new state
+	delivery := timer.DeliveryTime(1000)
+	expected := newTimeBase.Add(1000 + newDelay + newDrift)
+	if delivery != expected {
+		t.Errorf("DeliveryTime after ApplyGroupTime: got %d, want %d", delivery, expected)
+	}
+}
+
+func TestApplyGroupTimeWithWrap(t *testing.T) {
+	timer := New(100*clock.Millisecond, clock.Timestamp(0))
+
+	// Apply group state with wrap period active
+	timer.ApplyGroupTime(GroupTimeBase{
+		TimeBase:   clock.Timestamp(1_000_000),
+		WrapPeriod: true,
+		Drift:      clock.Microseconds(50),
+	}, 120*clock.Millisecond)
+
+	// Small timestamp during wrap period should get carryover
+	d1 := timer.DeliveryTime(100)
+	// Expected: 1_000_000 + 0 + 2^32 + 100 + 120_000 + 50
+	expected := clock.Timestamp(1_000_000).Add(clock.Microseconds(1<<32) + 100 + 120*clock.Millisecond + 50)
+	if d1 != expected {
+		t.Errorf("DeliveryTime with wrap: got %d, want %d", d1, expected)
+	}
+
+	// Large timestamp during wrap period should NOT get carryover
+	d2 := timer.DeliveryTime(500_000_000) // 500s > 60s threshold
+	expected2 := clock.Timestamp(1_000_000).Add(500_000_000 + 120*clock.Millisecond + 50)
+	if d2 != expected2 {
+		t.Errorf("DeliveryTime large ts with wrap: got %d, want %d", d2, expected2)
+	}
+}
+
 func BenchmarkIsReady(b *testing.B) {
 	timer := New(120*clock.Millisecond, clock.Timestamp(1_000_000))
 	now := clock.Timestamp(2_000_000)

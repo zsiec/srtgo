@@ -303,6 +303,226 @@ func TestLiveCCDefaultFromConn(t *testing.T) {
 	}
 }
 
+func TestLiveCCOnACKNoOpVerifyInterval(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	// Record interval before
+	before := cc.PacketInterval()
+
+	// Multiple ACKs with various parameters
+	cc.OnACK(100, 50000, 5000, 5000)
+	cc.OnACK(200, 100000, 10000, 10000)
+	cc.OnACK(300, 25000, 1000, 1000)
+
+	after := cc.PacketInterval()
+	if before != after {
+		t.Errorf("LiveCC.OnACK should not change PacketInterval: before=%d, after=%d", before, after)
+	}
+}
+
+func TestLiveCCOnNAKNoOpVerifyInterval(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	before := cc.PacketInterval()
+	cc.OnNAK([]uint32{100, 101, 102, 103, 104})
+	cc.OnNAK([]uint32{200})
+	cc.OnNAK(nil)
+	after := cc.PacketInterval()
+
+	if before != after {
+		t.Errorf("LiveCC.OnNAK should not change PacketInterval: before=%d, after=%d", before, after)
+	}
+}
+
+func TestLiveCCOnTimeoutNoOp(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	before := cc.PacketInterval()
+	cc.OnTimeout()
+	after := cc.PacketInterval()
+
+	if before != after {
+		t.Errorf("LiveCC.OnTimeout should not change PacketInterval: before=%d, after=%d", before, after)
+	}
+}
+
+func TestLiveCCMaxBandwidth(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	got := cc.MaxBandwidth()
+	if got != 10_000_000 {
+		t.Errorf("MaxBandwidth: got %d, want 10000000", got)
+	}
+
+	cc.SetMaxBandwidth(50_000_000)
+	got = cc.MaxBandwidth()
+	if got != 50_000_000 {
+		t.Errorf("MaxBandwidth after Set: got %d, want 50000000", got)
+	}
+}
+
+func TestLiveCCMaxBandwidthDefault(t *testing.T) {
+	// MaxBW=0 should use default
+	cc := NewLiveCC(0, 1316)
+	got := cc.MaxBandwidth()
+	if got != DefaultMaxBW {
+		t.Errorf("MaxBandwidth default: got %d, want %d", got, DefaultMaxBW)
+	}
+}
+
+func TestLiveCCMinNAKInterval(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	got := cc.MinNAKInterval()
+	if got != 20_000 {
+		t.Errorf("MinNAKInterval: got %d, want 20000 (20ms)", got)
+	}
+}
+
+func TestLiveCCUpdateNAKInterval(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	// UpdateNAKInterval divides by 2
+	got := cc.UpdateNAKInterval(100_000, 0, 0)
+	if got != 50_000 {
+		t.Errorf("UpdateNAKInterval(100000): got %d, want 50000", got)
+	}
+
+	got = cc.UpdateNAKInterval(300_000, 5000, 10)
+	if got != 150_000 {
+		t.Errorf("UpdateNAKInterval(300000): got %d, want 150000", got)
+	}
+
+	// Odd number
+	got = cc.UpdateNAKInterval(25_001, 0, 0)
+	if got != 12_500 {
+		t.Errorf("UpdateNAKInterval(25001): got %d, want 12500", got)
+	}
+}
+
+func TestLiveCCCheckTransArgs(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	// Payload > packetSize in write+msgAPI mode should return error
+	err := cc.CheckTransArgs(true, 2000, true)
+	if err == nil {
+		t.Error("expected error for payload > packetSize in write+msgAPI")
+	}
+
+	// Payload <= packetSize should be ok
+	err = cc.CheckTransArgs(true, 1316, true)
+	if err != nil {
+		t.Errorf("unexpected error for exact packetSize: %v", err)
+	}
+
+	// Payload of 0 should be ok
+	err = cc.CheckTransArgs(true, 0, true)
+	if err != nil {
+		t.Errorf("unexpected error for 0 payload: %v", err)
+	}
+
+	// Non-msgAPI mode (stream mode) never errors
+	err = cc.CheckTransArgs(false, 99999, true)
+	if err != nil {
+		t.Errorf("unexpected error for non-msgAPI mode: %v", err)
+	}
+
+	// Read direction never errors even with msgAPI
+	err = cc.CheckTransArgs(true, 99999, false)
+	if err != nil {
+		t.Errorf("unexpected error for read direction: %v", err)
+	}
+}
+
+func TestLiveCCACKMaxPackets(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+	if cc.ACKMaxPackets() != 0 {
+		t.Errorf("ACKMaxPackets: got %d, want 0", cc.ACKMaxPackets())
+	}
+}
+
+func TestLiveCCACKTimeoutUS(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+	if cc.ACKTimeoutUS() != 0 {
+		t.Errorf("ACKTimeoutUS: got %d, want 0", cc.ACKTimeoutUS())
+	}
+}
+
+func TestLiveCCUpdateBandwidthBothZero(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	before := cc.MaxBandwidth()
+	cc.UpdateBandwidth(0, 0)
+	after := cc.MaxBandwidth()
+
+	if before != after {
+		t.Errorf("UpdateBandwidth(0,0) should not change maxBW: before=%d, after=%d", before, after)
+	}
+}
+
+func TestLiveCCPacketIntervalNegativeMaxBW(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	// Force maxBW to 0 via atomic store
+	cc.atomicMaxBW.Store(0)
+	interval := cc.PacketInterval()
+
+	// Should return 1ms fallback
+	if interval != clock.Millisecond {
+		t.Errorf("PacketInterval with maxBW=0: got %d, want %d (1ms)", interval, clock.Millisecond)
+	}
+
+	// Force maxBW to negative
+	cc.atomicMaxBW.Store(-1)
+	interval = cc.PacketInterval()
+	if interval != clock.Millisecond {
+		t.Errorf("PacketInterval with maxBW=-1: got %d, want %d (1ms)", interval, clock.Millisecond)
+	}
+}
+
+func TestLiveCCOnPktArrival(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	baseTime := clock.Timestamp(1_000_000)
+
+	// Feed enough packets for delivery estimator
+	for i := range 20 {
+		cc.OnPktArrival(1316, baseTime.Add(clock.Microseconds(i)*175))
+	}
+
+	pktRate, bytesRate := cc.DeliveryRate()
+	if pktRate == 0 {
+		t.Error("expected non-zero pktRate from OnPktArrival")
+	}
+	if bytesRate == 0 {
+		t.Error("expected non-zero bytesRate from OnPktArrival")
+	}
+}
+
+func TestLiveCCDeliveryRate(t *testing.T) {
+	cc := NewLiveCC(10_000_000, 1316)
+
+	// Before any packets, delivery rate should be zero (not initialized)
+	pktRate, bytesRate := cc.DeliveryRate()
+	if pktRate != 0 || bytesRate != 0 {
+		t.Errorf("DeliveryRate before any packets: got (%d, %d), want (0, 0)", pktRate, bytesRate)
+	}
+
+	// Feed enough packets at steady rate
+	baseTime := clock.Timestamp(1_000_000)
+	for i := range 20 {
+		cc.OnPktArrival(1316, baseTime.Add(clock.Microseconds(i)*175))
+	}
+
+	pktRate, bytesRate = cc.DeliveryRate()
+	if pktRate == 0 {
+		t.Error("expected non-zero pktRate after feeding packets")
+	}
+	if bytesRate == 0 {
+		t.Error("expected non-zero bytesRate after feeding packets")
+	}
+}
+
 // --- Benchmarks ---
 
 func BenchmarkPacketInterval(b *testing.B) {

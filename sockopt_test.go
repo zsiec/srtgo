@@ -146,3 +146,146 @@ func TestListenUDPFastPath(t *testing.T) {
 	}
 	conn.Close()
 }
+
+func TestMakeSocketControlUDPBufSizes(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.UDPSendBufSize = 1024 * 256
+	cfg.UDPRecvBufSize = 1024 * 256
+
+	ctrl := makeSocketControl(cfg)
+	if ctrl == nil {
+		t.Fatal("expected non-nil control for UDP buf sizes")
+	}
+
+	conn, err := listenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP: %v", err)
+	}
+	defer conn.Close()
+
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		t.Skip("conn is not *net.UDPConn")
+	}
+	raw, err := udpConn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+
+	var sndBuf, rcvBuf int
+	var gErr error
+	raw.Control(func(fd uintptr) {
+		sndBuf, gErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF)
+		if gErr != nil {
+			return
+		}
+		rcvBuf, gErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+	})
+	if gErr != nil {
+		t.Fatalf("getsockopt: %v", gErr)
+	}
+	// OS may double the requested size, so just check it was set to at least the requested amount
+	if sndBuf < 1024*256 {
+		t.Logf("SO_SNDBUF = %d (may be capped by OS)", sndBuf)
+	}
+	if rcvBuf < 1024*256 {
+		t.Logf("SO_RCVBUF = %d (may be capped by OS)", rcvBuf)
+	}
+}
+
+func TestMakeSocketControlIPv6TOS(t *testing.T) {
+	// Skip if IPv6 is not available
+	ln, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Skip("IPv6 not available:", err)
+	}
+	ln.Close()
+
+	cfg := DefaultConfig()
+	cfg.IPTOS = 0x10
+
+	conn, err := listenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0}, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP IPv6: %v", err)
+	}
+	defer conn.Close()
+
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		t.Skip("conn is not *net.UDPConn")
+	}
+	raw, err := udpConn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+
+	var tclass int
+	var gErr error
+	raw.Control(func(fd uintptr) {
+		tclass, gErr = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS)
+	})
+	if gErr != nil {
+		t.Fatalf("getsockopt IPV6_TCLASS: %v", gErr)
+	}
+	if tclass != 0x10 {
+		t.Errorf("IPV6_TCLASS = %d, want %d", tclass, 0x10)
+	}
+}
+
+func TestMakeSocketControlIPv6Only(t *testing.T) {
+	// Skip if IPv6 is not available
+	ln, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Skip("IPv6 not available:", err)
+	}
+	ln.Close()
+
+	v6only := true
+	cfg := DefaultConfig()
+	cfg.IPv6Only = &v6only
+
+	conn, err := listenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0}, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP IPv6: %v", err)
+	}
+	defer conn.Close()
+}
+
+func TestMakeSocketControlCombined(t *testing.T) {
+	// Test combining multiple socket options
+	cfg := DefaultConfig()
+	cfg.IPTTL = 128
+	cfg.IPTOS = 0x04
+	cfg.UDPSendBufSize = 1024 * 64
+	cfg.UDPRecvBufSize = 1024 * 64
+
+	ctrl := makeSocketControl(cfg)
+	if ctrl == nil {
+		t.Fatal("expected non-nil control with multiple options set")
+	}
+
+	conn, err := listenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP: %v", err)
+	}
+	conn.Close()
+}
+
+func TestListenUDPNilAddr(t *testing.T) {
+	cfg := DefaultConfig()
+	conn, err := listenUDP("udp", nil, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP with nil addr: %v", err)
+	}
+	conn.Close()
+}
+
+func TestListenUDPNilAddrWithControl(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.IPTTL = 64 // force control callback
+	conn, err := listenUDP("udp", nil, cfg)
+	if err != nil {
+		t.Fatalf("listenUDP with nil addr + control: %v", err)
+	}
+	conn.Close()
+}

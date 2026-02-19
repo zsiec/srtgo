@@ -383,3 +383,362 @@ func TestConfigLatencySplit(t *testing.T) {
 		t.Error("validate should fail for PeerLatency < 20ms")
 	}
 }
+
+func TestConfigTsbpdEnabled(t *testing.T) {
+	// Live mode: TSBPD enabled
+	cfg := Config{Congestion: CongestionLive}
+	if !cfg.tsbpdEnabled() {
+		t.Error("tsbpdEnabled should be true for live mode")
+	}
+
+	// File mode: TSBPD disabled
+	cfg = Config{Congestion: CongestionFile}
+	if cfg.tsbpdEnabled() {
+		t.Error("tsbpdEnabled should be false for file mode")
+	}
+
+	// Default (empty): should be live, so TSBPD enabled
+	cfg = Config{}
+	if !cfg.tsbpdEnabled() {
+		t.Error("tsbpdEnabled should be true for default (empty) congestion")
+	}
+}
+
+func TestConfigTlpktdropEnabled(t *testing.T) {
+	// Live mode: TLPKTDROP enabled
+	cfg := Config{Congestion: CongestionLive}
+	if !cfg.tlpktdropEnabled() {
+		t.Error("tlpktdropEnabled should be true for live mode")
+	}
+
+	// File mode: TLPKTDROP disabled
+	cfg = Config{Congestion: CongestionFile}
+	if cfg.tlpktdropEnabled() {
+		t.Error("tlpktdropEnabled should be false for file mode")
+	}
+}
+
+func TestConfigRetransmitAlgo(t *testing.T) {
+	// Default live mode: retransmitAlgo = 1
+	cfg := Config{Congestion: CongestionLive}
+	if cfg.retransmitAlgo() != 1 {
+		t.Errorf("retransmitAlgo for live: got %d, want 1", cfg.retransmitAlgo())
+	}
+
+	// File mode: retransmitAlgo = 0
+	cfg = Config{Congestion: CongestionFile}
+	if cfg.retransmitAlgo() != 0 {
+		t.Errorf("retransmitAlgo for file: got %d, want 0", cfg.retransmitAlgo())
+	}
+
+	// Explicit override
+	v := 0
+	cfg = Config{Congestion: CongestionLive, RetransmitAlgo: &v}
+	if cfg.retransmitAlgo() != 0 {
+		t.Errorf("retransmitAlgo with explicit 0: got %d, want 0", cfg.retransmitAlgo())
+	}
+
+	v2 := 1
+	cfg = Config{Congestion: CongestionFile, RetransmitAlgo: &v2}
+	if cfg.retransmitAlgo() != 1 {
+		t.Errorf("retransmitAlgo with explicit 1: got %d, want 1", cfg.retransmitAlgo())
+	}
+}
+
+func TestConfigDriftTracerEnabled(t *testing.T) {
+	// Default (nil): enabled
+	cfg := Config{}
+	if !cfg.driftTracerEnabled() {
+		t.Error("driftTracerEnabled should be true by default")
+	}
+
+	// Explicit true
+	v := true
+	cfg = Config{DriftTracer: &v}
+	if !cfg.driftTracerEnabled() {
+		t.Error("driftTracerEnabled should be true when explicitly true")
+	}
+
+	// Explicit false
+	v2 := false
+	cfg = Config{DriftTracer: &v2}
+	if cfg.driftTracerEnabled() {
+		t.Error("driftTracerEnabled should be false when explicitly false")
+	}
+}
+
+func TestConfigSndSynEnabled(t *testing.T) {
+	// Default (nil): enabled
+	cfg := Config{}
+	if !cfg.sndSynEnabled() {
+		t.Error("sndSynEnabled should be true by default")
+	}
+
+	// Explicit false
+	v := false
+	cfg = Config{SndSyn: &v}
+	if cfg.sndSynEnabled() {
+		t.Error("sndSynEnabled should be false when explicitly false")
+	}
+}
+
+func TestConfigRcvSynEnabled(t *testing.T) {
+	// Default (nil): enabled
+	cfg := Config{}
+	if !cfg.rcvSynEnabled() {
+		t.Error("rcvSynEnabled should be true by default")
+	}
+
+	// Explicit false
+	v := false
+	cfg = Config{RcvSyn: &v}
+	if cfg.rcvSynEnabled() {
+		t.Error("rcvSynEnabled should be false when explicitly false")
+	}
+}
+
+func TestConfigMessageAPIEnabled(t *testing.T) {
+	// Default (nil): enabled
+	cfg := Config{}
+	if !cfg.messageAPIEnabled() {
+		t.Error("messageAPIEnabled should be true by default (nil)")
+	}
+
+	// Explicit true
+	v := true
+	cfg = Config{MessageAPI: &v}
+	if !cfg.messageAPIEnabled() {
+		t.Error("messageAPIEnabled should be true when explicitly true")
+	}
+
+	// Explicit false
+	v2 := false
+	cfg = Config{MessageAPI: &v2}
+	if cfg.messageAPIEnabled() {
+		t.Error("messageAPIEnabled should be false when explicitly false")
+	}
+}
+
+func TestConfigCongestionString(t *testing.T) {
+	cfg := Config{Congestion: CongestionLive}
+	if cfg.congestionString() != "live" {
+		t.Errorf("congestionString for live: got %q, want %q", cfg.congestionString(), "live")
+	}
+
+	cfg = Config{Congestion: CongestionFile}
+	if cfg.congestionString() != "file" {
+		t.Errorf("congestionString for file: got %q, want %q", cfg.congestionString(), "file")
+	}
+
+	// Default (empty) should return "live"
+	cfg = Config{}
+	if cfg.congestionString() != "live" {
+		t.Errorf("congestionString for default: got %q, want %q", cfg.congestionString(), "live")
+	}
+}
+
+func TestConfigSrtFlags(t *testing.T) {
+	// File mode: should NOT include TSBPD or TLPKTDROP flags
+	cfg := Config{Congestion: CongestionFile}
+	cfg.validate()
+	flags := cfg.srtFlags()
+
+	// Should NOT have TSBPD bits set
+	if flags&0x01 != 0 || flags&0x02 != 0 {
+		t.Errorf("file mode srtFlags should not have TSBPD bits set: 0x%08X", flags)
+	}
+
+	// Live mode: should include TSBPD and TLPKTDROP
+	cfg = Config{Congestion: CongestionLive}
+	cfg.validate()
+	flags = cfg.srtFlags()
+	// FlagTSBPDSend = 0x01
+	if flags&0x01 == 0 {
+		t.Errorf("live mode srtFlags should have FlagTSBPDSend: 0x%08X", flags)
+	}
+
+	// Stream mode: FlagStream set
+	f := false
+	cfg = Config{MessageAPI: &f}
+	cfg.validate()
+	flags = cfg.srtFlags()
+	// FlagStream = 0x80
+	if flags&0x80 == 0 {
+		t.Errorf("stream mode srtFlags should have FlagStream: 0x%08X", flags)
+	}
+
+	// NAKReport=false: FlagPeriodicNAK cleared
+	nf := false
+	cfg = Config{NAKReport: &nf}
+	cfg.validate()
+	flags = cfg.srtFlags()
+	// FlagPeriodicNAK = 0x10
+	if flags&0x10 != 0 {
+		t.Errorf("NAKReport=false srtFlags should not have FlagPeriodicNAK: 0x%08X", flags)
+	}
+}
+
+func TestConfigValidateTransType(t *testing.T) {
+	// TransTypeFile should override Congestion to "file"
+	cfg := Config{TransType: TransTypeFile}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate TransTypeFile: %v", err)
+	}
+	if cfg.Congestion != CongestionFile {
+		t.Errorf("Congestion after TransTypeFile: got %q, want %q", cfg.Congestion, CongestionFile)
+	}
+	// File mode defaults: Linger should be 180s
+	if cfg.Linger != 180*time.Second {
+		t.Errorf("Linger after TransTypeFile: got %v, want 180s", cfg.Linger)
+	}
+	// MessageAPI should be false for file mode
+	if cfg.messageAPIEnabled() {
+		t.Error("messageAPIEnabled should be false for file mode")
+	}
+
+	// Invalid congestion string
+	cfg = Config{Congestion: CongestionType("invalid")}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for invalid Congestion")
+	}
+}
+
+func TestConfigValidatePayloadSize(t *testing.T) {
+	// Valid PayloadSize
+	cfg := Config{PayloadSize: 100}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate PayloadSize=100: %v", err)
+	}
+
+	// PayloadSize too small
+	cfg = Config{PayloadSize: 10}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for PayloadSize < 32")
+	}
+
+	// PayloadSize too large (> MSS - 44)
+	cfg = Config{MSS: 100, PayloadSize: 100}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for PayloadSize > MSS - 44")
+	}
+}
+
+func TestConfigValidateKeyLength(t *testing.T) {
+	// Invalid key length with passphrase
+	cfg := Config{Passphrase: "1234567890", KeyLength: 20}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for KeyLength=20")
+	}
+
+	// Valid key lengths
+	for _, kl := range []int{16, 24, 32} {
+		cfg = Config{Passphrase: "1234567890", KeyLength: kl}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("validate KeyLength=%d: %v", kl, err)
+		}
+	}
+}
+
+func TestConfigValidateIPTTL(t *testing.T) {
+	// 0 treated as unset (becomes -1)
+	cfg := Config{IPTTL: 0}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate IPTTL=0: %v", err)
+	}
+	if cfg.IPTTL != -1 {
+		t.Errorf("IPTTL: got %d, want -1 (treated as unset)", cfg.IPTTL)
+	}
+
+	// Invalid IPTTL
+	cfg = Config{IPTTL: 300}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for IPTTL=300")
+	}
+
+	// Valid IPTTL
+	cfg = Config{IPTTL: 64}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate IPTTL=64: %v", err)
+	}
+}
+
+func TestConfigValidateIPTOS(t *testing.T) {
+	// Invalid IPTOS
+	cfg := Config{IPTOS: 300}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for IPTOS=300")
+	}
+
+	// Valid IPTOS
+	cfg = Config{IPTOS: 128}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate IPTOS=128: %v", err)
+	}
+}
+
+func TestConfigValidateUDPBufSizes(t *testing.T) {
+	// Negative clamped to 0
+	cfg := Config{UDPSendBufSize: -1, UDPRecvBufSize: -1}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.UDPSendBufSize != 0 {
+		t.Errorf("UDPSendBufSize: got %d, want 0 (clamped)", cfg.UDPSendBufSize)
+	}
+	if cfg.UDPRecvBufSize != 0 {
+		t.Errorf("UDPRecvBufSize: got %d, want 0 (clamped)", cfg.UDPRecvBufSize)
+	}
+
+	// Too small clamped to MSS
+	cfg = Config{UDPSendBufSize: 100, UDPRecvBufSize: 100}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.UDPSendBufSize < cfg.MSS {
+		t.Errorf("UDPSendBufSize: got %d, want >= MSS=%d", cfg.UDPSendBufSize, cfg.MSS)
+	}
+	if cfg.UDPRecvBufSize < cfg.MSS {
+		t.Errorf("UDPRecvBufSize: got %d, want >= MSS=%d", cfg.UDPRecvBufSize, cfg.MSS)
+	}
+}
+
+func TestConfigValidateInputBW(t *testing.T) {
+	// Negative clamped to 0
+	cfg := Config{InputBW: -10}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.InputBW != 0 {
+		t.Errorf("InputBW: got %d, want 0 (clamped)", cfg.InputBW)
+	}
+}
+
+func TestConfigValidateLossMaxTTL(t *testing.T) {
+	// Negative clamped to 0
+	cfg := Config{LossMaxTTL: -5}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.LossMaxTTL != 0 {
+		t.Errorf("LossMaxTTL: got %d, want 0 (clamped)", cfg.LossMaxTTL)
+	}
+}
+
+func TestConfigValidateSndDropDelay(t *testing.T) {
+	// Values < -1 clamped to -1
+	cfg := Config{SndDropDelay: -5}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.SndDropDelay != -1 {
+		t.Errorf("SndDropDelay: got %d, want -1 (clamped)", cfg.SndDropDelay)
+	}
+}
+
+func TestConfigValidatePacketFilter(t *testing.T) {
+	// Invalid filter string
+	cfg := Config{PacketFilter: "invalid-filter-string"}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail for invalid PacketFilter")
+	}
+}

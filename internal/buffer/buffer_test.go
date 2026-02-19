@@ -1422,3 +1422,1128 @@ func TestRecvBufferSetInitialRcvSeq(t *testing.T) {
 		t.Errorf("Size after insert at new pos: got %d, want 1", rb.Size())
 	}
 }
+
+// ==================== SendBuffer additional coverage tests ====================
+
+func TestSendBufferPushBatchSuccess(t *testing.T) {
+	sb := NewSendBuffer(16, seq.Number(0))
+
+	pkts := make([]packet.Packet, 4)
+	for i := range pkts {
+		pkts[i] = packet.NewData(nil, uint32(i), uint32(i*100), 0, []byte("batch"))
+	}
+
+	sentAt := clock.Timestamp(5000)
+	ok := sb.PushBatch(pkts, sentAt)
+	if !ok {
+		t.Fatal("PushBatch should succeed when buffer has space")
+	}
+
+	if sb.Size() != 4 {
+		t.Errorf("Size after PushBatch: got %d, want 4", sb.Size())
+	}
+	if sb.NextSeq() != seq.Number(4) {
+		t.Errorf("NextSeq after PushBatch: got %d, want 4", sb.NextSeq())
+	}
+
+	// Verify all packets are retrievable
+	for i := range uint32(4) {
+		p, ok := sb.Get(seq.Number(i))
+		if !ok {
+			t.Fatalf("Get(%d) failed after PushBatch", i)
+		}
+		if string(p.Data) != "batch" {
+			t.Errorf("Get(%d) data: got %q, want %q", i, p.Data, "batch")
+		}
+		p.Release()
+	}
+}
+
+func TestSendBufferPushBatchInsufficientSpace(t *testing.T) {
+	sb := NewSendBuffer(4, seq.Number(0)) // capacity 4
+
+	// Fill 3 slots
+	for i := range uint32(3) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		sb.Push(p)
+	}
+
+	// Try to push batch of 2 (only 1 slot left) — should fail
+	pkts := []packet.Packet{
+		packet.NewData(nil, 3, 0, 0, []byte("a")),
+		packet.NewData(nil, 4, 0, 0, []byte("b")),
+	}
+	ok := sb.PushBatch(pkts, clock.Timestamp(1000))
+	if ok {
+		t.Error("PushBatch should fail when insufficient space")
+	}
+
+	// Verify buffer state unchanged (atomic failure)
+	if sb.Size() != 3 {
+		t.Errorf("Size should be unchanged: got %d, want 3", sb.Size())
+	}
+
+	// Clean up the batch packets that weren't inserted
+	for i := range pkts {
+		pkts[i].Release()
+	}
+}
+
+func TestSendBufferNAKTimed(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Push 5 packets at time 1000
+	sentAt := clock.Timestamp(1000)
+	for i := range uint32(5) {
+		p := packet.NewData(nil, i, uint32(i*100), 0, []byte("timed"))
+		sb.Push(p, sentAt)
+	}
+
+	rtt := clock.Microseconds(10000)    // 10ms
+	rttVar := clock.Microseconds(1000)  // 1ms
+	// rexmitGate = rtt - 4*rttVar = 10000 - 4000 = 6000us
+	// timeNAK = now - 6000
+
+	now := clock.Timestamp(20000)
+	// timeNAK = 20000 - 6000 = 14000
+	// All packets have rexmitTime = 0 (zero), which is before timeNAK, so all eligible
+
+	lossSeqs := []uint32{0, 1, 2, 3, 4}
+	retransmit := sb.NAKTimed(lossSeqs, now, rtt, rttVar)
+	if len(retransmit) != 5 {
+		t.Fatalf("NAKTimed first call: got %d packets, want 5", len(retransmit))
+	}
+	for _, p := range retransmit {
+		if !p.Header.Retransmitted {
+			t.Error("retransmitted packet should have Retransmitted flag set")
+		}
+		p.Release()
+	}
+
+	// Immediately try again at the same time — all should be skipped because
+	// rexmitTime was just set to now=20000, and 20000 >= timeNAK=14000
+	retransmit2 := sb.NAKTimed(lossSeqs, now, rtt, rttVar)
+	if len(retransmit2) != 0 {
+		t.Errorf("NAKTimed immediate retry: got %d packets, want 0 (gated by RTT)", len(retransmit2))
+		for _, p := range retransmit2 {
+			p.Release()
+		}
+	}
+
+	// Advance time past the rexmit gate (rexmitTime 20000 must be before timeNAK)
+	// We need now2 such that now2 - 6000 > 20000, i.e., now2 > 26000
+	now2 := clock.Timestamp(27000)
+	// timeNAK = 27000 - 6000 = 21000. rexmitTime=20000 < 21000, so eligible.
+	retransmit3 := sb.NAKTimed(lossSeqs, now2, rtt, rttVar)
+	if len(retransmit3) != 5 {
+		t.Fatalf("NAKTimed after gate: got %d packets, want 5", len(retransmit3))
+	}
+	for _, p := range retransmit3 {
+		p.Release()
+	}
+}
+
+func TestSendBufferNAKTimedOutOfRange(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(5))
+
+	// Push 3 packets at seq 5,6,7
+	for i := uint32(5); i < 8; i++ {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+
+	now := clock.Timestamp(20000)
+	rtt := clock.Microseconds(5000)
+	rttVar := clock.Microseconds(500)
+
+	// Out-of-range sequences: below startSeq and above nextSeq
+	lossSeqs := []uint32{2, 3, 10, 100}
+	retransmit := sb.NAKTimed(lossSeqs, now, rtt, rttVar)
+	if len(retransmit) != 0 {
+		t.Errorf("NAKTimed out-of-range: got %d, want 0", len(retransmit))
+		for _, p := range retransmit {
+			p.Release()
+		}
+	}
+}
+
+func TestSendBufferNAKTimedNegativeGate(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	p := packet.NewData(nil, 0, 0, 0, []byte("x"))
+	sb.Push(p, clock.Timestamp(1000))
+
+	// rttVar so large that rtt - 4*rttVar < 0 => clamped to 0
+	rtt := clock.Microseconds(1000)
+	rttVar := clock.Microseconds(1000) // rtt - 4*rttVar = 1000 - 4000 = -3000 => 0
+	now := clock.Timestamp(5000)
+	// rexmitGate=0, timeNAK=now-0=5000. rexmitTime=0 (zero) < 5000, so eligible.
+
+	retransmit := sb.NAKTimed([]uint32{0}, now, rtt, rttVar)
+	if len(retransmit) != 1 {
+		t.Fatalf("NAKTimed negative gate: got %d, want 1", len(retransmit))
+	}
+	retransmit[0].Release()
+}
+
+func TestSendBufferNAKTimedUnusedSlot(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Push packets 0,1,2
+	for i := range uint32(3) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+	// ACK packet 0 (marks slot as unused)
+	sb.ACK(seq.Number(1))
+
+	now := clock.Timestamp(20000)
+	rtt := clock.Microseconds(5000)
+	rttVar := clock.Microseconds(500)
+
+	// Request retransmit of seq 0 (already ACK'd, slot unused)
+	// and seq 1 (valid, should be returned)
+	retransmit := sb.NAKTimed([]uint32{0, 1}, now, rtt, rttVar)
+	// seq 0 is out of range (below startSeq=1), seq 1 should be returned
+	if len(retransmit) != 1 {
+		t.Fatalf("NAKTimed unused slot: got %d, want 1", len(retransmit))
+	}
+	retransmit[0].Release()
+}
+
+func TestSendBufferNextSeq(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(10))
+
+	if sb.NextSeq() != seq.Number(10) {
+		t.Errorf("NextSeq initial: got %d, want 10", sb.NextSeq())
+	}
+
+	p := packet.NewData(nil, 10, 0, 0, []byte("x"))
+	sb.Push(p)
+
+	if sb.NextSeq() != seq.Number(11) {
+		t.Errorf("NextSeq after Push: got %d, want 11", sb.NextSeq())
+	}
+
+	p2 := packet.NewData(nil, 11, 0, 0, []byte("y"))
+	sb.Push(p2)
+
+	if sb.NextSeq() != seq.Number(12) {
+		t.Errorf("NextSeq after second Push: got %d, want 12", sb.NextSeq())
+	}
+}
+
+func TestSendBufferOverrideNextSeqEmpty(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// On empty buffer, both startSeq and nextSeq should be set
+	ok := sb.OverrideNextSeq(seq.Number(100))
+	if !ok {
+		t.Error("OverrideNextSeq should return true")
+	}
+
+	if sb.StartSeq() != seq.Number(100) {
+		t.Errorf("StartSeq after override: got %d, want 100", sb.StartSeq())
+	}
+	if sb.NextSeq() != seq.Number(100) {
+		t.Errorf("NextSeq after override: got %d, want 100", sb.NextSeq())
+	}
+}
+
+func TestSendBufferOverrideNextSeqNonEmpty(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Push some packets
+	for i := range uint32(3) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		sb.Push(p)
+	}
+
+	// Override nextSeq — startSeq should remain unchanged
+	ok := sb.OverrideNextSeq(seq.Number(100))
+	if !ok {
+		t.Error("OverrideNextSeq should return true")
+	}
+
+	if sb.StartSeq() != seq.Number(0) {
+		t.Errorf("StartSeq after override: got %d, want 0 (unchanged)", sb.StartSeq())
+	}
+	if sb.NextSeq() != seq.Number(100) {
+		t.Errorf("NextSeq after override: got %d, want 100", sb.NextSeq())
+	}
+}
+
+func TestSendBufferOldestSendTime(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Empty buffer returns zero
+	if sb.OldestSendTime() != 0 {
+		t.Errorf("OldestSendTime empty: got %d, want 0", sb.OldestSendTime())
+	}
+
+	// Push packets with different sentAt times
+	p1 := packet.NewData(nil, 0, 0, 0, []byte("a"))
+	sb.Push(p1, clock.Timestamp(5000))
+
+	p2 := packet.NewData(nil, 1, 0, 0, []byte("b"))
+	sb.Push(p2, clock.Timestamp(6000))
+
+	// Should return the sentAt of startSeq (seq 0)
+	if sb.OldestSendTime() != clock.Timestamp(5000) {
+		t.Errorf("OldestSendTime: got %d, want 5000", sb.OldestSendTime())
+	}
+
+	// ACK seq 0, now startSeq is 1
+	sb.ACK(seq.Number(1))
+
+	if sb.OldestSendTime() != clock.Timestamp(6000) {
+		t.Errorf("OldestSendTime after ACK: got %d, want 6000", sb.OldestSendTime())
+	}
+}
+
+func TestSendBufferDropUntil(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	for i := range uint32(10) {
+		p := packet.NewData(nil, i, uint32(i*100), 0, []byte("drop"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+
+	// Drop packets 0-4
+	dropped := sb.DropUntil(seq.Number(5))
+	if dropped != 5 {
+		t.Errorf("DropUntil: got %d, want 5", dropped)
+	}
+	if sb.Size() != 5 {
+		t.Errorf("Size after DropUntil: got %d, want 5", sb.Size())
+	}
+	if sb.StartSeq() != seq.Number(5) {
+		t.Errorf("StartSeq after DropUntil: got %d, want 5", sb.StartSeq())
+	}
+
+	// Drop remaining
+	dropped = sb.DropUntil(seq.Number(10))
+	if dropped != 5 {
+		t.Errorf("DropUntil rest: got %d, want 5", dropped)
+	}
+	if sb.Size() != 0 {
+		t.Errorf("Size after DropUntil rest: got %d, want 0", sb.Size())
+	}
+}
+
+func TestSendBufferDropUntilEmpty(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// DropUntil on empty buffer
+	dropped := sb.DropUntil(seq.Number(5))
+	if dropped != 0 {
+		t.Errorf("DropUntil empty: got %d, want 0", dropped)
+	}
+}
+
+func TestSendBufferGetAllUnacked(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Empty buffer returns nil
+	result := sb.GetAllUnacked()
+	if result != nil {
+		t.Errorf("GetAllUnacked empty: got %v, want nil", result)
+	}
+
+	// Push 5 packets
+	for i := range uint32(5) {
+		p := packet.NewData(nil, i, uint32(i*100), 0, []byte("unacked"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+
+	// ACK first 2
+	sb.ACK(seq.Number(2))
+
+	// GetAllUnacked should return 3 cloned packets (seq 2,3,4)
+	result = sb.GetAllUnacked()
+	if len(result) != 3 {
+		t.Fatalf("GetAllUnacked: got %d packets, want 3", len(result))
+	}
+
+	for _, p := range result {
+		if !p.Header.Retransmitted {
+			t.Error("GetAllUnacked packets should have Retransmitted=true")
+		}
+		if string(p.Data) != "unacked" {
+			t.Errorf("GetAllUnacked data: got %q, want %q", p.Data, "unacked")
+		}
+		p.Release()
+	}
+}
+
+func TestSendBufferCapacity(t *testing.T) {
+	sb := NewSendBuffer(10, seq.Number(0))
+	// 10 rounds up to 16
+	if sb.Capacity() != 16 {
+		t.Errorf("Capacity: got %d, want 16", sb.Capacity())
+	}
+
+	sb2 := NewSendBuffer(8, seq.Number(0))
+	if sb2.Capacity() != 8 {
+		t.Errorf("Capacity: got %d, want 8", sb2.Capacity())
+	}
+}
+
+func TestSendBufferSetMsgTTLBatch(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// PushBatch 3 packets
+	pkts := []packet.Packet{
+		packet.NewData(nil, 0, 0, 0, []byte("f1")),
+		packet.NewData(nil, 1, 100, 0, []byte("f2")),
+		packet.NewData(nil, 2, 200, 0, []byte("f3")),
+	}
+	sb.PushBatch(pkts, clock.Timestamp(5000))
+
+	// Set TTL on all 3 fragments
+	ttl := int64(500_000_000) // 500ms
+	sb.SetMsgTTLBatch(ttl, 3)
+
+	// Verify all entries have the TTL set
+	sb.mu.Lock()
+	for i := range 3 {
+		idx := i & sb.mask
+		if sb.entries[idx].msgTTL != ttl {
+			t.Errorf("entry %d msgTTL: got %d, want %d", i, sb.entries[idx].msgTTL, ttl)
+		}
+	}
+	sb.mu.Unlock()
+}
+
+func TestSendBufferSetMsgTTLBatchEmpty(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// SetMsgTTLBatch on empty buffer should not panic
+	sb.SetMsgTTLBatch(100_000, 3)
+}
+
+func TestSendBufferSetMsgTTLBatchZeroN(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	p := packet.NewData(nil, 0, 0, 0, []byte("x"))
+	sb.Push(p, clock.Timestamp(1000))
+
+	// n=0 should be a no-op
+	sb.SetMsgTTLBatch(100_000, 0)
+
+	sb.mu.Lock()
+	if sb.entries[0].msgTTL != 0 {
+		t.Errorf("msgTTL should be 0 after SetMsgTTLBatch with n=0")
+	}
+	sb.mu.Unlock()
+}
+
+// ==================== RecvBuffer additional coverage tests ====================
+
+func TestRecvBufferSetOnReadCallback(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	var capturedTS uint32
+	rb.SetOnRead(func(ts uint32) {
+		capturedTS = ts
+	})
+
+	// Insert a packet with timestamp 42000
+	p := packet.NewData(nil, 0, 42000, 0, []byte("callback"))
+	p.Header.PacketPosition = packet.PositionSingle
+	p.Header.MessageNumber = 1
+	rb.Insert(p, clock.Timestamp(1000))
+
+	// Read via ReadTSBPD (which invokes onRead)
+	dtFunc := func(ts uint32) clock.Timestamp {
+		return clock.Timestamp(ts) // no delay
+	}
+	_, ok := rb.ReadTSBPD(clock.Timestamp(50000), dtFunc)
+	if !ok {
+		t.Fatal("ReadTSBPD should succeed")
+	}
+
+	if capturedTS != 42000 {
+		t.Errorf("onRead callback received timestamp %d, want 42000", capturedTS)
+	}
+}
+
+func TestRecvBufferSetOnDropCallback(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	var droppedTimestamps []uint32
+	rb.SetOnDrop(func(ts uint32) {
+		droppedTimestamps = append(droppedTimestamps, ts)
+	})
+
+	// Insert packets 0 and 1
+	p0 := packet.NewData(nil, 0, 10000, 0, []byte("drop0"))
+	rb.Insert(p0, clock.Timestamp(1000))
+
+	p1 := packet.NewData(nil, 1, 20000, 0, []byte("drop1"))
+	rb.Insert(p1, clock.Timestamp(2000))
+
+	// Drop up to seq 2 — should call onDrop for both
+	rb.Drop(seq.Number(2))
+
+	if len(droppedTimestamps) != 2 {
+		t.Fatalf("onDrop called %d times, want 2", len(droppedTimestamps))
+	}
+	if droppedTimestamps[0] != 10000 {
+		t.Errorf("onDrop[0]: got %d, want 10000", droppedTimestamps[0])
+	}
+	if droppedTimestamps[1] != 20000 {
+		t.Errorf("onDrop[1]: got %d, want 20000", droppedTimestamps[1])
+	}
+}
+
+func TestRecvBufferCapacity(t *testing.T) {
+	rb := NewRecvBuffer(10, seq.Number(0))
+	// 10 rounds up to 16, capacity = 16 - 1 = 15
+	if rb.Capacity() != 15 {
+		t.Errorf("Capacity: got %d, want 15", rb.Capacity())
+	}
+
+	rb2 := NewRecvBuffer(8, seq.Number(0))
+	// 8 is already pow2, capacity = 8 - 1 = 7
+	if rb2.Capacity() != 7 {
+		t.Errorf("Capacity: got %d, want 7", rb2.Capacity())
+	}
+}
+
+func TestRecvBufferAvailableSize(t *testing.T) {
+	rb := NewRecvBuffer(16, seq.Number(0))
+	cap := rb.Capacity() // 15
+
+	// Initially, startSeq >= lastAck (both 0) => returns full capacity
+	avail := rb.AvailableSize(seq.Number(0))
+	if avail != cap {
+		t.Errorf("AvailableSize initial: got %d, want %d", avail, cap)
+	}
+
+	// Insert 5 packets, then ACK up to 5
+	for i := range uint32(5) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		rb.Insert(p, clock.Timestamp(0))
+	}
+
+	// lastAck = 5, startSeq = 0 => used = Distance(0,5) = 5
+	// available = 15 - 5 + 1 = 11
+	avail = rb.AvailableSize(seq.Number(5))
+	if avail != 11 {
+		t.Errorf("AvailableSize with 5 used: got %d, want 11", avail)
+	}
+
+	// Read all 5 packets to advance startSeq
+	for range 5 {
+		rb.ReadNext()
+	}
+
+	// Now startSeq=5, lastAck=5 => startSeq >= lastAck => full capacity
+	avail = rb.AvailableSize(seq.Number(5))
+	if avail != cap {
+		t.Errorf("AvailableSize after read: got %d, want %d", avail, cap)
+	}
+}
+
+func TestRecvBufferAvailableSizeOverflow(t *testing.T) {
+	rb := NewRecvBuffer(8, seq.Number(0))
+	_ = rb.Capacity() // 7
+
+	// When distance > capacity, should return 0
+	// Insert packets to create a large distance
+	for i := range uint32(7) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		rb.Insert(p, clock.Timestamp(0))
+	}
+
+	// lastAck far ahead (but we need startSeq to be behind)
+	// startSeq=0, lastAck=20 => used=20 > cap=7 => return 0
+	avail := rb.AvailableSize(seq.Number(20))
+	if avail != 0 {
+		t.Errorf("AvailableSize overflow: got %d, want 0", avail)
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOutOfOrder(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Empty buffer — checkFirstReadableOutOfOrder should return false
+	rb.mu.Lock()
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false for empty buffer")
+	}
+
+	// Insert OOO single-packet message at seq 1 (gap at 0)
+	p1 := makeOOOPacket(1, packet.PositionSingle, 10, false, "ooo")
+	rb.Insert(p1, 0)
+
+	// Now firstReadableOOO should be set
+	rb.mu.Lock()
+	if rb.firstReadableOOO < 0 {
+		t.Error("firstReadableOOO should be set after insert of complete OOO message")
+	}
+	result = rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+	if !result {
+		t.Error("checkFirstReadableOutOfOrder should return true for valid OOO message")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOutOfOrderInvalid(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Manually set firstReadableOOO to an invalid index
+	rb.mu.Lock()
+	rb.numOutOfOrderPkts = 1
+	rb.firstReadableOOO = 5 // points to an empty slot
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false for invalid index (empty slot)")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOOrderFlagTrue(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert an Order=true packet at seq 1 (gap at 0)
+	p1 := makeOOOPacket(1, packet.PositionSingle, 10, true, "ordered")
+	rb.Insert(p1, 0)
+
+	// Manually set state as if it were an OOO candidate
+	rb.mu.Lock()
+	rb.numOutOfOrderPkts = 1
+	rb.firstReadableOOO = int(uint32(1)) & rb.mask
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false for Order=true packet")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOZeroCount(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// numOutOfOrderPkts=0 but firstReadableOOO set -> false
+	rb.mu.Lock()
+	rb.numOutOfOrderPkts = 0
+	rb.firstReadableOOO = 3
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false when numOutOfOrderPkts=0")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOMultiPacketMsgNoMatch(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert two OOO packets with DIFFERENT message numbers next to each other
+	// This tests the msgNo mismatch path in checkFirstReadableOutOfOrder
+	p1 := makeOOOPacket(1, packet.PositionFirst, 10, false, "A")
+	p2 := makeOOOPacket(2, packet.PositionLast, 11, false, "B") // different msgNo
+	rb.Insert(p1, 0)
+	rb.Insert(p2, 0)
+
+	// Manually point firstReadableOOO to p1
+	rb.mu.Lock()
+	rb.firstReadableOOO = int(uint32(1)) & rb.mask
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false when message number mismatch")
+	}
+}
+
+func TestRecvBufferInsertExceedsCapacity(t *testing.T) {
+	rb := NewRecvBuffer(4, seq.Number(0)) // capacity 4 (pow2), usable = 3
+
+	// Insert packet at seq 0
+	p0 := packet.NewData(nil, 0, 0, 0, []byte("x"))
+	r := rb.Insert(p0, 0)
+	if !r.Inserted {
+		t.Fatal("Insert(0) should succeed")
+	}
+
+	// Insert packet that exceeds capacity (dist >= len(entries)-1 = 3)
+	pFar := packet.NewData(nil, 3, 0, 0, []byte("too-far"))
+	r = rb.Insert(pFar, 0)
+	if r.Inserted {
+		t.Error("Insert should fail when packet exceeds buffer capacity")
+	}
+	pFar.Release()
+}
+
+func TestRecvBufferReadMessageInOrderNotFirst(t *testing.T) {
+	// Test the path where head is a MIDDLE or LAST (not FIRST) — should be skipped
+	rb := NewRecvBuffer(16, seq.Number(1))
+
+	// Insert a packet at head with PacketPosition = MIDDLE (not FIRST or SINGLE)
+	p := packet.Packet{
+		Header: packet.Header{
+			SequenceNumber: 1,
+			PacketPosition: packet.PositionMiddle,
+			MessageNumber:  42,
+		},
+		Data: []byte("middle"),
+	}
+	rb.Insert(p, 0)
+
+	// ReadMessage should skip this corrupted packet and return false
+	pkts, ok := rb.ReadMessage()
+	if ok || pkts != nil {
+		t.Error("ReadMessage should skip non-FIRST packet at head and return false")
+	}
+
+	// The corrupted packet should have been consumed (startSeq advanced)
+	if rb.StartSeq() != seq.Number(2) {
+		t.Errorf("StartSeq: got %d, want 2 (should advance past skipped packet)", rb.StartSeq())
+	}
+}
+
+func TestRecvBufferReadMessageMsgNoMismatch(t *testing.T) {
+	// Test multi-packet message where second packet has different msgNo
+	rb := NewRecvBuffer(16, seq.Number(1))
+
+	// FIRST packet with msgNo=42
+	p1 := packet.Packet{
+		Header: packet.Header{
+			SequenceNumber: 1,
+			PacketPosition: packet.PositionFirst,
+			MessageNumber:  42,
+		},
+		Data: []byte("first"),
+	}
+	rb.Insert(p1, 0)
+
+	// LAST packet with different msgNo=99
+	p2 := packet.Packet{
+		Header: packet.Header{
+			SequenceNumber: 2,
+			PacketPosition: packet.PositionLast,
+			MessageNumber:  99,
+		},
+		Data: []byte("wrong-msg"),
+	}
+	rb.Insert(p2, 0)
+
+	// ReadMessage should detect the msgNo mismatch and skip the FIRST packet
+	pkts, ok := rb.ReadMessage()
+	if ok || pkts != nil {
+		t.Error("ReadMessage should return false on message number mismatch")
+	}
+
+	// The first packet should be consumed (startSeq advanced)
+	if rb.StartSeq() != seq.Number(2) {
+		t.Errorf("StartSeq: got %d, want 2", rb.StartSeq())
+	}
+}
+
+func TestRecvBufferReadMessageTSBPDOnReadCallback(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	var capturedTS uint32
+	rb.SetOnRead(func(ts uint32) {
+		capturedTS = ts
+	})
+
+	p := packet.NewData(nil, 0, 55000, 0, []byte("tsbpd-cb"))
+	p.Header.PacketPosition = packet.PositionSingle
+	p.Header.MessageNumber = 1
+	rb.Insert(p, clock.Timestamp(1000))
+
+	dtFunc := func(ts uint32) clock.Timestamp {
+		return clock.Timestamp(ts) // no delay
+	}
+
+	// ReadMessageTSBPD should invoke onRead
+	_, ok := rb.ReadMessageTSBPD(clock.Timestamp(60000), dtFunc)
+	if !ok {
+		t.Fatal("ReadMessageTSBPD should succeed")
+	}
+
+	if capturedTS != 55000 {
+		t.Errorf("onRead from ReadMessageTSBPD: got %d, want 55000", capturedTS)
+	}
+}
+
+func TestRecvBufferGenerateLossListEmpty(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	// Empty buffer (startSeq == maxSeq)
+	losses := rb.GenerateLossList()
+	if losses != nil {
+		t.Errorf("GenerateLossList empty: got %v, want nil", losses)
+	}
+}
+
+func TestRecvBufferGenerateLossListNoGaps(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	// Insert consecutive packets 0,1,2,3
+	for i := range uint32(4) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		rb.Insert(p, 0)
+	}
+
+	losses := rb.GenerateLossList()
+	if losses != nil {
+		t.Errorf("GenerateLossList no gaps: got %v, want nil", losses)
+	}
+}
+
+func TestRecvBufferDropWithEmptySlots(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	// Insert only packet 2 (gaps at 0 and 1)
+	p2 := packet.NewData(nil, 2, 0, 0, []byte("x"))
+	rb.Insert(p2, 0)
+
+	// Drop up to seq 3 — drops 2 empty slots + 1 available
+	dropped := rb.Drop(seq.Number(3))
+	if dropped != 3 {
+		t.Errorf("Drop with empty slots: got %d, want 3", dropped)
+	}
+}
+
+func TestRecvBufferDropAlreadyDropped(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	// Insert packets 0,1,2
+	for i := range uint32(3) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		rb.Insert(p, 0)
+	}
+
+	// Drop up to 2
+	rb.Drop(seq.Number(2))
+
+	// Now insert packet at seq 3 (beyond previous range)
+	p3 := packet.NewData(nil, 3, 0, 0, []byte("y"))
+	rb.Insert(p3, 0)
+
+	// Verify we can still read
+	p, ok := rb.ReadNext()
+	if !ok {
+		t.Fatal("ReadNext should succeed for packet 2")
+	}
+	if p.Header.SequenceNumber != 2 {
+		t.Errorf("seq: got %d, want 2", p.Header.SequenceNumber)
+	}
+}
+
+func TestRecvBufferHasAvailablePacketsNoOOO(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	// Without messageAPI, no OOO reading
+	if rb.HasAvailablePackets() {
+		t.Error("empty buffer should not have available packets")
+	}
+
+	// Insert at head
+	p := packet.NewData(nil, 0, 0, 0, []byte("x"))
+	rb.Insert(p, 0)
+
+	if !rb.HasAvailablePackets() {
+		t.Error("buffer with head packet should have available packets")
+	}
+}
+
+func TestRecvBufferReadNextEmpty(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+
+	_, ok := rb.ReadNext()
+	if ok {
+		t.Error("ReadNext should return false on empty buffer")
+	}
+}
+
+func TestSendBufferDropUntilWithUnusedSlots(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Push packets 0,1,2,3,4
+	for i := range uint32(5) {
+		p := packet.NewData(nil, i, 0, 0, []byte("x"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+
+	// ACK packets 0 and 1 (they become unused slots)
+	sb.ACK(seq.Number(2))
+
+	// Now push more
+	for i := uint32(5); i < 8; i++ {
+		p := packet.NewData(nil, i, 0, 0, []byte("y"))
+		sb.Push(p, clock.Timestamp(2000))
+	}
+
+	// DropUntil 5: drops 2,3,4 (all used)
+	dropped := sb.DropUntil(seq.Number(5))
+	if dropped != 3 {
+		t.Errorf("DropUntil: got %d, want 3", dropped)
+	}
+	if sb.StartSeq() != seq.Number(5) {
+		t.Errorf("StartSeq: got %d, want 5", sb.StartSeq())
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOStartEqualsMax(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// startSeq == maxSeq => checkFirstReadableOutOfOrder should return false
+	rb.mu.Lock()
+	rb.numOutOfOrderPkts = 1
+	rb.firstReadableOOO = 0
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false when startSeq == maxSeq")
+	}
+}
+
+func TestRecvBufferReadMessageOOOSafety(t *testing.T) {
+	// Test the readMessageOutOfOrder safety path when firstReadableOOO points
+	// to a non-Available entry
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Manually put firstReadableOOO to an empty slot
+	rb.mu.Lock()
+	rb.firstReadableOOO = 5
+	rb.numOutOfOrderPkts = 1
+	// readMessageOutOfOrder expects entries[5] to be Available but it's Empty
+	pkts, ok := rb.readMessageOutOfOrder()
+	rb.mu.Unlock()
+
+	if ok || pkts != nil {
+		t.Error("readMessageOutOfOrder should return false for non-Available slot")
+	}
+}
+
+func TestRecvBufferReadMessageOOONegativeIndex(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	rb.mu.Lock()
+	rb.firstReadableOOO = -1
+	pkts, ok := rb.readMessageOutOfOrder()
+	rb.mu.Unlock()
+
+	if ok || pkts != nil {
+		t.Error("readMessageOutOfOrder should return false when firstReadableOOO = -1")
+	}
+}
+
+func TestRecvBufferOnInsertOOOExistingReadable(t *testing.T) {
+	// Test that onInsertNotInOrderPacket skips scan when a readable OOO already exists
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert first OOO message (gap at 0)
+	p1 := makeOOOPacket(1, packet.PositionSingle, 10, false, "first-ooo")
+	rb.Insert(p1, 0)
+
+	rb.mu.Lock()
+	firstOOO := rb.firstReadableOOO
+	rb.mu.Unlock()
+
+	// Insert another OOO packet — should not change firstReadableOOO
+	p3 := makeOOOPacket(3, packet.PositionSingle, 11, false, "second-ooo")
+	rb.Insert(p3, 0)
+
+	rb.mu.Lock()
+	if rb.firstReadableOOO != firstOOO {
+		t.Errorf("firstReadableOOO changed: got %d, want %d", rb.firstReadableOOO, firstOOO)
+	}
+	rb.mu.Unlock()
+}
+
+func TestSendBufferGetAllUnackedWithGaps(t *testing.T) {
+	sb := NewSendBuffer(64, seq.Number(0))
+
+	// Push 5 packets
+	for i := range uint32(5) {
+		p := packet.NewData(nil, i, uint32(i*100), 0, []byte("data"))
+		sb.Push(p, clock.Timestamp(1000))
+	}
+
+	// Drop packet at seq 1 by clearing its slot (simulating a TTL drop scenario)
+	sb.mu.Lock()
+	idx := int(uint32(1)) & sb.mask
+	sb.entries[idx].pkt.Release()
+	sb.entries[idx] = sendEntry{} // mark as unused
+	sb.size--
+	sb.mu.Unlock()
+
+	// GetAllUnacked should skip the gap (unused slot)
+	result := sb.GetAllUnacked()
+	if len(result) != 4 {
+		t.Fatalf("GetAllUnacked with gap: got %d packets, want 4", len(result))
+	}
+	for _, p := range result {
+		p.Release()
+	}
+}
+
+func TestRecvBufferScanNotInOrderMessageRightNotFound(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert FIRST packet only (no LAST packet) behind a gap
+	p1 := makeOOOPacket(1, packet.PositionFirst, 10, false, "F")
+	rb.Insert(p1, 0)
+
+	// The scan should not find a LAST packet
+	// Verify no OOO message is available
+	if rb.HasAvailablePackets() {
+		t.Error("incomplete OOO message should not be available")
+	}
+}
+
+func TestRecvBufferScanNotInOrderDifferentMsgNoRight(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert MIDDLE packet with msgNo=10, then LAST with msgNo=11
+	// This tests the message number mismatch path in scanNotInOrderMessageRight
+	p1 := makeOOOPacket(1, packet.PositionMiddle, 10, false, "M")
+	rb.Insert(p1, 0)
+
+	p2 := makeOOOPacket(2, packet.PositionLast, 11, false, "L")
+	rb.Insert(p2, 0)
+
+	// Should not find a complete message because msg numbers differ
+	if rb.HasAvailablePackets() {
+		t.Error("mismatched msg number should not form a complete OOO message")
+	}
+}
+
+func TestRecvBufferUpdateFirstReadableOOOMsgNoMismatch(t *testing.T) {
+	// Test updateFirstReadableOutOfOrder when consecutive OOO packets have different msgNo
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Gap at seq 0
+	// OOO FIRST at seq 1 with msgNo=10
+	// OOO LAST at seq 2 with msgNo=11 (different msgNo)
+	// OOO SINGLE at seq 3 with msgNo=12
+	p1 := makeOOOPacket(1, packet.PositionFirst, 10, false, "F")
+	p2 := makeOOOPacket(2, packet.PositionLast, 11, false, "L") // mismatched
+	p3 := makeOOOPacket(3, packet.PositionSingle, 12, false, "S")
+
+	rb.Insert(p1, 0)
+	rb.Insert(p2, 0)
+	rb.Insert(p3, 0)
+
+	// The first complete OOO message should be at seq 3 (SINGLE)
+	pkts, ok := rb.ReadMessage()
+	if !ok {
+		t.Fatal("should find OOO SINGLE message at seq 3")
+	}
+	if string(pkts[0].Data) != "S" {
+		t.Errorf("data: got %q, want %q", pkts[0].Data, "S")
+	}
+}
+
+func TestRecvBufferUpdateFirstReadableOOOInOrderPacket(t *testing.T) {
+	// Test that an in-order (Order=true) packet is skipped during OOO scan
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Gap at seq 0
+	// Order=true at seq 1 (should be skipped in OOO scan)
+	// OOO SINGLE at seq 2
+	p1 := makeOOOPacket(1, packet.PositionSingle, 10, true, "ordered")
+	p2 := makeOOOPacket(2, packet.PositionSingle, 11, false, "ooo")
+
+	rb.Insert(p1, 0)
+	rb.Insert(p2, 0)
+
+	// Should read OOO at seq 2 (skip ordered at seq 1)
+	pkts, ok := rb.ReadMessage()
+	if !ok {
+		t.Fatal("should read OOO message at seq 2")
+	}
+	if string(pkts[0].Data) != "ooo" {
+		t.Errorf("data: got %q, want %q", pkts[0].Data, "ooo")
+	}
+}
+
+func TestRecvBufferUpdateFirstReadableOOOGapEntry(t *testing.T) {
+	// Test that a gap (EntryEmpty) resets tracking during OOO scan
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Gap at seq 0
+	// OOO FIRST at seq 1 (msgNo=10)
+	// Gap at seq 2 (EntryEmpty)
+	// OOO LAST at seq 3 (msgNo=10) — unreachable due to gap
+	// OOO SINGLE at seq 4 (msgNo=11) — should be found
+	p1 := makeOOOPacket(1, packet.PositionFirst, 10, false, "F")
+	p3 := makeOOOPacket(3, packet.PositionLast, 10, false, "L")
+	p4 := makeOOOPacket(4, packet.PositionSingle, 11, false, "S")
+
+	rb.Insert(p1, 0)
+	rb.Insert(p3, 0)
+	rb.Insert(p4, 0)
+
+	// The OOO scan should find the SINGLE at seq 4
+	pkts, ok := rb.ReadMessage()
+	if !ok {
+		t.Fatal("should find OOO SINGLE message at seq 4")
+	}
+	if string(pkts[0].Data) != "S" {
+		t.Errorf("data: got %q, want %q", pkts[0].Data, "S")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOMultiPacketComplete(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert complete multi-packet OOO message at seq 1-3 (gap at 0)
+	rb.Insert(makeOOOPacket(1, packet.PositionFirst, 10, false, "A"), 0)
+	rb.Insert(makeOOOPacket(2, packet.PositionMiddle, 10, false, "B"), 0)
+	rb.Insert(makeOOOPacket(3, packet.PositionLast, 10, false, "C"), 0)
+
+	// Verify checkFirstReadableOutOfOrder returns true
+	rb.mu.Lock()
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+	if !result {
+		t.Error("checkFirstReadableOutOfOrder should return true for complete multi-packet OOO msg")
+	}
+}
+
+func TestRecvBufferCheckFirstReadableOOOIncompleteAtEnd(t *testing.T) {
+	rb := NewRecvBuffer(64, seq.Number(0))
+	rb.SetMessageAPI(true)
+
+	// Insert OOO FIRST at seq 1, MIDDLE at seq 2 (no LAST — reaches end of buffer content)
+	rb.Insert(makeOOOPacket(1, packet.PositionFirst, 10, false, "A"), 0)
+	rb.Insert(makeOOOPacket(2, packet.PositionMiddle, 10, false, "B"), 0)
+
+	// The message is incomplete — no LAST before endPos
+	rb.mu.Lock()
+	// Force firstReadableOOO to the position of seq 1
+	rb.firstReadableOOO = int(uint32(1)) & rb.mask
+	result := rb.checkFirstReadableOutOfOrder()
+	rb.mu.Unlock()
+
+	if result {
+		t.Error("checkFirstReadableOutOfOrder should return false for incomplete message at buffer end")
+	}
+}

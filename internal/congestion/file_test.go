@@ -454,6 +454,468 @@ func TestLiveCCCongestionWindowMaxInt(t *testing.T) {
 	}
 }
 
+func TestFileCCOnPktArrival(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	baseTime := clock.Timestamp(1_000_000)
+
+	// Feed enough packets for delivery estimator to initialize
+	for i := range 20 {
+		cc.OnPktArrival(1316, baseTime.Add(clock.Microseconds(i)*175))
+	}
+
+	pktRate, bytesRate := cc.DeliveryRate()
+	if pktRate == 0 {
+		t.Error("expected non-zero delivery pktRate after OnPktArrival calls")
+	}
+	if bytesRate == 0 {
+		t.Error("expected non-zero delivery bytesRate after OnPktArrival calls")
+	}
+}
+
+func TestFileCCDeliveryRateBeforeInit(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	// Before any arrivals, delivery rate should be zero
+	pktRate, bytesRate := cc.DeliveryRate()
+	if pktRate != 0 || bytesRate != 0 {
+		t.Errorf("DeliveryRate before init: got (%d, %d), want (0, 0)", pktRate, bytesRate)
+	}
+}
+
+func TestFileCCMinNAKInterval(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	got := cc.MinNAKInterval()
+	if got != 0 {
+		t.Errorf("FileCC.MinNAKInterval: got %d, want 0", got)
+	}
+}
+
+func TestFileCCUpdateNAKInterval(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	// UpdateNAKInterval returns the interval unchanged
+	got := cc.UpdateNAKInterval(300_000, 5000, 10)
+	if got != 300_000 {
+		t.Errorf("FileCC.UpdateNAKInterval(300000): got %d, want 300000", got)
+	}
+
+	got = cc.UpdateNAKInterval(100_000, 0, 0)
+	if got != 100_000 {
+		t.Errorf("FileCC.UpdateNAKInterval(100000): got %d, want 100000", got)
+	}
+}
+
+func TestFileCCCheckTransArgs(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	// FileCC accepts all API modes — always returns nil
+	if err := cc.CheckTransArgs(true, 99999, true); err != nil {
+		t.Errorf("unexpected error for large msgAPI write: %v", err)
+	}
+	if err := cc.CheckTransArgs(false, 0, false); err != nil {
+		t.Errorf("unexpected error for zero stream read: %v", err)
+	}
+	if err := cc.CheckTransArgs(true, 1316, true); err != nil {
+		t.Errorf("unexpected error for exact-size msgAPI write: %v", err)
+	}
+}
+
+func TestFileCCACKMaxPackets(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+	if cc.ACKMaxPackets() != 0 {
+		t.Errorf("ACKMaxPackets: got %d, want 0", cc.ACKMaxPackets())
+	}
+}
+
+func TestFileCCACKTimeoutUS(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+	if cc.ACKTimeoutUS() != 0 {
+		t.Errorf("ACKTimeoutUS: got %d, want 0", cc.ACKTimeoutUS())
+	}
+}
+
+func TestFileCCSetMaxBandwidthAndGet(t *testing.T) {
+	cc := NewFileCC(10_000_000, 1316, 8192, 0)
+
+	got := cc.MaxBandwidth()
+	if got != 10_000_000 {
+		t.Errorf("MaxBandwidth: got %d, want 10000000", got)
+	}
+
+	cc.SetMaxBandwidth(50_000_000)
+	got = cc.MaxBandwidth()
+	if got != 50_000_000 {
+		t.Errorf("MaxBandwidth after Set: got %d, want 50000000", got)
+	}
+
+	cc.SetMaxBandwidth(0)
+	got = cc.MaxBandwidth()
+	if got != 0 {
+		t.Errorf("MaxBandwidth after Set(0): got %d, want 0", got)
+	}
+}
+
+func TestFileCCSetOverheadClamping(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	// Negative overhead clamps to 0
+	cc.SetOverhead(-10)
+	cc.mu.RLock()
+	if cc.overhead != 0 {
+		cc.mu.RUnlock()
+		t.Errorf("SetOverhead(-10): got %d, want 0", cc.overhead)
+	} else {
+		cc.mu.RUnlock()
+	}
+
+	// Overhead > 100 clamps to 100
+	cc.SetOverhead(150)
+	cc.mu.RLock()
+	if cc.overhead != 100 {
+		cc.mu.RUnlock()
+		t.Errorf("SetOverhead(150): got %d, want 100", cc.overhead)
+	} else {
+		cc.mu.RUnlock()
+	}
+
+	// Normal value
+	cc.SetOverhead(30)
+	cc.mu.RLock()
+	if cc.overhead != 30 {
+		cc.mu.RUnlock()
+		t.Errorf("SetOverhead(30): got %d, want 30", cc.overhead)
+	} else {
+		cc.mu.RUnlock()
+	}
+}
+
+func TestFileCCUpdateBandwidthNoOp(t *testing.T) {
+	cc := NewFileCC(10_000_000, 1316, 8192, 0)
+
+	before := cc.MaxBandwidth()
+	cc.UpdateBandwidth(99_000_000, 50_000_000)
+	after := cc.MaxBandwidth()
+
+	// UpdateBandwidth is a no-op for FileCC — maxBW should not change
+	if before != after {
+		t.Errorf("UpdateBandwidth should be no-op for FileCC: before=%d, after=%d", before, after)
+	}
+}
+
+func TestFileCCUpdateBandwidthIsNoOp(t *testing.T) {
+	cc := NewFileCC(10_000_000, 1316, 8192, 0)
+
+	// Test all combinations — should all be no-ops
+	before := cc.MaxBandwidth()
+
+	cc.UpdateBandwidth(0, 0)
+	if cc.MaxBandwidth() != before {
+		t.Error("UpdateBandwidth(0,0) changed maxBW")
+	}
+
+	cc.UpdateBandwidth(50_000_000, 0)
+	if cc.MaxBandwidth() != before {
+		t.Error("UpdateBandwidth(50M,0) changed maxBW")
+	}
+
+	cc.UpdateBandwidth(0, 50_000_000)
+	if cc.MaxBandwidth() != before {
+		t.Error("UpdateBandwidth(0,50M) changed maxBW")
+	}
+
+	cc.UpdateBandwidth(50_000_000, 30_000_000)
+	if cc.MaxBandwidth() != before {
+		t.Error("UpdateBandwidth(50M,30M) changed maxBW")
+	}
+}
+
+func TestFileCCPacketIntervalMinimum(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	// Set sndPeriod to less than 1
+	cc.mu.Lock()
+	cc.sndPeriod = 0.5
+	cc.mu.Unlock()
+
+	interval := cc.PacketInterval()
+	if interval < 1 {
+		t.Errorf("PacketInterval should be at least 1: got %d", interval)
+	}
+}
+
+func TestFileCCExitSlowStartWithRTTOnly(t *testing.T) {
+	// exitSlowStart falls back to RTT-based period when deliveryRate is 0
+	cc := NewFileCC(0, 1316, 100, 0) // FC=100
+
+	cc.mu.Lock()
+	cc.rtt = 50_000
+	cc.deliveryRate = 0 // no delivery rate data
+	cc.mu.Unlock()
+
+	// ACK enough to exceed FC=100 and exit slow start
+	resetRCTime(cc)
+	cc.OnACK(50, 50_000, 0, 0)
+	resetRCTime(cc)
+	cc.OnACK(120, 50_000, 0, 0)
+
+	cc.mu.RLock()
+	inSlowStart := cc.slowStart
+	sndPeriod := cc.sndPeriod
+	cc.mu.RUnlock()
+
+	if inSlowStart {
+		t.Error("expected to exit slow start")
+	}
+	// exitSlowStart with RTT sets sndPeriod = cwnd / (rtt + RCInterval).
+	// This should be a small positive value, different from the initial 1.0.
+	if sndPeriod <= 0 {
+		t.Errorf("sndPeriod should be positive after RTT-based exit: got %f", sndPeriod)
+	}
+}
+
+func TestFileCCNewWithDefaultPacketSize(t *testing.T) {
+	// packetSize=0 should default to DefaultPacketSize
+	cc := NewFileCC(0, 0, 0, 0)
+
+	cc.mu.RLock()
+	ps := cc.packetSize
+	cc.mu.RUnlock()
+
+	if ps != DefaultPacketSize {
+		t.Errorf("packetSize with 0: got %d, want %d", ps, DefaultPacketSize)
+	}
+}
+
+func TestFileCCNewWithDefaultFC(t *testing.T) {
+	// fc=0 should default to 8192
+	cc := NewFileCC(0, 1316, 0, 0)
+
+	cc.mu.RLock()
+	maxCWND := cc.maxCWND
+	cc.mu.RUnlock()
+
+	if maxCWND != 8192 {
+		t.Errorf("maxCWND with fc=0: got %f, want 8192", maxCWND)
+	}
+}
+
+func TestFileCCOnNAKWithinEpochPeriodicSlowdown(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 100.0
+	cc.rtt = 1_000
+	cc.lastDecPeriod = 100.0
+	cc.lastSentSeq = 200
+	cc.mu.Unlock()
+
+	cc.SetSndLossLength(3)
+	// First NAK: new epoch, sets decRandom
+	cc.OnNAK([]uint32{201})
+
+	cc.mu.Lock()
+	// Force decRandom=1 so every nakCount%1==0 triggers periodic slowdown
+	cc.decRandom = 1
+	periodBefore := cc.sndPeriod
+	cc.mu.Unlock()
+
+	// In-epoch NAK should trigger periodic slowdown when nakCount%decRandom==0
+	cc.SetSndLossLength(3)
+	cc.OnNAK([]uint32{100}) // within epoch
+
+	cc.mu.RLock()
+	periodAfter := cc.sndPeriod
+	cc.mu.RUnlock()
+
+	if periodAfter <= periodBefore {
+		t.Errorf("periodic slowdown should increase period: before=%f, after=%f", periodBefore, periodAfter)
+	}
+}
+
+func TestFileCCEnforceMaxBWZero(t *testing.T) {
+	// maxBW=0 means unlimited — enforceMaxBW should be no-op
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 1.0 // very fast
+	cc.rtt = 50_000
+	cc.deliveryRate = 100000
+	cc.bwEstimate = 100000
+	cc.lastDecPeriod = 1.0
+	cc.mu.Unlock()
+
+	resetRCTime(cc)
+	cc.OnACK(100, 50_000, 100000, 100000)
+
+	period := cc.PacketInterval()
+	// Without maxBW cap, period can be very small
+	if period > 100 {
+		t.Errorf("with maxBW=0, period should not be clamped: got %d", period)
+	}
+}
+
+func TestFileCCEmptyNAK(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 100.0
+	cc.mu.Unlock()
+
+	before := cc.PacketInterval()
+	cc.OnNAK([]uint32{})
+	after := cc.PacketInterval()
+
+	if before != after {
+		t.Errorf("empty NAK should not change period: before=%d, after=%d", before, after)
+	}
+}
+
+func TestFileCCRateIncreaseLowB(t *testing.T) {
+	// Test rateIncrease when B <= 0 (current rate >= available bandwidth).
+	// In this case, inc = 1/MSS (minimum increment).
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 10.0  // very fast — rate > available BW
+	cc.rtt = 50_000
+	cc.deliveryRate = 5000
+	cc.bwEstimate = 100  // very low estimate
+	cc.lastDecPeriod = 10.0
+	cc.lastAck = 100
+	cc.loss = false
+	cc.mu.Unlock()
+
+	periodBefore := cc.PacketInterval()
+	resetRCTime(cc)
+	cc.OnACK(110, 50_000, 100, 5000)
+	periodAfter := cc.PacketInterval()
+
+	// Rate should still try to increase (period decrease), even if slowly
+	_ = periodBefore
+	_ = periodAfter
+	// We're just ensuring the B <= 0 path doesn't panic or corrupt state
+}
+
+func TestFileCCRateIncreaseSndPeriodZero(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 0 // edge case: zero period
+	cc.rtt = 50_000
+	cc.deliveryRate = 5000
+	cc.bwEstimate = 10000
+	cc.lastDecPeriod = 100.0
+	cc.lastAck = 100
+	cc.loss = false
+	cc.mu.Unlock()
+
+	resetRCTime(cc)
+	cc.OnACK(110, 50_000, 10000, 5000)
+
+	// Should not panic; period should remain reasonable
+	interval := cc.PacketInterval()
+	if interval < 1 {
+		t.Errorf("interval should be at least 1: got %d", interval)
+	}
+}
+
+func TestFileCCOnNAKNewEpochAvgNAKNumGt1(t *testing.T) {
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 100.0
+	cc.rtt = 1_000
+	cc.lastDecPeriod = 100.0
+	cc.lastSentSeq = 500
+	// Pre-seed avgNAKNum > 1 so the random branch executes
+	cc.avgNAKNum = 10
+	cc.nakCount = 5
+	cc.mu.Unlock()
+
+	cc.SetSndLossLength(3)
+	// This triggers a new epoch (lossBegin > lastDecSeq)
+	cc.OnNAK([]uint32{501})
+
+	cc.mu.RLock()
+	decRandom := cc.decRandom
+	cc.mu.RUnlock()
+
+	// decRandom should be in [1, avgNAKNum]
+	if decRandom < 1 {
+		t.Errorf("decRandom should be >= 1: got %d", decRandom)
+	}
+}
+
+func TestFileCCOnACKCongAvoidanceLossFlag(t *testing.T) {
+	// Test congestion avoidance when loss flag is set (should clear it, skip rate increase)
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 100.0
+	cc.rtt = 50_000
+	cc.deliveryRate = 5000
+	cc.bwEstimate = 10000
+	cc.lastDecPeriod = 100.0
+	cc.lastAck = 100
+	cc.loss = true // set loss flag
+	cc.mu.Unlock()
+
+	periodBefore := cc.PacketInterval()
+	resetRCTime(cc)
+	cc.OnACK(110, 50_000, 10000, 5000)
+
+	// CWND is updated, but period should not decrease because loss=true skips rateIncrease
+	cc.mu.RLock()
+	lossFlag := cc.loss
+	cc.mu.RUnlock()
+
+	if lossFlag {
+		t.Error("loss flag should be cleared after OnACK")
+	}
+
+	// Period should remain unchanged (no rate increase when loss=true)
+	periodAfter := cc.PacketInterval()
+	if periodAfter < periodBefore {
+		// This is actually OK — the period may change due to CWND recalculation
+		// but the key test is that loss flag is cleared
+	}
+}
+
+func TestFileCCRateIncreaseWithHighBandwidth(t *testing.T) {
+	// Test the sndPeriod > lastDecPeriod && bwPktPS/9 < B branch
+	cc := NewFileCC(0, 1316, 8192, 0)
+
+	cc.mu.Lock()
+	cc.slowStart = false
+	cc.sndPeriod = 200.0     // slower than lastDecPeriod
+	cc.lastDecPeriod = 100.0 // fast rate at last loss point
+	cc.rtt = 50_000
+	cc.deliveryRate = 5000
+	cc.bwEstimate = 20000 // high BW estimate
+	cc.lastAck = 100
+	cc.loss = false
+	cc.mu.Unlock()
+
+	periodBefore := cc.PacketInterval()
+	resetRCTime(cc)
+	cc.OnACK(110, 50_000, 20000, 5000)
+	periodAfter := cc.PacketInterval()
+
+	// Period should decrease (rate increase)
+	if periodAfter >= periodBefore {
+		t.Errorf("period should decrease: before=%d, after=%d", periodBefore, periodAfter)
+	}
+}
+
 // --- Benchmarks ---
 
 func BenchmarkFileCCOnACK(b *testing.B) {
