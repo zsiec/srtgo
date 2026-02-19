@@ -11,11 +11,11 @@ func TestSndRateEstimator_Basic(t *testing.T) {
 	e.init(now)
 
 	// Send 100 packets of 1000 bytes in the first window
-	for i := range 100 {
-		e.onPacketSent(now.Add(time.Duration(i)*time.Millisecond), 1, 1000)
+	for range 100 {
+		e.recordLockFree(1, 1000)
 	}
 
-	// Advance to next window
+	// Advance to next window (drains atomics + rotates)
 	e.rotate(now.Add(150 * time.Millisecond))
 
 	pps, bps := e.getRate()
@@ -41,10 +41,12 @@ func TestSndRateEstimator_MultipleWindows(t *testing.T) {
 
 	// Send packets across 5 windows
 	for w := range 5 {
-		windowStart := now.Add(time.Duration(w) * sndRateWindow)
-		for i := range 10 {
-			e.onPacketSent(windowStart.Add(time.Duration(i)*5*time.Millisecond), 1, 500)
+		for range 10 {
+			e.recordLockFree(1, 500)
 		}
+		// Rotate at end of each window
+		windowEnd := now.Add(time.Duration(w+1) * sndRateWindow)
+		e.rotate(windowEnd)
 	}
 
 	// Advance past 5th window
@@ -74,9 +76,9 @@ func TestSndRateEstimator_WrapAround(t *testing.T) {
 
 	// Fill all 10 slots and then some to test wrap-around
 	for w := range 15 {
-		windowStart := now.Add(time.Duration(w) * sndRateWindow)
-		e.onPacketSent(windowStart, 10, 5000)
-		e.rotate(windowStart.Add(sndRateWindow))
+		e.recordLockFree(10, 5000)
+		windowEnd := now.Add(time.Duration(w+1) * sndRateWindow)
+		e.rotate(windowEnd)
 	}
 
 	pps, bps := e.getRate()
@@ -99,21 +101,31 @@ func TestSndRateEstimator_RotateZeroSlotTime(t *testing.T) {
 	}
 }
 
-func TestSndRateEstimator_OnPacketSentZeroSlotTime(t *testing.T) {
-	// Test onPacketSent when slotTime is zero (first packet ever)
+func TestSndRateEstimator_RecordLockFree(t *testing.T) {
+	// Test recordLockFree accumulates correctly
 	var e sndRateEstimator
-
 	now := time.Now()
-	e.onPacketSent(now, 1, 100)
+	e.init(now)
 
-	if e.slotTime.IsZero() {
-		t.Error("slotTime should be set after onPacketSent")
+	e.recordLockFree(1, 100)
+
+	if e.curPkts.Load() != 1 {
+		t.Errorf("curPkts: got %d, want 1", e.curPkts.Load())
+	}
+	if e.curBytes.Load() != 100 {
+		t.Errorf("curBytes: got %d, want 100", e.curBytes.Load())
+	}
+
+	// After drain, atomics should be zero and slot should have data
+	e.drainAtomics()
+	if e.curPkts.Load() != 0 {
+		t.Errorf("curPkts after drain: got %d, want 0", e.curPkts.Load())
 	}
 	if e.slots[0].packets != 1 {
-		t.Errorf("packets: got %d, want 1", e.slots[0].packets)
+		t.Errorf("slot packets: got %d, want 1", e.slots[0].packets)
 	}
 	if e.slots[0].bytes != 100 {
-		t.Errorf("bytes: got %d, want 100", e.slots[0].bytes)
+		t.Errorf("slot bytes: got %d, want 100", e.slots[0].bytes)
 	}
 }
 
@@ -123,11 +135,10 @@ func TestSndRateEstimator_GetRateOnlyCurrentSlot(t *testing.T) {
 	now := time.Now()
 	e.init(now)
 
-	// Send packets but don't advance — only 1 slot filled (the current one)
-	e.onPacketSent(now, 10, 5000)
+	// Send packets via lock-free path
+	e.recordLockFree(10, 5000)
 
 	// filled is still 0 — init doesn't set filled
-	// After onPacketSent, filled is still 0 (advance was not called)
 	pps, bps := e.getRate()
 	// With filled=0, should return 0,0
 	if pps != 0 || bps != 0 {
@@ -142,7 +153,7 @@ func TestSndRateEstimator_RotateMultipleSkipped(t *testing.T) {
 	now := time.Now()
 	e.init(now)
 
-	e.onPacketSent(now, 5, 500)
+	e.recordLockFree(5, 500)
 
 	// Jump far ahead — 500ms = 5 windows
 	future := now.Add(500 * time.Millisecond)
@@ -165,13 +176,15 @@ func TestSndRateEstimator_GetRateSingleFilled(t *testing.T) {
 	e.init(now)
 
 	// Send one packet to set data in slot
-	e.onPacketSent(now, 10, 5000)
+	e.recordLockFree(10, 5000)
+	e.drainAtomics()
 
 	// Advance exactly once — filled becomes 1
 	e.advance()
 
 	// Put data in the new current slot
-	e.onPacketSent(now.Add(sndRateWindow), 20, 10000)
+	e.recordLockFree(20, 10000)
+	e.drainAtomics()
 
 	// Now filled=1, count = min(1, 9) = 1 — should use the old slot
 	pps, bps := e.getRate()
@@ -187,13 +200,11 @@ func TestSndRateEstimator_GetRateCurrentSlotOnlyOneFilled(t *testing.T) {
 	now := time.Now()
 	e.init(now)
 
-	// Send data but do NOT advance — only 1 slot filled
-	e.onPacketSent(now, 50, 25000)
+	// Send data and drain into slot 0
+	e.recordLockFree(50, 25000)
+	e.drainAtomics()
 
-	// Manually set filled=1 to trigger the count==0 fallback in getRate.
-	// After init, filled=0 and advance() was not called. To reach count==0
-	// fallback, we need filled=1. We call advance() once so filled=1,
-	// then place data in the new current slot with zero in the old slot.
+	// Manually advance once so filled=1
 	e.advance()
 	// Now filled=1, curSlot=1. The old slot (0) has data; curSlot=1 is empty.
 	// getRate will use count=min(1,9)=1 and average the old slot.
@@ -237,15 +248,16 @@ func TestSndRateEstimator_GetRateFullSlots(t *testing.T) {
 
 	// Fill all 10 slots with known data
 	for i := range sndRateNumSlots {
-		windowStart := now.Add(time.Duration(i) * sndRateWindow)
-		e.onPacketSent(windowStart, 100, 50000)
+		e.recordLockFree(100, 50000)
+		e.drainAtomics()
 		if i < sndRateNumSlots-1 {
 			e.advance()
 		}
 	}
 	// Push one more to ensure filled is capped at sndRateNumSlots
 	e.advance()
-	e.onPacketSent(now.Add(time.Duration(sndRateNumSlots)*sndRateWindow), 100, 50000)
+	e.recordLockFree(100, 50000)
+	e.drainAtomics()
 
 	pps, bps := e.getRate()
 	// 100 packets per 100ms window, 9 windows = 900 packets / 0.9s = 1000 pps
@@ -266,10 +278,10 @@ func TestSndRateEstimator_GetRateAccuracy(t *testing.T) {
 	e.init(now)
 
 	for w := range 5 {
-		windowStart := now.Add(time.Duration(w) * sndRateWindow)
 		// 200 packets per window
-		e.onPacketSent(windowStart, 200, 200000)
-		e.advance()
+		e.recordLockFree(200, 200000)
+		windowEnd := now.Add(time.Duration(w+1) * sndRateWindow)
+		e.rotate(windowEnd)
 	}
 
 	pps, bps := e.getRate()

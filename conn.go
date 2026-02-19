@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,7 @@ const (
 	defaultMinNAKInterval = 300 * time.Millisecond // initial minimum NAK interval (overridden by CC)
 	minExpInterval        = 300 * time.Millisecond // minimum EXP interval per SRT spec
 	maxExpCount           = 16                     // COMM_RESPONSE_MAX_EXP
+	pacingSpinThresholdUS = 200                    // below this (µs), use Gosched instead of time.Sleep
 )
 
 // watchChannels holds the mirror channels for Watcher integration.
@@ -176,10 +178,10 @@ type Conn struct {
 	tsbpdTimer    *tsbpd.Timer
 	streamPartial []byte // buffered partial packet data for stream-mode partial reads
 
-	// Send timing
-	lastSndTime atomic.Int64 // UnixNano of last packet sent (keepalive only fires when idle)
+	// --- Cache line padding between recv state and ACK/NAK state  ---
+	_ [64]byte
 
-	// ACK/NAK state
+	// ACK/NAK state (receiver-hot: written by recvLoop/timerLoop)
 	ackSeqNo        atomic.Uint32 // ACK sequence number (incremented per Full ACK)
 	lastACKSeq      atomic.Uint32 // last ACK'd sequence number (seq.Number stored atomically)
 	rcvLastAckAck   atomic.Uint32 // highest data seqno confirmed by peer's ACKACK
@@ -193,13 +195,16 @@ type Conn struct {
 	lastACKACKSeq   atomic.Uint32 // ACK seqno of last ACKACK sent (retransmit if same comes again)
 	rtt             atomic.Int64  // RTT in microseconds
 	rttVar          atomic.Int64  // RTT variance in microseconds
-	lastACKRecv     atomic.Int64  // UnixNano timestamp of last ACK received (for RTO)
-	rexmitCount     atomic.Int32  // linear backoff for RTO, reset to 1 on ACK
-	ackSendTimeMu   sync.Mutex
-	ackSendTime     map[uint32]ackSendInfo // ACK seq → {send time, data seqno} for RTT + ACKACK tracking
-	sndLossCount    atomic.Int64           // outstanding loss count (approximate sender loss list length)
-	flowWindowSize  atomic.Int32           // dynamic flow window from receiver's available buffer (0 = use FC)
-	bufferWasFull   atomic.Bool            // forces Full ACK when buffer transitions from full to available
+	_               [64]byte      // cache line padding
+
+	// --- Timer-hot fields (written by timerLoop) ---
+	lastACKRecv      atomic.Int64 // UnixNano timestamp of last ACK received (for RTO)
+	rexmitCount      atomic.Int32 // linear backoff for RTO, reset to 1 on ACK
+	ackSendTimeMu    sync.Mutex
+	ackSendTimeSlots [ackTimeSlots]ackTimeEntry // circular buffer replaces map for ACK timing
+	sndLossCount     atomic.Int64               // outstanding loss count (approximate sender loss list length)
+	flowWindowSize   atomic.Int32               // dynamic flow window from receiver's available buffer (0 = use FC)
+	bufferWasFull    atomic.Bool                // forces Full ACK when buffer transitions from full to available
 
 	// Deadlines
 	readDeadline  atomic.Value // time.Time
@@ -217,9 +222,10 @@ type Conn struct {
 	// on the hot path (signalReadReady/signalWriteReady).
 	watchChans atomic.Pointer[watchChannels]
 
-	// Statistics — packet counters
+	// Statistics — sender-hot counters (written by Write goroutine)
 	sentPackets        atomic.Uint64
 	sentBytes          atomic.Uint64 // payload bytes only
+	_                  [48]byte      // cache line padding: isolate sender from receiver stats
 	retransCount       atomic.Uint64
 	retransBytes       atomic.Uint64 // payload bytes for retransmitted packets
 	recvPackets        atomic.Uint64
@@ -297,6 +303,16 @@ type Conn struct {
 type ackSendInfo struct {
 	sendTime clock.Timestamp // when the ACK was sent (for RTT measurement)
 	dataSeq  uint32          // data sequence number that was ACK'd
+}
+
+// ackTimeSlots is the number of slots in the ACK send time circular buffer.
+// Power of 2 for fast bitmask indexing. 64 slots covers 640ms at 10ms intervals.
+const ackTimeSlots = 64
+
+// ackTimeEntry is one slot in the ACK send time circular buffer.
+type ackTimeEntry struct {
+	seqNo uint32      // ACK sequence number (0 = empty/invalid)
+	info  ackSendInfo // send time and data sequence number
 }
 
 // rexmitTokenBucket is a simple token bucket for retransmit rate limiting.
@@ -452,7 +468,7 @@ func newConn(cfg ConnConfig) *Conn {
 		}
 	}
 
-	sendBufCap := cfg.SendBufSize
+	sendBufCap := max(cfg.SendBufSize, cfg.FC)
 
 	payloadSize := cfg.PayloadSize
 	if payloadSize <= 0 {
@@ -533,14 +549,14 @@ func newConn(cfg ConnConfig) *Conn {
 		linger:          cfg.Linger,
 		peerIdleTimeout: cfg.PeerIdleTimeout,
 
-		sndSyn:      cfg.SndSyn,
-		rcvSyn:      cfg.RcvSyn,
-		periodicNAK: !isFileMode && cfg.NAKReport, // disabled for file mode
-		peerNakReport:    cfg.PeerNakReport,
-		retransmitAlgo:   cfg.RetransmitAlgo,
-		ackSendTime:      make(map[uint32]ackSendInfo),
+		sndSyn:         cfg.SndSyn,
+		rcvSyn:         cfg.RcvSyn,
+		periodicNAK:    !isFileMode && cfg.NAKReport, // disabled for file mode
+		peerNakReport:  cfg.PeerNakReport,
+		retransmitAlgo: cfg.RetransmitAlgo,
+		// ackSendTimeSlots: zero-value array is ready to use (seqNo=0 means empty)
 
-		recvBuf:    buffer.NewRecvBuffer(cfg.RecvBufSize, cfg.RecvISN),
+		recvBuf:    buffer.NewRecvBuffer(max(cfg.RecvBufSize, cfg.FC), cfg.RecvISN),
 		recvISN:    cfg.RecvISN,
 		tsbpdTimer: tsbpdTimer,
 
@@ -621,7 +637,6 @@ func newConn(cfg ConnConfig) *Conn {
 
 	c.rtt.Store(int64(clock.FromDuration(initialRTT)))
 	c.rttVar.Store(int64(clock.FromDuration(initialRTT / 2)))
-	c.lastSndTime.Store(time.Now().UnixNano())
 	c.storeLastACKSeq(cfg.RecvISN)
 	c.rcvLastAckAck.Store(cfg.RecvISN.Value()) // initialize to ISN
 	c.lightACKCount.Store(1)                   // start at 1
@@ -965,6 +980,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 		maxFlight = cwnd
 	}
 
+	now := c.clk.Now()
+
 	for {
 		// Assign sequence numbers right before pushing (they must be contiguous)
 		nextSeq := c.sendBuf.NextSeq()
@@ -972,7 +989,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 			pkts[i].Header.SequenceNumber = nextSeq.Add(uint32(i)).Value()
 		}
 
-		if c.flightSize()+numPkts <= maxFlight && c.sendBuf.PushBatch(pkts, c.clk.Now()) {
+		if c.flightSize()+numPkts <= maxFlight && c.sendBuf.PushBatch(pkts, now) {
 			// Per-message TTL: tag all fragments (matching single-packet path).
 			if ttl := c.msgTTL.Load(); ttl > 0 {
 				c.sendBuf.SetMsgTTLBatch(ttl, numPkts)
@@ -1014,10 +1031,11 @@ func (c *Conn) Write(b []byte) (int, error) {
 			}
 			return 0, c.getShutdownErr()
 		}
+		now = c.clk.Now() // refresh after blocking wait
 	}
 
 	// Track sender-busy duration
-	c.sndBusySince.CompareAndSwap(0, int64(c.clk.Now()))
+	c.sndBusySince.CompareAndSwap(0, int64(now))
 
 	// Send each packet on the wire with pacing
 	totalSent := 0
@@ -1050,27 +1068,27 @@ func (c *Conn) Write(b []byte) (int, error) {
 		c.recordSendRate(1, chunkSizes[i])
 
 		// Auto input rate sampling
-		c.updateInputRate(c.clk.Now(), 1, chunkSizes[i])
+		c.updateInputRate(now, 1, chunkSizes[i])
 
 		// Key rotation check (only for encrypted connections)
 		if c.cryptoCtx != nil && c.kmRefreshRate > 0 {
 			c.checkKeyRotation()
 		}
 
-		// Pacing (skip for last packet to avoid unnecessary sleep)
-		now := c.clk.Now()
+		// Token-bucket pacing with Gosched for short waits
+		paceNow := c.clk.Now()
 		sendint := int64(c.sendCC.PacketInterval())
 		if c.sendCC.IsProbePacket() {
 			c.sendTimeDiff -= sendint
 		} else if !c.nextSendTime.IsZero() {
-			if now.After(c.nextSendTime) {
-				c.sendTimeDiff += int64(now.Sub(c.nextSendTime))
+			if paceNow.After(c.nextSendTime) {
+				c.sendTimeDiff += int64(paceNow.Sub(c.nextSendTime))
 			}
 			if c.sendTimeDiff >= sendint {
 				c.sendTimeDiff -= sendint
 			} else {
 				waitUS := sendint - c.sendTimeDiff
-				time.Sleep(time.Duration(waitUS) * time.Microsecond)
+				pacingSleep(waitUS)
 				c.sendTimeDiff = 0
 			}
 		}
@@ -1086,6 +1104,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 // pacing, and statistics. Extracted from Write() to support multi-packet messages.
 func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 	seqNo := seq.Number(p.Header.SequenceNumber)
+
+	now := c.clk.Now()
 
 	// Flow control backpressure: block if send buffer full or flight window reached.
 	// cwnd = min(flowWindowSize, congestionWindow)
@@ -1103,7 +1123,7 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 		p.Header.Encryption = c.activeKey
 	}
 
-	for !(c.flightSize() < maxFlight && c.sendBuf.Push(p, c.clk.Now())) {
+	for !(c.flightSize() < maxFlight && c.sendBuf.Push(p, now)) {
 		if !c.sndSynFlag.Load() {
 			p.Release()
 			return ErrWouldBlock
@@ -1136,6 +1156,7 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 			p.Release()
 			return c.getShutdownErr()
 		}
+		now = c.clk.Now() // refresh after blocking wait
 	}
 
 	// Per-message TTL: tag the buffer entry (set by WriteMsgCtrl)
@@ -1144,7 +1165,7 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 	}
 
 	// Track sender-busy duration: if buffer was idle, mark busy start
-	c.sndBusySince.CompareAndSwap(0, int64(c.clk.Now()))
+	c.sndBusySince.CompareAndSwap(0, int64(now))
 
 	// Encrypt if encryption is enabled.
 	// For CTR mode: encrypts in-place (modifies the shared buffer stored in the
@@ -1170,7 +1191,6 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 	if err := c.m.Send(p); err != nil {
 		return fmt.Errorf("srt: send: %w", err)
 	}
-	c.updateLastSndTime()
 
 	c.sendCC.OnPacketSent(seqNo.Value(), dataLen)
 	c.sentPackets.Add(1)
@@ -1178,7 +1198,7 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 	c.recordSendRate(1, dataLen)
 
 	// Auto input rate sampling
-	c.updateInputRate(c.clk.Now(), 1, dataLen)
+	c.updateInputRate(now, 1, dataLen)
 
 	// FEC: feed source packet into FEC groups and emit control packets
 	if c.fecSender != nil {
@@ -1191,26 +1211,41 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 		c.checkKeyRotation()
 	}
 
-	// Token-bucket pacing with drift compensation.
-	now := c.clk.Now()
+	// Token-bucket pacing with Gosched for short waits
+	paceNow := c.clk.Now()
 	sendint := int64(c.sendCC.PacketInterval())
 	if c.sendCC.IsProbePacket() {
 		c.sendTimeDiff -= sendint
 	} else if !c.nextSendTime.IsZero() {
-		if now.After(c.nextSendTime) {
-			c.sendTimeDiff += int64(now.Sub(c.nextSendTime))
+		if paceNow.After(c.nextSendTime) {
+			c.sendTimeDiff += int64(paceNow.Sub(c.nextSendTime))
 		}
 		if c.sendTimeDiff >= sendint {
 			c.sendTimeDiff -= sendint
 		} else {
 			waitUS := sendint - c.sendTimeDiff
-			time.Sleep(time.Duration(waitUS) * time.Microsecond)
+			pacingSleep(waitUS)
 			c.sendTimeDiff = 0
 		}
 	}
 	c.nextSendTime = c.clk.Now()
 
 	return nil
+}
+
+// pacingSleep waits for the given number of microseconds. For short waits
+// (below pacingSpinThresholdUS), it yields the goroutine via runtime.Gosched()
+// which takes ~5-20µs — much less than time.Sleep's ~50µs minimum on macOS.
+// For longer waits, it uses time.Sleep which is more CPU-efficient.
+func pacingSleep(us int64) {
+	if us <= 0 {
+		return
+	}
+	if us < pacingSpinThresholdUS {
+		runtime.Gosched()
+		return
+	}
+	time.Sleep(time.Duration(us) * time.Microsecond)
 }
 
 // sendFECPackets emits pending FEC control packets from the sender.
@@ -1543,9 +1578,10 @@ func (c *Conn) timerLoop() {
 	ticker := time.NewTicker(synInterval)
 	defer ticker.Stop()
 
-	lastKeepAlive := time.Now()
 	lastNAKTime := time.Now()
 	lastStatsTime := time.Now()
+	lastSndPktSnap := c.sentPackets.Load()
+	lastSndActivity := time.Now()
 	c.lastACKRecv.Store(time.Now().UnixNano()) // initialize for RTO detection
 	c.rexmitCount.Store(1)
 	lastPktSnap := c.peerActivity.Load()
@@ -1570,16 +1606,15 @@ func (c *Conn) timerLoop() {
 				}
 			}
 
-			// KeepAlive: only fire when no packet has been sent recently.
-			//: keepalive only when idle (no sends in 1s).
-			lastSndNano := c.lastSndTime.Load()
-			if lastSndNano > 0 {
-				if now.Sub(time.Unix(0, lastSndNano)) >= keepalivePeriod {
-					c.sendKeepAlive()
-				}
-			} else if now.Sub(lastKeepAlive) >= keepalivePeriod {
+			// KeepAlive: fire when no packet has been sent recently.
+			// Uses packet-count snapshot instead of per-packet time.Now() .
+			sndPkts := c.sentPackets.Load()
+			if sndPkts != lastSndPktSnap {
+				lastSndPktSnap = sndPkts
+				lastSndActivity = now
+			} else if now.Sub(lastSndActivity) >= keepalivePeriod {
 				c.sendKeepAlive()
-				lastKeepAlive = now
+				lastSndActivity = now
 			}
 
 			// Stats callback
@@ -2302,12 +2337,15 @@ func (c *Conn) handleACKACK(p packet.Packet) {
 	// ACKACK echoes the ACK sequence number in TypeSpecific.
 	// RTT = now - time_when_ACK_was_sent
 	ackSeqNo := p.Header.TypeSpecific
+	slot := ackSeqNo & (ackTimeSlots - 1)
 	c.ackSendTimeMu.Lock()
-	info, ok := c.ackSendTime[ackSeqNo]
+	entry := c.ackSendTimeSlots[slot]
+	ok := entry.seqNo == ackSeqNo
 	if ok {
-		delete(c.ackSendTime, ackSeqNo)
+		c.ackSendTimeSlots[slot].seqNo = 0 // mark consumed
 	}
 	c.ackSendTimeMu.Unlock()
+	info := entry.info
 	if !ok {
 		return // unknown ACK sequence — stale or duplicate
 	}
@@ -2596,17 +2634,18 @@ func (c *Conn) sendFullACK() {
 	}
 
 	c.m.Send(p)
-	c.updateLastSndTime()
 	p.Release()
 
 	c.sentACKs.Add(1)
 
-	// Record send time + data seqno for RTT measurement and ACKACK tracking
+	// Record send time + data seqno for RTT measurement and ACKACK tracking.
+	// Uses circular buffer indexed by ackNo .
+	slot := ackNo & (ackTimeSlots - 1)
 	c.ackSendTimeMu.Lock()
-	c.ackSendTime[ackNo] = ackSendInfo{sendTime: now, dataSeq: ackSeq.Value()}
+	c.ackSendTimeSlots[slot] = ackTimeEntry{seqNo: ackNo, info: ackSendInfo{sendTime: now, dataSeq: ackSeq.Value()}}
 	c.ackSendTimeMu.Unlock()
 
-	//: track whether buffer is full for next ACK decision.
+	// Track whether buffer is full for next ACK decision.
 	c.bufferWasFull.Store(availSpace == 0)
 }
 
@@ -2838,21 +2877,14 @@ func (c *Conn) SendKeepAlive() {
 func (c *Conn) sendKeepAlive() {
 	p := packet.NewControl(c.remoteAddr, packet.CtrlTypeKeepalive, c.peerSocketID, c.clk.Now().SRTTimestamp())
 	c.m.Send(p)
-	c.lastSndTime.Store(time.Now().UnixNano())
 	p.Release()
 
-	//internalKeepalive(): when we send a keepalive
-	// (EXP timer fires with no data to send), also signal group idle state.
-	// This ensures early IDLE recognition when both directions are quiet.
+	// When we send a keepalive (EXP timer fires with no data to send),
+	// also signal group idle state. This ensures early IDLE recognition
+	// when both directions are quiet.
 	if c.groupID != 0 {
 		c.groupIdle.Store(true)
 	}
-}
-
-// updateLastSndTime records the current time as the last send time.
-// Used by the keepalive timer to avoid redundant keepalives during active send.
-func (c *Conn) updateLastSndTime() {
-	c.lastSndTime.Store(time.Now().UnixNano())
 }
 
 // ---- Helper methods ----

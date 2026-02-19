@@ -431,7 +431,7 @@ func BenchmarkWrite(b *testing.B) {
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 5 * time.Second
-	cfg.MaxBW = 1_000_000_000 // 1 Gbps — benchmark measures raw stack throughput
+	cfg.MaxBW = 1_000_000_000 / 8 // 1 Gbps (125 MB/s) — matches C++ SRT default
 
 	l, err := Listen("127.0.0.1:0", cfg)
 	if err != nil {
@@ -442,7 +442,7 @@ func BenchmarkWrite(b *testing.B) {
 	dialCfg := DefaultConfig()
 	dialCfg.Latency = 20 * time.Millisecond
 	dialCfg.ConnTimeout = 5 * time.Second
-	dialCfg.MaxBW = 1_000_000_000
+	dialCfg.MaxBW = 1_000_000_000 / 8
 
 	var server *Conn
 	var wg sync.WaitGroup
@@ -493,7 +493,7 @@ func BenchmarkReadWrite(b *testing.B) {
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 5 * time.Second
-	cfg.MaxBW = 1_000_000_000 // 1 Gbps — benchmark measures raw stack throughput
+	cfg.MaxBW = 1_000_000_000 / 8 // 1 Gbps (125 MB/s) — matches C++ SRT default
 
 	l, err := Listen("127.0.0.1:0", cfg)
 	if err != nil {
@@ -504,7 +504,7 @@ func BenchmarkReadWrite(b *testing.B) {
 	dialCfg := DefaultConfig()
 	dialCfg.Latency = 20 * time.Millisecond
 	dialCfg.ConnTimeout = 5 * time.Second
-	dialCfg.MaxBW = 1_000_000_000
+	dialCfg.MaxBW = 1_000_000_000 / 8
 
 	var server *Conn
 	var wg sync.WaitGroup
@@ -567,7 +567,7 @@ func TestEncryptedRoundtrip(t *testing.T) {
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 5 * time.Second
 	cfg.Passphrase = passphrase
-	cfg.MaxBW = 1_000_000_000
+	cfg.MaxBW = 1_000_000_000 / 8
 
 	l, err := Listen("127.0.0.1:0", cfg)
 	if err != nil {
@@ -579,7 +579,7 @@ func TestEncryptedRoundtrip(t *testing.T) {
 	dialCfg.Latency = 20 * time.Millisecond
 	dialCfg.ConnTimeout = 5 * time.Second
 	dialCfg.Passphrase = passphrase
-	dialCfg.MaxBW = 1_000_000_000
+	dialCfg.MaxBW = 1_000_000_000 / 8
 
 	var server *Conn
 	var wg sync.WaitGroup
@@ -679,7 +679,7 @@ func TestKeyRotationContinuity(t *testing.T) {
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 5 * time.Second
 	cfg.Passphrase = passphrase
-	cfg.MaxBW = 1_000_000_000
+	cfg.MaxBW = 1_000_000_000 / 8
 	cfg.KMRefreshRate = 50
 	cfg.KMPreAnnounce = 10
 
@@ -693,7 +693,7 @@ func TestKeyRotationContinuity(t *testing.T) {
 	dialCfg.Latency = 20 * time.Millisecond
 	dialCfg.ConnTimeout = 5 * time.Second
 	dialCfg.Passphrase = passphrase
-	dialCfg.MaxBW = 1_000_000_000
+	dialCfg.MaxBW = 1_000_000_000 / 8
 	dialCfg.KMRefreshRate = 50
 	dialCfg.KMPreAnnounce = 10
 

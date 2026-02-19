@@ -100,19 +100,14 @@ func (cc *LiveCC) OnTimeout() {}
 
 // OnPacketSent is called when a packet is sent.
 // Updates the running average payload size via IIR-128 filter.
+// Lock-free: probe.lastSentSeq is redundant with atomicLastSentSeq.
 func (cc *LiveCC) OnPacketSent(seqNo uint32, size int) {
-	// Update atomics for lock-free PacketInterval()/IsProbePacket()
 	cc.atomicLastSentSeq.Store(seqNo)
 	if size > 0 {
 		// IIR-128 filter: avg = (old * 127 + new) / 128
 		old := cc.atomicAvgPayloadSize.Load()
 		cc.atomicAvgPayloadSize.Store((old*127 + int64(size)) / 128)
 	}
-
-	// Probe estimator still needs mutex
-	cc.mu.Lock()
-	cc.probe.onPacketSent(seqNo)
-	cc.mu.Unlock()
 }
 
 // IsProbePacket returns true if the last sent packet was the first of
