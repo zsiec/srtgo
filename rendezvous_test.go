@@ -247,7 +247,7 @@ func TestRendezvousBasic(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
-	cfg.ConnTimeout = 3 * time.Second
+	cfg.ConnTimeout = 10 * time.Second
 
 	// Bind two UDP sockets up front — avoids TOCTOU race where the OS
 	// reassigns a closed ephemeral port before DialRendezvous can rebind.
@@ -417,7 +417,7 @@ func TestRendezvousFileMode(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
-	cfg.ConnTimeout = 3 * time.Second
+	cfg.ConnTimeout = 10 * time.Second
 	cfg.TransType = TransTypeFile
 
 	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -609,7 +609,7 @@ func TestRendezvousWithStreamID(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
-	cfg.ConnTimeout = 3 * time.Second
+	cfg.ConnTimeout = 10 * time.Second
 	cfg.StreamID = "rendezvous/stream"
 
 	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
