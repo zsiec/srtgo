@@ -329,7 +329,7 @@ func (c *CIFHandshakeExtension) MarshalCIF() ([]byte, error) {
 
 func (c *CIFHandshakeExtension) UnmarshalCIF(data []byte) error {
 	if len(data) < 12 {
-		return fmt.Errorf("HS extension too short (%d bytes)", len(data))
+		return fmt.Errorf("hs extension too short (%d bytes)", len(data))
 	}
 	c.SRTVersion = binary.BigEndian.Uint32(data[0:])
 	c.SRTFlags = binary.BigEndian.Uint32(data[4:])
@@ -406,7 +406,7 @@ func (c *CIFKeyMaterial) UnmarshalCIF(data []byte) error {
 	}
 
 	if len(data) < 16 {
-		return fmt.Errorf("KM extension too short (%d bytes)", len(data))
+		return fmt.Errorf("km extension too short (%d bytes)", len(data))
 	}
 
 	c.S = (data[0] >> 7) & 0x01
@@ -414,22 +414,22 @@ func (c *CIFKeyMaterial) UnmarshalCIF(data []byte) error {
 	c.PacketType = data[0] & 0x0F
 
 	if c.Version != 1 {
-		return fmt.Errorf("KM: invalid version (%d)", c.Version)
+		return fmt.Errorf("km: invalid version (%d)", c.Version)
 	}
 	if c.PacketType != 2 {
-		return fmt.Errorf("KM: invalid packet type (%d)", c.PacketType)
+		return fmt.Errorf("km: invalid packet type (%d)", c.PacketType)
 	}
 
 	c.Sign = binary.BigEndian.Uint16(data[1:])
 	if c.Sign != 0x2029 {
-		return fmt.Errorf("KM: invalid signature (0x%04X)", c.Sign)
+		return fmt.Errorf("km: invalid signature (0x%04X)", c.Sign)
 	}
 
 	c.KeyBasedEncryption = PacketEncryption(data[3] & 0x03)
 
 	// Key flags must be non-zero (at least one SEK indicated).
 	if c.KeyBasedEncryption == EncryptionNone {
-		return fmt.Errorf("KM: no key indicated (KF=0)")
+		return fmt.Errorf("km: no key indicated (KF=0)")
 	}
 
 	c.KeyEncryptionKeyIndex = binary.BigEndian.Uint32(data[4:])
@@ -441,21 +441,21 @@ func (c *CIFKeyMaterial) UnmarshalCIF(data []byte) error {
 	switch c.Cipher {
 	case 2, 4: // AES-CTR, AES-GCM
 	default:
-		return fmt.Errorf("KM: unsupported cipher (%d)", c.Cipher)
+		return fmt.Errorf("km: unsupported cipher (%d)", c.Cipher)
 	}
 
 	// Auth/cipher consistency check:
 	// GCM cipher requires GCM auth (1); CTR cipher requires no auth (0)
 	if c.Cipher == 4 && c.Authentication != 1 {
-		return fmt.Errorf("KM: GCM cipher requires GCM auth, got auth=%d", c.Authentication)
+		return fmt.Errorf("km: GCM cipher requires GCM auth, got auth=%d", c.Authentication)
 	}
 	if c.Cipher == 2 && c.Authentication != 0 {
-		return fmt.Errorf("KM: CTR cipher requires no auth, got auth=%d", c.Authentication)
+		return fmt.Errorf("km: CTR cipher requires no auth, got auth=%d", c.Authentication)
 	}
 
 	// SE must be HCRYPT_SE_TSSRT (2).
 	if c.StreamEncapsulation != 2 {
-		return fmt.Errorf("KM: invalid stream encapsulation (%d)", c.StreamEncapsulation)
+		return fmt.Errorf("km: invalid stream encapsulation (%d)", c.StreamEncapsulation)
 	}
 
 	c.SLen = uint16(data[14]) * 4
@@ -464,17 +464,17 @@ func (c *CIFKeyMaterial) UnmarshalCIF(data []byte) error {
 	switch c.KLen {
 	case 16, 24, 32:
 	default:
-		return fmt.Errorf("KM: invalid key length (%d)", c.KLen)
+		return fmt.Errorf("km: invalid key length (%d)", c.KLen)
 	}
 
 	offset := 16
 
 	if c.SLen > 0 {
 		if c.SLen != 16 {
-			return fmt.Errorf("KM: invalid salt length (%d)", c.SLen)
+			return fmt.Errorf("km: invalid salt length (%d)", c.SLen)
 		}
 		if len(data[offset:]) < int(c.SLen) {
-			return fmt.Errorf("KM: data too short for salt")
+			return fmt.Errorf("km: data too short for salt")
 		}
 		c.Salt = make([]byte, c.SLen)
 		copy(c.Salt, data[offset:])
@@ -488,14 +488,14 @@ func (c *CIFKeyMaterial) UnmarshalCIF(data []byte) error {
 	}
 	wrapLen := n*int(c.KLen) + 8
 	if len(data[offset:]) < wrapLen {
-		return fmt.Errorf("KM: data too short for wrapped key(s)")
+		return fmt.Errorf("km: data too short for wrapped key(s)")
 	}
 
 	// Total length consistency check.
 	// Expected: 16 (header) + SLen + n*KLen + 8 (wrap signature)
 	expectedLen := 16 + int(c.SLen) + wrapLen
 	if len(data) != expectedLen {
-		return fmt.Errorf("KM: length inconsistent (got %d, expected %d)", len(data), expectedLen)
+		return fmt.Errorf("km: length inconsistent (got %d, expected %d)", len(data), expectedLen)
 	}
 
 	c.Wrap = make([]byte, wrapLen)

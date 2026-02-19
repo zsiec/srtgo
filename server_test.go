@@ -51,11 +51,9 @@ func TestServerListenAndServe(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	// Give time for the handler to be called
-	time.Sleep(50 * time.Millisecond)
-
-	if !publishCalled.Load() {
-		t.Error("HandlePublish should have been called")
+	// Wait for the handler to be called
+	if !waitFor(t, 200*time.Millisecond, publishCalled.Load) {
+		t.Fatal("HandlePublish should have been called")
 	}
 
 	client.Close()
@@ -107,10 +105,8 @@ func TestServerSubscribe(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
-	if !subscribeCalled.Load() {
-		t.Error("HandleSubscribe should have been called")
+	if !waitFor(t, 200*time.Millisecond, subscribeCalled.Load) {
+		t.Fatal("HandleSubscribe should have been called")
 	}
 
 	client.Close()
@@ -207,13 +203,11 @@ func TestServerStreamIDRouting(t *testing.T) {
 		t.Fatalf("Dial subscribe: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
-	if publishCount.Load() != 1 {
-		t.Errorf("publishCount: got %d, want 1", publishCount.Load())
-	}
-	if subscribeCount.Load() != 1 {
-		t.Errorf("subscribeCount: got %d, want 1", subscribeCount.Load())
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		return publishCount.Load() == 1 && subscribeCount.Load() == 1
+	}) {
+		t.Fatalf("publishCount: got %d, want 1; subscribeCount: got %d, want 1",
+			publishCount.Load(), subscribeCount.Load())
 	}
 
 	pubClient.Close()
@@ -383,10 +377,8 @@ func TestServerListenAndServeFullLifecycle(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
-	if !publishCalled.Load() {
-		t.Error("HandlePublish should have been called")
+	if !waitFor(t, 200*time.Millisecond, publishCalled.Load) {
+		t.Fatal("HandlePublish should have been called")
 	}
 
 	client.Close()

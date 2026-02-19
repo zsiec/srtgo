@@ -1396,12 +1396,10 @@ func TestServerHandlerNilPublish(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-	client.Close()
-
-	if !connectCalled.Load() {
+	if !waitFor(t, 200*time.Millisecond, connectCalled.Load) {
 		t.Error("HandleConnect should have been called")
 	}
+	client.Close()
 
 	s.Shutdown()
 }
@@ -1438,12 +1436,10 @@ func TestServerHandlerNilSubscribe(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-	client.Close()
-
-	if !connectCalled.Load() {
+	if !waitFor(t, 200*time.Millisecond, connectCalled.Load) {
 		t.Error("HandleConnect should have been called")
 	}
+	client.Close()
 
 	s.Shutdown()
 }

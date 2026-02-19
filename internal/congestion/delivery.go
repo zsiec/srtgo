@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/packet"
 )
 
 const (
@@ -128,7 +129,7 @@ func deliveryRateFilter(timeWindow, bytesWindow []int, maxPayloadSize int) (pktR
 	}
 
 	// Add protocol headers to bytes received
-	totalBytes += uint64(WireHeaderSize) * uint64(count)
+	totalBytes += uint64(packet.WireHeaderSize) * uint64(count)
 
 	// ceilPerMega(sum, count) = ceil(1_000_000 / (sum / count))
 	//                              = ceil(1_000_000 * count / sum)

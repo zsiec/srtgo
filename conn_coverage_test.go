@@ -18,8 +18,7 @@ import (
 // TestConnHandleDataPacket_FECRouting tests that data packets with MessageNumber==0
 // are routed to handleFECPacket when an FEC receiver is configured.
 func TestConnHandleDataPacket_FECRouting(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -52,8 +51,7 @@ func TestConnHandleDataPacket_FECRouting(t *testing.T) {
 // TestConnHandleFECPacket_WithReceiver tests the handleFECPacket path where
 // fecReceiver processes FEC control packets and recovers missing data.
 func TestConnHandleFECPacket_WithReceiver(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -117,8 +115,7 @@ func TestConnHandleFECPacket_WithReceiver(t *testing.T) {
 // TestConnInsertRecoveredPacket tests that FEC-recovered packets are properly
 // inserted into the receive buffer.
 func TestConnInsertRecoveredPacket(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	now := c.clk.Now()
 	recvISN := c.recvBuf.ACKSequence().Value()
@@ -143,8 +140,7 @@ func TestConnInsertRecoveredPacket(t *testing.T) {
 // TestConnInsertRecoveredPacket_Duplicate tests that duplicate recovered packets
 // are not double-counted.
 func TestConnInsertRecoveredPacket_Duplicate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	now := c.clk.Now()
 	recvISN := c.recvBuf.ACKSequence().Value()
@@ -172,8 +168,7 @@ func TestConnInsertRecoveredPacket_Duplicate(t *testing.T) {
 // TestConnInsertRecoveredPacket_Encrypted tests the decryption path for
 // FEC-recovered packets in CTR mode.
 func TestConnInsertRecoveredPacket_Encrypted(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	ctx, err := crypto.New(16)
 	if err != nil {
@@ -213,8 +208,7 @@ func TestConnInsertRecoveredPacket_Encrypted(t *testing.T) {
 // TestConnHandleDataPacket_FECReceiverFeedOnInsert tests that inserted data packets
 // are fed into the FEC receiver for group accumulation.
 func TestConnHandleDataPacket_FECReceiverFeedOnInsert(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -258,8 +252,7 @@ func TestConnHandleKMRequest_ValidKMREQ(t *testing.T) {
 		t.Fatalf("crypto.New receiver: %v", err)
 	}
 
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 	c.cryptoCtx = receiverCtx
 	c.passphrase = passphrase
 
@@ -296,8 +289,7 @@ func TestConnHandleKMRequest_WrongPassphrase(t *testing.T) {
 		t.Fatalf("crypto.New receiver: %v", err)
 	}
 
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 	c.cryptoCtx = receiverCtx
 	c.passphrase = "wrong-passphrase"
 
@@ -322,8 +314,7 @@ func TestConnHandleKMRequest_WrongPassphrase(t *testing.T) {
 
 // TestConnHandleKMRequest_RecvKMCount tests that handleKMRequest increments recvKM.
 func TestConnHandleKMRequest_RecvKMCount(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	ctx, err := crypto.New(16)
 	if err != nil {
@@ -349,8 +340,7 @@ func TestConnHandleKMRequest_RecvKMCount(t *testing.T) {
 
 // TestConnRetransmitAllInFlight_FASTREXMIT tests the FASTREXMIT path.
 func TestConnRetransmitAllInFlight_FASTREXMIT(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	sender.tsbpdEnabled = true
 	sender.peerNakReport = false
@@ -384,8 +374,7 @@ func TestConnRetransmitAllInFlight_FASTREXMIT(t *testing.T) {
 
 // TestConnRetransmitAllInFlight_WithRexmitShaper tests rate-limited retransmission.
 func TestConnRetransmitAllInFlight_WithRexmitShaper(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	sender.rexmitShaper = newRexmitTokenBucket(100) // 100 bytes/sec
 
@@ -407,8 +396,7 @@ func TestConnRetransmitAllInFlight_WithRexmitShaper(t *testing.T) {
 
 // TestConnRetransmitAllInFlight_WithGCMEncryption tests retransmit with GCM re-encryption.
 func TestConnRetransmitAllInFlight_WithGCMEncryption(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {
@@ -446,8 +434,7 @@ func TestConnRetransmitAllInFlight_WithGCMEncryption(t *testing.T) {
 
 // TestConnSendPacket_WithCTREncryption tests sendPacket with CTR encryption.
 func TestConnSendPacket_WithCTREncryption(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	ctx, err := crypto.New(16)
 	if err != nil {
@@ -480,8 +467,7 @@ func TestConnSendPacket_WithCTREncryption(t *testing.T) {
 
 // TestConnSendPacket_WithGCMEncryption tests sendPacket with GCM mode encryption.
 func TestConnSendPacket_WithGCMEncryption(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {
@@ -514,8 +500,7 @@ func TestConnSendPacket_WithGCMEncryption(t *testing.T) {
 // TestConnSendPacket_ConnectionClosed tests sendPacket when connection is closed
 // and send buffer is full.
 func TestConnSendPacket_ConnectionClosed(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	for i := 0; i < sender.fc+10; i++ {
 		data := make([]byte, 100)
@@ -607,8 +592,7 @@ func TestConnWrite_FileModeMultiPacketExact(t *testing.T) {
 
 // TestConnWrite_NonBlockingWouldBlock tests non-blocking Write returning ErrWouldBlock.
 func TestConnWrite_NonBlockingWouldBlock(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	sender.sndSynFlag.Store(false)
 	sender.sndSyn = false
@@ -632,8 +616,7 @@ func TestConnWrite_NonBlockingWouldBlock(t *testing.T) {
 
 // TestConnWrite_WithWriteDeadlineFullBuffer tests Write with past deadline and full buffer.
 func TestConnWrite_WithWriteDeadlineFullBuffer(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	for i := 0; i < sender.sendBuf.Capacity(); i++ {
 		data := make([]byte, 100)
@@ -661,8 +644,7 @@ func TestConnWrite_WithWriteDeadlineFullBuffer(t *testing.T) {
 
 // TestConnWrite_LiveModeSinglePacketValidation tests the single-packet write path.
 func TestConnWrite_LiveModeSinglePacketValidation(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	data := make([]byte, 100)
 	for i := range data {
@@ -687,8 +669,7 @@ func TestConnWrite_LiveModeSinglePacketValidation(t *testing.T) {
 
 // TestConnWrite_LiveModeRejectsOversize tests that live mode rejects oversized payloads.
 func TestConnWrite_LiveModeRejectsOversize(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	oversize := make([]byte, sender.payloadSize+1)
 	_, err := sender.Write(oversize)
@@ -699,8 +680,7 @@ func TestConnWrite_LiveModeRejectsOversize(t *testing.T) {
 
 // TestConnHandleDataPacket_QuickACKFileMode tests quick ACK for non-full payloads.
 func TestConnHandleDataPacket_QuickACKFileMode(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tsbpdEnabled = false
 	c.tlpktdropEnabled = false
@@ -722,8 +702,7 @@ func TestConnHandleDataPacket_QuickACKFileMode(t *testing.T) {
 
 // TestConnHandleDataPacket_NoQuickACKFullPayload tests that full payloads skip quick ACK.
 func TestConnHandleDataPacket_NoQuickACKFullPayload(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tsbpdEnabled = false
 	c.tlpktdropEnabled = false
@@ -745,8 +724,7 @@ func TestConnHandleDataPacket_NoQuickACKFullPayload(t *testing.T) {
 
 // TestConnHandleDataPacket_TSBPDTimestampUpdate tests TSBPD wrap detection on data packets.
 func TestConnHandleDataPacket_TSBPDTimestampUpdate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	if !c.tsbpdEnabled || c.tsbpdTimer == nil {
 		t.Skip("TSBPD not enabled on test conn")
@@ -769,8 +747,7 @@ func TestConnHandleDataPacket_TSBPDTimestampUpdate(t *testing.T) {
 
 // TestConnHandleDataPacket_FECSuppressionOfNAK tests NAK suppression with FEC ARQOnReq.
 func TestConnHandleDataPacket_FECSuppressionOfNAK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -803,8 +780,7 @@ func TestConnHandleDataPacket_FECSuppressionOfNAK(t *testing.T) {
 
 // TestConnHandleDataPacket_FECAllowsNAK_ARQAlways tests NAK is sent with ARQAlways.
 func TestConnHandleDataPacket_FECAllowsNAK_ARQAlways(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -836,8 +812,7 @@ func TestConnHandleDataPacket_FECAllowsNAK_ARQAlways(t *testing.T) {
 
 // TestConnHandleFECPacket_LossReport tests FEC loss reporting path.
 func TestConnHandleFECPacket_LossReport(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -885,8 +860,7 @@ func TestConnHandleFECPacket_LossReport(t *testing.T) {
 
 // TestConnWrite_WithFECSender tests Write with FEC sender attached.
 func TestConnWrite_WithFECSender(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -915,8 +889,7 @@ func TestConnWrite_WithFECSender(t *testing.T) {
 
 // TestConnWrite_EncryptedConnection tests Write with CTR encryption.
 func TestConnWrite_EncryptedConnection(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	ctx, err := crypto.New(16)
 	if err != nil {
@@ -941,8 +914,7 @@ func TestConnWrite_EncryptedConnection(t *testing.T) {
 
 // TestConnWrite_GroupSrcTime tests Write with group-coordinated source timestamp.
 func TestConnWrite_GroupSrcTime(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	sender.groupSrcTime.Store(42000)
 
@@ -959,8 +931,7 @@ func TestConnWrite_GroupSrcTime(t *testing.T) {
 // TestConnHandleDataPacket_GCMDecryptPath tests GCM-specific decrypt path
 // with R-bit zeroing in AAD.
 func TestConnHandleDataPacket_GCMDecryptPath(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {
@@ -1008,8 +979,7 @@ func TestConnHandleDataPacket_GCMDecryptPath(t *testing.T) {
 // TestConnHandleDataPacket_GCMNonTSBPD tests the GCM path with TSBPD disabled
 // (timestamp zeroed in AAD).
 func TestConnHandleDataPacket_GCMNonTSBPD(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tsbpdEnabled = false
 
@@ -1119,8 +1089,7 @@ func TestConnWrite_FileModeMultiPacketWithEncryption(t *testing.T) {
 // TestConnWrite_FileModeMultiPacketDeadline tests that multi-packet write
 // in file mode respects write deadlines when the buffer is full.
 func TestConnWrite_FileModeMultiPacketDeadline(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Configure as file mode (no TSBPD, no packet size limit)
 	sender.tsbpdEnabled = false
@@ -1152,8 +1121,7 @@ func TestConnWrite_FileModeMultiPacketDeadline(t *testing.T) {
 // TestConnWrite_FileModeConnectionClose tests multi-packet write when
 // connection closes mid-write.
 func TestConnWrite_FileModeConnectionClose(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	sender.tsbpdEnabled = false
 	sender.tlpktdropEnabled = false
@@ -1186,8 +1154,7 @@ func TestConnWrite_FileModeConnectionClose(t *testing.T) {
 // TestConnWrite_SendDropCheckTlpktDrop tests that Write calls checkSendDrop
 // before sending when TLPKT drop is enabled.
 func TestConnWrite_SendDropCheckTlpktDrop(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// TSBPD and tlpktdrop are enabled by default in live mode
 	if !sender.tlpktdropEnabled {
@@ -1206,8 +1173,7 @@ func TestConnWrite_SendDropCheckTlpktDrop(t *testing.T) {
 
 // TestConnSendPacket_WithFECSender tests that sendPacket feeds into FEC sender.
 func TestConnSendPacket_WithFECSender(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	fecCfg := filter.Config{
 		Cols:   3,
@@ -1242,8 +1208,7 @@ func TestConnSendPacket_WithFECSender(t *testing.T) {
 // TestConnSendPacket_WithKeyRotation tests that sendPacket triggers key rotation
 // when encryption is enabled and kmRefreshRate is set.
 func TestConnSendPacket_WithKeyRotation(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	ctx, err := crypto.New(16)
 	if err != nil {
@@ -1279,8 +1244,7 @@ func TestConnSendPacket_WithKeyRotation(t *testing.T) {
 // TestConnInsertRecoveredPacket_GCMEncrypted tests recovered packet with GCM
 // encryption (decryption failure path for corrupted GCM auth tags).
 func TestConnInsertRecoveredPacket_GCMEncrypted(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {

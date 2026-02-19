@@ -548,7 +548,7 @@ func dialRendezvous(conn net.PacketConn, remoteAddr net.Addr, cfg Config, clk cl
 			if cfg.FC < negotiatedFC {
 				negotiatedFC = cfg.FC
 			}
-			payloadSize := int(negotiatedMSS) - 44
+			payloadSize := int(negotiatedMSS) - packet.WireHeaderSize
 			if cfg.PayloadSize > 0 && cfg.PayloadSize < payloadSize {
 				payloadSize = cfg.PayloadSize
 			}

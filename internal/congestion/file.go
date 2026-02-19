@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
 )
 
@@ -209,9 +210,9 @@ func (cc *FileCC) rateIncrease() {
 
 	var inc float64
 	// MSS is the full wire packet size (payload + headers).
-	mss := float64(cc.packetSize) + float64(WireHeaderSize)
-	if mss <= float64(WireHeaderSize) {
-		mss = float64(DefaultPacketSize) + float64(WireHeaderSize)
+	mss := float64(cc.packetSize) + float64(packet.WireHeaderSize)
+	if mss <= float64(packet.WireHeaderSize) {
+		mss = float64(DefaultPacketSize) + float64(packet.WireHeaderSize)
 	}
 
 	if B <= 0 {
@@ -311,9 +312,9 @@ func (cc *FileCC) enforceMaxBW() {
 	if cc.maxBW <= 0 {
 		return
 	}
-	mss := float64(cc.packetSize) + float64(WireHeaderSize)
-	if mss <= float64(WireHeaderSize) {
-		mss = float64(DefaultPacketSize) + float64(WireHeaderSize)
+	mss := float64(cc.packetSize) + float64(packet.WireHeaderSize)
+	if mss <= float64(packet.WireHeaderSize) {
+		mss = float64(DefaultPacketSize) + float64(packet.WireHeaderSize)
 	}
 	// minSP = 1e6 / (maxBW_bytes_per_sec / MSS_bytes_per_pkt)
 	minSP := 1_000_000.0 / (float64(cc.maxBW) / mss)

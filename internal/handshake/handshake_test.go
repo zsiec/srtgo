@@ -516,7 +516,10 @@ func TestBuildExtKMREQ(t *testing.T) {
 		Wrap:                make([]byte, 24),
 	}
 
-	p := BuildExtKMREQ(42, km, addr)
+	p, err := BuildExtKMREQ(42, km, addr)
+	if err != nil {
+		t.Fatalf("BuildExtKMREQ: %v", err)
+	}
 	defer p.Release()
 
 	if p.Header.SubType != packet.ExtTypeKMReq {
@@ -542,7 +545,10 @@ func TestBuildExtKMRSP(t *testing.T) {
 		Wrap:                make([]byte, 24),
 	}
 
-	p := BuildExtKMRSP(99, km, addr)
+	p, err := BuildExtKMRSP(99, km, addr)
+	if err != nil {
+		t.Fatalf("BuildExtKMRSP: %v", err)
+	}
 	defer p.Release()
 
 	if p.Header.SubType != packet.ExtTypeKMRsp {

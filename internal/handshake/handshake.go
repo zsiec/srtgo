@@ -601,24 +601,32 @@ func BuildExtHSRSP(
 
 // BuildExtKMREQ creates a UMSG_EXT control packet containing KMREQ payload.
 // Used for post-handshake key material exchange in HSv4 mode.
-func BuildExtKMREQ(destSocketID uint32, km *packet.CIFKeyMaterial, addr net.Addr) packet.Packet {
+func BuildExtKMREQ(destSocketID uint32, km *packet.CIFKeyMaterial, addr net.Addr) (packet.Packet, error) {
 	p := packet.NewControl(addr, packet.CtrlTypeUser, destSocketID, 0)
 	p.Header.SubType = packet.ExtTypeKMReq
 
-	data, _ := km.MarshalCIF()
+	data, err := km.MarshalCIF()
+	if err != nil {
+		p.Release()
+		return packet.Packet{}, fmt.Errorf("handshake: marshal KMREQ: %w", err)
+	}
 	p.SetData(data)
-	return p
+	return p, nil
 }
 
 // BuildExtKMRSP creates a UMSG_EXT control packet containing KMRSP payload.
 // Used for post-handshake key material response in HSv4 mode.
-func BuildExtKMRSP(destSocketID uint32, km *packet.CIFKeyMaterial, addr net.Addr) packet.Packet {
+func BuildExtKMRSP(destSocketID uint32, km *packet.CIFKeyMaterial, addr net.Addr) (packet.Packet, error) {
 	p := packet.NewControl(addr, packet.CtrlTypeUser, destSocketID, 0)
 	p.Header.SubType = packet.ExtTypeKMRsp
 
-	data, _ := km.MarshalCIF()
+	data, err := km.MarshalCIF()
+	if err != nil {
+		p.Release()
+		return packet.Packet{}, fmt.Errorf("handshake: marshal KMRSP: %w", err)
+	}
 	p.SetData(data)
-	return p
+	return p, nil
 }
 
 // ParseExtHSREQ parses an HSREQ payload from a UMSG_EXT packet.

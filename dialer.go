@@ -354,7 +354,7 @@ func dialConclusion(
 			}
 
 			// MSS - 44 bytes (IP 20 + UDP 8 + SRT header 16)
-			payloadSize := int(negotiatedMSS) - 44
+			payloadSize := int(negotiatedMSS) - packet.WireHeaderSize
 			if cfg.PayloadSize > 0 && cfg.PayloadSize < payloadSize {
 				payloadSize = cfg.PayloadSize
 			}
@@ -522,7 +522,7 @@ func dialConclusionV4(
 			if cfg.FC < negotiatedFC {
 				negotiatedFC = cfg.FC
 			}
-			payloadSize := int(negotiatedMSS) - 44
+			payloadSize := int(negotiatedMSS) - packet.WireHeaderSize
 			if cfg.PayloadSize > 0 && cfg.PayloadSize < payloadSize {
 				payloadSize = cfg.PayloadSize
 			}

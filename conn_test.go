@@ -17,8 +17,8 @@ import (
 )
 
 // testConnPair creates two connected Conns for testing.
-// Returns (sender, receiver, cleanup).
-func testConnPair(t *testing.T) (*Conn, *Conn, func()) {
+// Cleanup is registered via t.Cleanup.
+func testConnPair(t *testing.T) (*Conn, *Conn) {
 	t.Helper()
 
 	// Create two UDP sockets bound to localhost
@@ -77,18 +77,18 @@ func testConnPair(t *testing.T) (*Conn, *Conn, func()) {
 		TsbpdDelay:   20 * time.Millisecond,
 	})
 
-	cleanup := func() {
+	t.Cleanup(func() {
 		senderConn.Close()
 		receiverConn.Close()
 		muxA.Close()
 		muxB.Close()
-	}
+	})
 
-	return senderConn, receiverConn, cleanup
+	return senderConn, receiverConn
 }
 
 // testSingleConn creates a single Conn with a mux for basic tests.
-func testSingleConn(t *testing.T) (*Conn, *mux.Mux, func()) {
+func testSingleConn(t *testing.T) (*Conn, *mux.Mux) {
 	t.Helper()
 
 	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -118,15 +118,16 @@ func testSingleConn(t *testing.T) (*Conn, *mux.Mux, func()) {
 		TsbpdDelay:   20 * time.Millisecond,
 	})
 
-	return c, m, func() {
+	t.Cleanup(func() {
 		c.Close()
 		m.Close()
-	}
+	})
+
+	return c, m
 }
 
 func TestConnNetConnInterface(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Verify that Conn implements net.Conn
 	var _ net.Conn = c
@@ -172,8 +173,7 @@ func TestConnSocketIDAndStreamID(t *testing.T) {
 }
 
 func TestConnClose(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Close should succeed
 	if err := c.Close(); err != nil {
@@ -193,8 +193,7 @@ func TestConnClose(t *testing.T) {
 }
 
 func TestConnSetDeadline(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set read deadline in the past
 	c.SetReadDeadline(time.Now().Add(-1 * time.Second))
@@ -215,8 +214,7 @@ func TestConnSetDeadline(t *testing.T) {
 }
 
 func TestConnWriteDeadline(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Fill the send buffer
 	for i := range 256 {
@@ -241,8 +239,7 @@ func TestConnWriteDeadline(t *testing.T) {
 }
 
 func TestConnHandleDataPacket(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Simulate receiving a data packet
 	p := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("test payload"))
@@ -257,8 +254,7 @@ func TestConnHandleDataPacket(t *testing.T) {
 }
 
 func TestConnHandleDuplicateDataPacket(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert same packet twice
 	p1 := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("test"))
@@ -273,8 +269,7 @@ func TestConnHandleDuplicateDataPacket(t *testing.T) {
 }
 
 func TestConnHandleACK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push some packets to the send buffer first
 	for i := range 5 {
@@ -307,8 +302,7 @@ func TestConnHandleACK(t *testing.T) {
 }
 
 func TestConnHandleNAK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push some packets
 	for i := range 10 {
@@ -329,8 +323,7 @@ func TestConnHandleNAK(t *testing.T) {
 }
 
 func TestConnHandleShutdown(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeShutdown, c.socketID, 0)
 	c.handleControlPacket(p)
@@ -345,8 +338,7 @@ func TestConnHandleShutdown(t *testing.T) {
 }
 
 func TestConnHandleKeepalive(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// KeepAlive should not close the connection
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeKeepalive, c.socketID, 0)
@@ -361,8 +353,7 @@ func TestConnHandleKeepalive(t *testing.T) {
 }
 
 func TestConnStats(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Generate some stats
 	c.sentPackets.Add(10)
@@ -416,8 +407,7 @@ func TestConnStats(t *testing.T) {
 }
 
 func TestConnStatsControlPackets(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert some data packets so ACK has something to send
 	for i := range 5 {
@@ -489,8 +479,7 @@ func TestConnStatsControlPackets(t *testing.T) {
 }
 
 func TestConnStatsNegotiated(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	stats := c.Stats(false)
 
@@ -507,8 +496,7 @@ func TestConnStatsNegotiated(t *testing.T) {
 }
 
 func TestConnStatsBelated(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert a packet successfully
 	p := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("data"))
@@ -525,13 +513,14 @@ func TestConnStatsBelated(t *testing.T) {
 }
 
 func TestConnACKACKRTT(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Store a fake ACK send time with data seqno
 	ackSeqNo := uint32(5)
 	sendTime := c.clk.Now()
-	c.ackSendTime.Store(ackSeqNo, ackSendInfo{sendTime: sendTime, dataSeq: 100})
+	c.ackSendTimeMu.Lock()
+	c.ackSendTime[ackSeqNo] = ackSendInfo{sendTime: sendTime, dataSeq: 100}
+	c.ackSendTimeMu.Unlock()
 
 	// Simulate some time passing
 	time.Sleep(5 * time.Millisecond)
@@ -550,8 +539,7 @@ func TestConnACKACKRTT(t *testing.T) {
 }
 
 func TestConnACKACKUnknownSeq(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	initialRTTVal := c.rtt.Load()
 
@@ -569,8 +557,7 @@ func TestConnACKACKUnknownSeq(t *testing.T) {
 }
 
 func TestConnSignaling(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// signalReadReady should be non-blocking
 	c.signalReadReady()
@@ -599,8 +586,7 @@ func TestConnSignaling(t *testing.T) {
 }
 
 func TestConnFullACK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert some data packets so ACK sequence advances
 	for i := range 5 {
@@ -618,8 +604,7 @@ func TestConnFullACK(t *testing.T) {
 }
 
 func TestConnFullACKNoNewData(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// First call: periodic Full ACK always goes through (needFullACK=true since >10ms since epoch)
 	c.sendFullACK()
@@ -636,8 +621,7 @@ func TestConnFullACKNoNewData(t *testing.T) {
 }
 
 func TestConnPeriodicNAK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert packets with gap (seq 0 missing, seqs 1-3 present)
 	for i := 1; i <= 3; i++ {
@@ -652,8 +636,7 @@ func TestConnPeriodicNAK(t *testing.T) {
 }
 
 func TestConnDataTransfer(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	payload := []byte("hello SRT world!")
 
@@ -666,11 +649,13 @@ func TestConnDataTransfer(t *testing.T) {
 		t.Errorf("Write: got %d, want %d", n, len(payload))
 	}
 
-	// The packet should arrive at the receiver via mux
-	// Wait a bit for UDP delivery and processing
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the sender to record the sent packet
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		return sender.Stats(false).SentPackets >= 1
+	}) {
+		t.Fatal("timed out waiting for SentPackets")
+	}
 
-	// Check that the sender tracked the sent bytes
 	stats := sender.Stats(false)
 	if stats.SentPackets != 1 {
 		t.Errorf("SentPackets: got %d, want 1", stats.SentPackets)
@@ -681,8 +666,7 @@ func TestConnDataTransfer(t *testing.T) {
 }
 
 func TestConnLiteACK(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// sendLiteACK should not panic with empty buffer
 	c.sendLiteACK()
@@ -716,8 +700,7 @@ func TestConnDefaultConfig(t *testing.T) {
 }
 
 func TestConnShutdownErr(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Before any error, getShutdownErr returns net.ErrClosed
 	err := c.getShutdownErr()
@@ -737,8 +720,7 @@ func TestConnShutdownErr(t *testing.T) {
 }
 
 func TestFlightSizeTracking(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initially, flight size should be 0 (nothing in send buffer)
 	if fs := c.flightSize(); fs != 0 {
@@ -822,8 +804,7 @@ func TestFCBlocksWrite(t *testing.T) {
 }
 
 func TestNAKInterval(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// NAK interval: CC adjusts base (RTT+4*RTTVar), then clamp to CC minimum.
 	// LiveCC: divides by 2 (nakReportAccel=2), min 20ms.
@@ -863,8 +844,7 @@ func TestNAKInterval(t *testing.T) {
 
 func TestConnCloseWithLinger(t *testing.T) {
 	// Create a conn pair so ACKs can flow between them.
-	sender, receiver, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, receiver := testConnPair(t)
 
 	// Write some data from sender
 	for range 3 {
@@ -895,8 +875,7 @@ func TestConnCloseWithLinger(t *testing.T) {
 }
 
 func TestConnCloseLingerTimeout(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push packets to send buffer (won't be ACK'd since single conn)
 	for i := range 5 {
@@ -921,8 +900,7 @@ func TestConnCloseLingerTimeout(t *testing.T) {
 }
 
 func TestConnCloseImmediate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push packets to send buffer
 	for i := range 5 {
@@ -971,8 +949,7 @@ func TestConnPeerIdleTimeout(t *testing.T) {
 }
 
 func TestKeyRotationCountdown(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set up encryption with small rotation parameters
 	cryptoCtx, err := crypto.New(16)
@@ -1002,8 +979,7 @@ func TestKeyRotationCountdown(t *testing.T) {
 }
 
 func TestKeyRotationPreAnnounce(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	cryptoCtx, err := crypto.New(16)
 	if err != nil {
@@ -1031,8 +1007,7 @@ func TestKeyRotationPreAnnounce(t *testing.T) {
 }
 
 func TestKeyRotationDisabled(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	cryptoCtx, err := crypto.New(16)
 	if err != nil {
@@ -1054,8 +1029,7 @@ func TestKeyRotationDisabled(t *testing.T) {
 }
 
 func TestKeyRotationKeySwitch(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	cryptoCtx, err := crypto.New(16)
 	if err != nil {
@@ -1085,8 +1059,7 @@ func TestKeyRotationKeySwitch(t *testing.T) {
 }
 
 func TestKeyRotationKMREQRetry(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	cryptoCtx, err := crypto.New(16)
 	if err != nil {
@@ -1148,8 +1121,7 @@ func TestOppositeKey(t *testing.T) {
 }
 
 func TestConnRecvDropTooLate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// testSingleConn has RecvISN=0 and TsbpdDelay=20ms (20_000μs).
 	// Insert seq 1 but not seq 0 — creates a gap at the head.
@@ -1185,8 +1157,7 @@ func TestConnRecvDropTooLate(t *testing.T) {
 }
 
 func TestConnTimestampWrapDetection(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Delivery times should increase monotonically even across the
 	// 32-bit timestamp wrap boundary (~71.6 minutes).
@@ -1222,8 +1193,7 @@ func TestConnSendDropThreshold(t *testing.T) {
 	// Formula: max(delay+extra, 1s) + 20ms
 
 	// With default 20ms TSBPD delay: max(20ms, 1s) + 20ms = 1020ms
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	expected := 1*clock.Second + 20*clock.Millisecond // 1020ms
 	if c.sendDropThresh != expected {
@@ -1256,8 +1226,7 @@ func TestConnSendDropThreshold(t *testing.T) {
 }
 
 func TestStatsUniqueRetransBreakdown(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Simulate 10 sent packets, 2 retransmissions
 	c.sentPackets.Store(10)
@@ -1297,8 +1266,7 @@ func TestStatsUniqueRetransBreakdown(t *testing.T) {
 }
 
 func TestStatsLossRate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Zero packets — rates should be 0
 	stats := c.Stats(false)
@@ -1327,8 +1295,7 @@ func TestStatsLossRate(t *testing.T) {
 }
 
 func TestStatsRTTFactor(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// testSingleConn has TsbpdDelay=20ms. Set RTT to 10ms → factor = 0.5
 	c.rtt.Store(10_000) // 10ms in μs
@@ -1347,8 +1314,7 @@ func TestStatsRTTFactor(t *testing.T) {
 }
 
 func TestStatsByteOverhead(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sentPackets.Store(100)
 	c.sentBytes.Store(100_000) // 100 packets × 1000 bytes payload
@@ -1370,8 +1336,7 @@ func TestStatsByteOverhead(t *testing.T) {
 }
 
 func TestStatsFECPlaceholders(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	stats := c.Stats(false)
 	if stats.SndFilterExtra != 0 {
@@ -1386,8 +1351,7 @@ func TestStatsFECPlaceholders(t *testing.T) {
 }
 
 func TestStatsBufferBytes(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push 5 packets into the send buffer
 	for i := range 5 {
@@ -1414,8 +1378,7 @@ func TestStatsBufferBytes(t *testing.T) {
 
 func TestStatsStartTimeAndDuration(t *testing.T) {
 	before := time.Now()
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 	after := time.Now()
 
 	stats := c.Stats(false)
@@ -1428,8 +1391,7 @@ func TestStatsStartTimeAndDuration(t *testing.T) {
 }
 
 func TestStatsTraceMode(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Send some initial data
 	c.sentPackets.Store(10)
@@ -1466,8 +1428,7 @@ func TestStatsTraceMode(t *testing.T) {
 }
 
 func TestStatsTotalMode(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sentPackets.Store(10)
 	c.sentBytes.Store(10_000)
@@ -1494,8 +1455,7 @@ func TestStatsTotalMode(t *testing.T) {
 }
 
 func TestStatsTraceModeReset(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sentPackets.Store(100)
 	c.sentBytes.Store(100_000)
@@ -1531,8 +1491,7 @@ func TestStatsTraceModeReset(t *testing.T) {
 }
 
 func TestStatsIntervalControlCounters(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sentACKs.Store(10)
 	c.sentNAKs.Store(5)
@@ -1569,8 +1528,7 @@ func TestStatsIntervalControlCounters(t *testing.T) {
 }
 
 func TestStatsCallback(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Simulate some data
 	c.sentPackets.Store(5)
@@ -1585,15 +1543,18 @@ func TestStatsCallback(t *testing.T) {
 	})
 
 	// Wait for at least one callback to fire
-	time.Sleep(200 * time.Millisecond)
+	if !waitFor(t, 500*time.Millisecond, func() bool {
+		mu.Lock()
+		n := len(received)
+		mu.Unlock()
+		return n > 0
+	}) {
+		t.Fatal("stats callback should have fired at least once")
+	}
 
 	mu.Lock()
 	count := len(received)
 	mu.Unlock()
-
-	if count == 0 {
-		t.Error("stats callback should have fired at least once")
-	}
 
 	// Unregister
 	c.OnStats(0, nil)
@@ -1610,8 +1571,7 @@ func TestStatsCallback(t *testing.T) {
 }
 
 func TestStatsCallbackInterval(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	callCount := atomic.Uint32{}
 	c.OnStats(30*time.Millisecond, func(s ConnStats) {
@@ -1629,8 +1589,7 @@ func TestStatsCallbackInterval(t *testing.T) {
 }
 
 func TestStatsRetransmitTracking(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Push 10 packets into the send buffer directly
 	for i := range 10 {
@@ -1667,8 +1626,7 @@ func TestStatsRetransmitTracking(t *testing.T) {
 }
 
 func TestStatsRecvRetransmitFlag(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert a normal packet
 	p1 := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("normal"))
@@ -1695,8 +1653,7 @@ func TestStatsRecvRetransmitFlag(t *testing.T) {
 }
 
 func TestStatsTotalBytesWithHeaders(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sentPackets.Store(100)
 	c.sentBytes.Store(100_000)
@@ -1737,8 +1694,7 @@ func TestStatsTotalBytesWithHeaders(t *testing.T) {
 }
 
 func TestStatsRecvLoss(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert packets with a gap: seq 0 present, seq 1-3 missing, seq 4 present
 	p0 := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("data"))
@@ -1761,8 +1717,7 @@ func TestStatsRecvLoss(t *testing.T) {
 }
 
 func TestStatsBelatedBytes(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Insert a packet
 	p1 := packet.NewData(c.localAddr, 0, 1000, c.socketID, []byte("hello"))
@@ -1786,8 +1741,7 @@ func TestStatsBelatedBytes(t *testing.T) {
 }
 
 func TestStatsInstantaneousFields(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	stats := c.Stats(false)
 
@@ -1808,8 +1762,7 @@ func TestStatsInstantaneousFields(t *testing.T) {
 }
 
 func TestStatsSndBufMs(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Empty buffer — no age
 	stats := c.Stats(false)
@@ -1831,8 +1784,7 @@ func TestStatsSndBufMs(t *testing.T) {
 }
 
 func TestStatsIntervalBitrate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// First interval — establish baseline
 	c.Stats(true)
@@ -1851,8 +1803,7 @@ func TestStatsIntervalBitrate(t *testing.T) {
 }
 
 func TestStatsRcvFilterLossPlaceholder(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	stats := c.Stats(false)
 	if stats.RcvFilterLoss != 0 {
@@ -1861,8 +1812,7 @@ func TestStatsRcvFilterLossPlaceholder(t *testing.T) {
 }
 
 func TestStatsDroppedBytes(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Simulate drops with known byte counts
 	c.sentDropped.Store(5)
@@ -1885,8 +1835,7 @@ func TestStatsDroppedBytes(t *testing.T) {
 }
 
 func TestStatsSndDuration(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initially idle: duration should be 0
 	stats := c.Stats(false)
@@ -1931,8 +1880,7 @@ func TestStatsSndDuration(t *testing.T) {
 }
 
 func TestStatsSndDurationInterval(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Accumulate 1s of send duration
 	c.sndDurationUs.Store(1_000_000)
@@ -1954,8 +1902,7 @@ func TestStatsSndDurationInterval(t *testing.T) {
 }
 
 func TestStatsCongestionWindow(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	stats := c.Stats(false)
 	// LiveCC returns math.MaxInt for CongestionWindow (no CWND limit — FC controls flow).
@@ -1966,8 +1913,7 @@ func TestStatsCongestionWindow(t *testing.T) {
 }
 
 func TestStatsReorderDistance(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initially, no reorder distance
 	stats := c.Stats(false)
@@ -2028,8 +1974,7 @@ func TestStatsReorderDistance(t *testing.T) {
 }
 
 func TestStatsRcvAvgBelatedTime(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initially no belated packets
 	stats := c.Stats(false)
@@ -2060,8 +2005,7 @@ func TestStatsRcvAvgBelatedTime(t *testing.T) {
 }
 
 func TestStatsSndDurationACKDrains(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	mockClk := clock.NewMockClock()
 	mockClk.Set(clock.Timestamp(1_000_000))
@@ -2098,8 +2042,7 @@ func TestStatsSndDurationACKDrains(t *testing.T) {
 }
 
 func TestStatsSndDurationACKAccumulatesIncrementally(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	mockClk := clock.NewMockClock()
 	mockClk.Set(clock.Timestamp(1_000_000))
@@ -2148,8 +2091,7 @@ func TestStatsSndDurationACKAccumulatesIncrementally(t *testing.T) {
 }
 
 func TestKeyRotationMultipleCycles(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	cryptoCtx, err := crypto.New(16)
 	if err != nil {
@@ -2200,8 +2142,7 @@ func TestKeyRotationMultipleCycles(t *testing.T) {
 }
 
 func TestConnStatsKmState(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// No crypto: both states should be 0 (unsecured)
 	stats := c.Stats(false)
@@ -2266,8 +2207,7 @@ func TestConnStatsKmState(t *testing.T) {
 }
 
 func TestMessageNumberWrapping(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set message number near the 26-bit max
 	c.messageNumber = 0x03FFFFFF - 2
@@ -2332,8 +2272,7 @@ func TestMessageAPIFalse(t *testing.T) {
 }
 
 func TestWriteSetsMessageNumber(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Enable messageAPI (testSingleConn doesn't set it)
 	c.messageAPI = true
@@ -2359,8 +2298,8 @@ func TestWriteSetsMessageNumber(t *testing.T) {
 }
 
 // testFileConnPair creates two connected Conns in file mode for testing.
-// Returns (sender, receiver, cleanup).
-func testFileConnPair(t *testing.T) (*Conn, *Conn, func()) {
+// Cleanup is registered via t.Cleanup.
+func testFileConnPair(t *testing.T) (*Conn, *Conn) {
 	t.Helper()
 
 	addrA, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -2418,19 +2357,18 @@ func testFileConnPair(t *testing.T) (*Conn, *Conn, func()) {
 		Congestion:   CongestionFile,
 	})
 
-	cleanup := func() {
+	t.Cleanup(func() {
 		senderConn.Close()
 		receiverConn.Close()
 		muxA.Close()
 		muxB.Close()
-	}
+	})
 
-	return senderConn, receiverConn, cleanup
+	return senderConn, receiverConn
 }
 
 func TestFileModeSendReceive(t *testing.T) {
-	sender, receiver, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileConnPair(t)
 
 	payload := []byte("hello file mode!")
 
@@ -2459,8 +2397,7 @@ func TestFileModeSendReceive(t *testing.T) {
 }
 
 func TestFileModeNoTLPktDrop(t *testing.T) {
-	sender, receiver, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileConnPair(t)
 
 	// Verify mode flags
 	if sender.tsbpdEnabled {
@@ -2505,8 +2442,7 @@ func TestFileModeNoTLPktDrop(t *testing.T) {
 }
 
 func TestFileModeSequentialDelivery(t *testing.T) {
-	sender, receiver, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileConnPair(t)
 
 	// Send multiple packets
 	payloads := []string{"packet-0", "packet-1", "packet-2", "packet-3", "packet-4"}
@@ -2598,8 +2534,7 @@ func TestFileModeFlowControlCWND(t *testing.T) {
 
 func TestFileModeFileCC(t *testing.T) {
 	// Verify that file mode connections use FileCC, not LiveCC
-	sender, _, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, _ := testFileConnPair(t)
 
 	// FileCC initial CWND = 16 (not math.MaxInt like LiveCC)
 	cwnd := sender.sendCC.CongestionWindow()
@@ -2608,8 +2543,7 @@ func TestFileModeFileCC(t *testing.T) {
 	}
 
 	// Live mode should use math.MaxInt
-	sender2, _, cleanup2 := testConnPair(t)
-	defer cleanup2()
+	sender2, _ := testConnPair(t)
 
 	cwnd2 := sender2.sendCC.CongestionWindow()
 	if cwnd2 < 1000000 {
@@ -2618,8 +2552,7 @@ func TestFileModeFileCC(t *testing.T) {
 }
 
 func TestTokenBucketPacing(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Initial state: no credit, nextSendTime is zero
 	if sender.sendTimeDiff != 0 {
@@ -2643,8 +2576,7 @@ func TestTokenBucketPacing(t *testing.T) {
 }
 
 func TestTokenBucketProbeBorrowing(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Send 16 packets to trigger a probe (every 16th packet)
 	for i := 0; i < 17; i++ {
@@ -2661,8 +2593,7 @@ func TestTokenBucketProbeBorrowing(t *testing.T) {
 }
 
 func TestFileModeQuickACK(t *testing.T) {
-	sender, receiver, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileConnPair(t)
 
 	// Send a non-full-payload packet (smaller than max payload size).
 	// In file mode, this should trigger quick ACK on the receiver.
@@ -2680,18 +2611,15 @@ func TestFileModeQuickACK(t *testing.T) {
 	sender.Write(smallPayload)
 
 	// Wait for the receiver to process and trigger quickACK
-	time.Sleep(50 * time.Millisecond)
-
-	// The receiver should have sent ACKs (quick ACK triggered)
-	acksSent := receiver.sentACKs.Load()
-	if acksSent == 0 {
+	if !waitFor(t, 200*time.Millisecond, func() bool {
+		return receiver.sentACKs.Load() > 0
+	}) {
 		t.Error("receiver should have sent at least one ACK (quick ACK for non-full payload)")
 	}
 }
 
 func TestFileModeQuickACKFullPayload(t *testing.T) {
-	sender, receiver, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileConnPair(t)
 
 	// Send a full-payload packet — should NOT trigger quick ACK
 	fullPayload := make([]byte, receiver.payloadSize)
@@ -2713,8 +2641,7 @@ func TestFileModeQuickACKFullPayload(t *testing.T) {
 }
 
 func TestDynamicFlowWindow(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Initially flow window should be 0 (not yet updated from ACK)
 	if fws := sender.flowWindowSize.Load(); fws != 0 {
@@ -2744,8 +2671,7 @@ func TestDynamicFlowWindow(t *testing.T) {
 }
 
 func TestSndLossCountTracking(t *testing.T) {
-	sender, _, cleanup := testFileConnPair(t)
-	defer cleanup()
+	sender, _ := testFileConnPair(t)
 
 	// Initially loss count should be 0
 	if cnt := sender.sndLossCount.Load(); cnt != 0 {
@@ -2782,8 +2708,7 @@ func TestSndLossCountTracking(t *testing.T) {
 }
 
 func TestMultiPacketMessageSendReceive(t *testing.T) {
-	sender, receiver, cleanup := testFileMessageConnPair(t)
-	defer cleanup()
+	sender, receiver := testFileMessageConnPair(t)
 
 	// Send a message larger than one payload (requires fragmentation)
 	// payloadSize defaults to 1456 bytes
@@ -2823,7 +2748,7 @@ func TestMultiPacketMessageSendReceive(t *testing.T) {
 }
 
 // testFileMessageConnPair creates two connected Conns in file mode with message API.
-func testFileMessageConnPair(t *testing.T) (*Conn, *Conn, func()) {
+func testFileMessageConnPair(t *testing.T) (*Conn, *Conn) {
 	t.Helper()
 
 	addrA, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -2880,20 +2805,19 @@ func testFileMessageConnPair(t *testing.T) (*Conn, *Conn, func()) {
 		MessageAPI:   true,
 	})
 
-	cleanup := func() {
+	t.Cleanup(func() {
 		senderConn.Close()
 		receiverConn.Close()
 		muxA.Close()
 		muxB.Close()
-	}
+	})
 
-	return senderConn, receiverConn, cleanup
+	return senderConn, receiverConn
 }
 
 func TestMultiPacketMessageLiveReject(t *testing.T) {
 	// Live mode should reject messages > payloadSize
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	if !sender.tsbpdEnabled {
 		t.Skip("sender not in live mode")
@@ -3083,8 +3007,7 @@ func TestFreshLossRemoveNotFound(t *testing.T) {
 
 func TestProcessFreshLossExpiration(t *testing.T) {
 	// Create a conn with a mux that can send packets (needed for NAK)
-	c, m, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, m := testSingleConn(t)
 	_ = m
 
 	c.maxReorderTolerance = 10
@@ -3117,8 +3040,7 @@ func TestProcessFreshLossExpiration(t *testing.T) {
 }
 
 func TestProcessFreshLossTTLDecrement(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.maxReorderTolerance = 10
 	c.reorderTolerance = 5
@@ -3445,8 +3367,7 @@ func TestFreshLossCppCompatSequence(t *testing.T) {
 func TestFASTREXMITFiresWhenPeerNakReportFalse(t *testing.T) {
 	// In live mode, when peerNakReport=false, FASTREXMIT should retransmit
 	// all unacked packets when RTO fires, regardless of loss list state.
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Configure as live mode with peerNakReport=false
 	c.tsbpdEnabled = true
@@ -3476,8 +3397,7 @@ func TestFASTREXMITFiresWhenPeerNakReportFalse(t *testing.T) {
 func TestFASTREXMITSuppressedWhenPeerNakReportTrue(t *testing.T) {
 	// In live mode, when peerNakReport=true, FASTREXMIT is suppressed.
 	// The peer sends periodic NAKs to handle losses instead.
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tsbpdEnabled = true
 	c.peerNakReport = true
@@ -3516,8 +3436,7 @@ func TestFASTREXMITSuppressedWhenPeerNakReportTrue(t *testing.T) {
 func TestLATEREXMITOnlyWhenLossListEmpty(t *testing.T) {
 	// In file mode, LATEREXMIT only fires when loss list is empty
 	// (both data and NAK were lost).
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Configure as file mode
 	c.tsbpdEnabled = false
@@ -3557,8 +3476,7 @@ func TestLATEREXMITOnlyWhenLossListEmpty(t *testing.T) {
 func TestRetransmitAlgoTimingGate(t *testing.T) {
 	// retransmitAlgo=1 (default for live): NAK retransmit uses timing gate
 	// to avoid re-retransmission within one RTT.
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.peerNakReport = true
 	c.retransmitAlgo = 1
@@ -3597,8 +3515,7 @@ func TestRetransmitAlgoTimingGate(t *testing.T) {
 
 func TestRetransmitAlgoImmediate(t *testing.T) {
 	// retransmitAlgo=0: NAK retransmit is always immediate (no timing gate)
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.peerNakReport = true
 	c.retransmitAlgo = 0 // immediate mode
@@ -3777,8 +3694,7 @@ func TestRexmitTokenBucketRefill(t *testing.T) {
 // ---- MsgCtrl tests ----
 
 func TestWriteMsgCtrlBasic(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	mc := &MsgCtrl{
 		SrcTime: time.Now(),
@@ -3850,8 +3766,7 @@ func TestReadMsgCtrlBasic(t *testing.T) {
 }
 
 func TestWriteMsgCtrlNilMsgCtrl(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// WriteMsgCtrl with nil mc should behave like Write
 	n, err := sender.WriteMsgCtrl([]byte("no ctrl"), nil)
@@ -3924,8 +3839,7 @@ func TestConnPeerGroupID(t *testing.T) {
 }
 
 func TestConnSetDeadlineBoth(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	deadline := time.Now().Add(5 * time.Second)
 	err := c.SetDeadline(deadline)
@@ -3945,8 +3859,7 @@ func TestConnSetDeadlineBoth(t *testing.T) {
 }
 
 func TestConnFlightSize(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Empty send buffer: flight size should be 0
 	if fs := c.flightSize(); fs != 0 {
@@ -3965,8 +3878,7 @@ func TestConnFlightSize(t *testing.T) {
 }
 
 func TestConnCurrentFlowWindow(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Default: no dynamic update, should return fc
 	fc := c.fc
@@ -3982,8 +3894,7 @@ func TestConnCurrentFlowWindow(t *testing.T) {
 }
 
 func TestConnUpdateLastSndTime(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	before := c.lastSndTime.Load()
 	time.Sleep(1 * time.Millisecond) // ensure time advances
@@ -4018,8 +3929,7 @@ func TestBoundaryFromPosition(t *testing.T) {
 }
 
 func TestConnHandleKMResponse_ErrorCodes(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// 4-byte KMRSP with error code (e.g., SRT_KM_S_BADSECRET=4)
 	tests := []struct {
@@ -4066,8 +3976,7 @@ func TestConnHandleKMResponse_ErrorCodes(t *testing.T) {
 }
 
 func TestConnHandleKMResponse_FullKMRSP(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.kmConfirmed.Store(false)
 	c.sndKmState.Store(0)
@@ -4092,8 +4001,7 @@ func TestConnHandleKMResponse_FullKMRSP(t *testing.T) {
 }
 
 func TestConnHandleDropReq(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// DROPREQ should be skipped when TLPKTDROP is disabled
 	c.tlpktdropEnabled = false
@@ -4111,8 +4019,7 @@ func TestConnHandleDropReq(t *testing.T) {
 }
 
 func TestConnSetMaxBW(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// bw > 0: set directly
 	c.SetMaxBW(5_000_000)
@@ -4155,8 +4062,7 @@ func TestConnOverrideSndSeqNo_NilGuard(t *testing.T) {
 }
 
 func TestConnOverrideSndSeqNo(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Override to a specific sequence
 	ok := c.OverrideSndSeqNo(seq.Number(5000))
@@ -4172,8 +4078,7 @@ func TestConnOverrideSndSeqNo(t *testing.T) {
 }
 
 func TestConnStatsInterval(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Generate some stats
 	c.sentPackets.Add(10)
@@ -4201,8 +4106,7 @@ func TestConnStatsInterval(t *testing.T) {
 }
 
 func TestConnWriteDeadlineTime(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initially no deadline
 	wdt := c.writeDeadlineTime()
@@ -4221,8 +4125,7 @@ func TestConnWriteDeadlineTime(t *testing.T) {
 }
 
 func TestConnEncryptedConnection(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Setup encryption context
 	ctx, err := crypto.New(16) // AES-128
@@ -4239,8 +4142,7 @@ func TestConnEncryptedConnection(t *testing.T) {
 }
 
 func TestConnHandleKMResponse_InvalidKMState(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// 4-byte KMRSP with invalid error code (not 3-5) — should not set KM state
 	c.sndKmState.Store(0)
@@ -4288,8 +4190,7 @@ func TestRexmitTokenBucket(t *testing.T) {
 }
 
 func TestConnSendNAKForSeqs(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Empty seqs — should be a no-op (no panic)
 	c.sendNAKForSeqs(nil)
@@ -4308,8 +4209,7 @@ func TestConnSendNAKForSeqs(t *testing.T) {
 }
 
 func TestConnCheckSendDrop_Disabled(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// sendDropThresh = 0 means disabled
 	c.sendDropThresh = 0
@@ -4318,8 +4218,7 @@ func TestConnCheckSendDrop_Disabled(t *testing.T) {
 }
 
 func TestConnEncryptRetransmit_NilCrypto(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	p := packet.New(c.remoteAddr)
 	p.Header.Encryption = packet.EncryptionNone
@@ -4334,8 +4233,7 @@ func TestConnEncryptRetransmit_NilCrypto(t *testing.T) {
 }
 
 func TestConnEncryptRetransmit_NoEncryption(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	p := packet.New(c.remoteAddr)
 	p.Header.Encryption = packet.EncryptionNone
@@ -4355,8 +4253,7 @@ func TestConnEncryptRetransmit_NoEncryption(t *testing.T) {
 }
 
 func TestConnEncryptRetransmit_CTRMode(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// CTR mode — should be a no-op (returns nil immediately)
 	ctx, err := crypto.New(16) // AES-128 CTR
@@ -4377,8 +4274,7 @@ func TestConnEncryptRetransmit_CTRMode(t *testing.T) {
 }
 
 func TestConnApplyGroupDrift_NilTSBPD(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Store original tsbpdTimer, set to nil, then call ApplyGroupDrift
 	c.tsbpdTimer = nil
@@ -4387,8 +4283,7 @@ func TestConnApplyGroupDrift_NilTSBPD(t *testing.T) {
 }
 
 func TestConnTSBPDTimeBase_NilTimer(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tsbpdTimer = nil
 	tb := c.TSBPDTimeBase()
@@ -4398,8 +4293,7 @@ func TestConnTSBPDTimeBase_NilTimer(t *testing.T) {
 }
 
 func TestConnTSBPDTimeBase_WithTimer(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// c should have a tsbpdTimer from testSingleConn setup
 	if c.tsbpdTimer == nil {
@@ -4412,8 +4306,7 @@ func TestConnTSBPDTimeBase_WithTimer(t *testing.T) {
 }
 
 func TestConnApplyGroupTime(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Should not panic when tsbpdTimer exists
 	if c.tsbpdTimer != nil {
@@ -4426,23 +4319,21 @@ func TestConnApplyGroupTime(t *testing.T) {
 }
 
 func TestConnSetGroupSrcTime(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
-	c.SetGroupSrcTime(12345)
+	c.setGroupSrcTime(12345)
 	if v := c.groupSrcTime.Load(); v != 12345 {
 		t.Errorf("groupSrcTime: got %d, want 12345", v)
 	}
 
-	c.ClearGroupSrcTime()
+	c.clearGroupSrcTime()
 	if v := c.groupSrcTime.Load(); v != 0 {
 		t.Errorf("groupSrcTime after clear: got %d, want 0", v)
 	}
 }
 
 func TestConnCurrentSRTTimestamp(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	ts := c.CurrentSRTTimestamp()
 	// Just verify it returns a non-zero value (clock is running)
@@ -4452,8 +4343,7 @@ func TestConnCurrentSRTTimestamp(t *testing.T) {
 }
 
 func TestConnSchedSeqNo(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	sn := c.SchedSeqNo()
 	// Initial value should be the send ISN
@@ -4463,8 +4353,7 @@ func TestConnSchedSeqNo(t *testing.T) {
 }
 
 func TestConnHandleControlPacket_PeerError(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// peerHealth should start as true
 	if !c.peerHealth.Load() {
@@ -4482,8 +4371,7 @@ func TestConnHandleControlPacket_PeerError(t *testing.T) {
 }
 
 func TestConnHandleControlPacket_Shutdown(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Send a SHUTDOWN control packet
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeShutdown, c.socketID, 0)
@@ -4499,8 +4387,7 @@ func TestConnHandleControlPacket_Shutdown(t *testing.T) {
 }
 
 func TestConnHandleControlPacket_Keepalive(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	prevActivity := c.peerActivity.Load()
 
@@ -4515,8 +4402,7 @@ func TestConnHandleControlPacket_Keepalive(t *testing.T) {
 }
 
 func TestConnHandleControlPacket_KeepaliveWithGroup(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.groupID = 42 // simulate group membership
 
@@ -4530,8 +4416,7 @@ func TestConnHandleControlPacket_KeepaliveWithGroup(t *testing.T) {
 }
 
 func TestConnHandleDropReq_TLPktDropDisabled(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tlpktdropEnabled = false
 
@@ -4543,8 +4428,7 @@ func TestConnHandleDropReq_TLPktDropDisabled(t *testing.T) {
 }
 
 func TestConnHandleDropReq_ShortData(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.tlpktdropEnabled = true
 
@@ -4611,8 +4495,7 @@ func TestConnHandleDropReq_FileModeDrops(t *testing.T) {
 }
 
 func TestConnHandleKMRequest_NoCrypto(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// No crypto context — should set NOSECRET(3)
 	c.cryptoCtx = nil
@@ -4630,8 +4513,7 @@ func TestConnHandleKMRequest_NoCrypto(t *testing.T) {
 }
 
 func TestConnHandleKMRequest_InvalidKM(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set up crypto so we get past the nil check
 	ctx, err := crypto.New(16)
@@ -4654,16 +4536,14 @@ func TestConnHandleKMRequest_InvalidKM(t *testing.T) {
 }
 
 func TestConnRetransmitAllInFlight_Empty(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Empty send buffer — should not panic
 	c.retransmitAllInFlight()
 }
 
 func TestConnBufStats(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Initial IIR values (not initialized)
 	avgSndPkts := c.AvgSndBufSize()
@@ -4702,8 +4582,7 @@ func TestConnBufStats(t *testing.T) {
 }
 
 func TestConnSendRate(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Before any sends, rate should be zero
 	pps, bps := c.SendRate()
@@ -4721,8 +4600,7 @@ func TestConnSendRate(t *testing.T) {
 }
 
 func TestConnExtendedStats(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	es := c.ExtendedStats(false)
 	if es.ConnStats.Duration < 0 {
@@ -4734,8 +4612,7 @@ func TestConnExtendedStats(t *testing.T) {
 }
 
 func TestConnConnState_Broken(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set a "broken" shutdown error
 	c.setShutdownErr(errors.New("srt: connection timeout"))
@@ -4751,8 +4628,7 @@ func TestConnConnState_Broken(t *testing.T) {
 }
 
 func TestConnConnState_Connected(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	state := c.connState()
 	if state != StateConnected {
@@ -4761,8 +4637,7 @@ func TestConnConnState_Connected(t *testing.T) {
 }
 
 func TestConnRecomputeSendDropThresh(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// With sndDropDelay = -1, threshold should be 0
 	c.sndDropDelay = -1
@@ -4789,8 +4664,7 @@ func TestConnRecomputeSendDropThresh(t *testing.T) {
 }
 
 func TestConnHandleControlPacket_Unknown(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Unknown control type — should be ignored without panic
 	p := packet.NewControl(c.localAddr, packet.CtrlType(0xFF), c.socketID, 0)
@@ -4798,8 +4672,7 @@ func TestConnHandleControlPacket_Unknown(t *testing.T) {
 }
 
 func TestConnWriteMessage_TsbpdSizeLimit(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// TSBPD mode — message exceeding payloadSize should fail
 	bigMsg := make([]byte, c.payloadSize+100)
@@ -4810,8 +4683,7 @@ func TestConnWriteMessage_TsbpdSizeLimit(t *testing.T) {
 }
 
 func TestConnReadNonBlocking(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set non-blocking mode
 	c.rcvSynFlag.Store(false)
@@ -4824,8 +4696,7 @@ func TestConnReadNonBlocking(t *testing.T) {
 }
 
 func TestConnWriteNonBlocking(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Set non-blocking mode
 	sender.sndSynFlag.Store(false)
@@ -4848,8 +4719,7 @@ func TestConnWriteNonBlocking(t *testing.T) {
 
 func TestConnCheckSendDrop_WithOldPackets(t *testing.T) {
 	// Create a conn pair where sender has TSBPD and drop enabled
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Ensure sender has drop enabled
 	sender.tsbpdEnabled = true
@@ -4888,8 +4758,7 @@ func TestConnCheckSendDrop_WithOldPackets(t *testing.T) {
 }
 
 func TestConnCheckSendDrop_ThresholdZero(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// sendDropThresh=0 should return early
 	c.sendDropThresh = 0
@@ -4897,8 +4766,7 @@ func TestConnCheckSendDrop_ThresholdZero(t *testing.T) {
 }
 
 func TestConnCheckSendDrop_EmptySendBuf(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	c.sendDropThresh = 100 * clock.Millisecond
 	// Empty send buffer — OldestSendTime returns zero, should return early
@@ -4906,8 +4774,7 @@ func TestConnCheckSendDrop_EmptySendBuf(t *testing.T) {
 }
 
 func TestConnEncryptRetransmit_GCMMode(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set up a crypto context in GCM mode
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
@@ -4949,8 +4816,7 @@ func TestConnEncryptRetransmit_GCMMode(t *testing.T) {
 }
 
 func TestConnWritePeerHealthCheck(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Mark peer as unhealthy
 	c.peerHealth.Store(false)
@@ -4965,8 +4831,7 @@ func TestConnWritePeerHealthCheck(t *testing.T) {
 }
 
 func TestConnWriteMessageAPISizeLimit(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Enable message API
 	c.messageAPI = true
@@ -4981,8 +4846,7 @@ func TestConnWriteMessageAPISizeLimit(t *testing.T) {
 }
 
 func TestConnHandleDataPacket_Encrypted(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set up crypto context
 	ctx, err := crypto.New(16)
@@ -5010,8 +4874,7 @@ func TestConnHandleDataPacket_Encrypted(t *testing.T) {
 }
 
 func TestConnHandleDataPacket_UnencryptedOnSecuredConn(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set up crypto context and mark as confirmed
 	ctx, err := crypto.New(16)
@@ -5038,8 +4901,7 @@ func TestConnHandleDataPacket_UnencryptedOnSecuredConn(t *testing.T) {
 }
 
 func TestConnHandleDataPacket_GroupIdle(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	// Set group ID to enable group idle tracking
 	c.groupID = 42
@@ -5060,8 +4922,7 @@ func TestConnHandleDataPacket_GroupIdle(t *testing.T) {
 }
 
 func TestConnHandleDataPacket_ReorderTracking(t *testing.T) {
-	c, _, cleanup := testSingleConn(t)
-	defer cleanup()
+	c, _ := testSingleConn(t)
 
 	baseSeq := c.recvBuf.ACKSequence()
 
@@ -5090,8 +4951,7 @@ func TestConnHandleDataPacket_ReorderTracking(t *testing.T) {
 }
 
 func TestConnRetransmitAllInFlight_WithPackets(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Push some packets into the send buffer
 	for i := 0; i < 3; i++ {
@@ -5116,8 +4976,7 @@ func TestConnRetransmitAllInFlight_WithPackets(t *testing.T) {
 }
 
 func TestConnSendPacket_NonBlocking(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Set non-blocking mode
 	sender.sndSynFlag.Store(false)
@@ -5143,8 +5002,7 @@ func TestConnSendPacket_NonBlocking(t *testing.T) {
 }
 
 func TestConnSendPacket_WriteDeadline(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Set a write deadline in the past
 	sender.SetWriteDeadline(time.Now().Add(-1 * time.Second))
@@ -5165,8 +5023,7 @@ func TestConnSendPacket_WriteDeadline(t *testing.T) {
 }
 
 func TestConnHandleNAK_BeyondSendRange(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Create a NAK for a sequence number beyond what was sent
 	beyondSeq := sender.sendBuf.NextSeq().Add(1000).Value()
@@ -5188,8 +5045,7 @@ func TestConnHandleNAK_BeyondSendRange(t *testing.T) {
 }
 
 func TestConnHandleNAK_BelowACK(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Push some packets first
 	for i := 0; i < 5; i++ {
@@ -5221,8 +5077,7 @@ func TestConnHandleNAK_BelowACK(t *testing.T) {
 }
 
 func TestConnHandleNAK_WithRetransmit(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// Push packets
 	var seqs []uint32
@@ -5255,8 +5110,7 @@ func TestConnHandleNAK_WithRetransmit(t *testing.T) {
 }
 
 func TestConnSendDropReq(t *testing.T) {
-	sender, _, cleanup := testConnPair(t)
-	defer cleanup()
+	sender, _ := testConnPair(t)
 
 	// sendDropReq should not panic
 	sender.sendDropReq(100, 200)

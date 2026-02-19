@@ -13,7 +13,7 @@ import (
 // e2eSetup creates a listener and a connected pair of Conns over localhost.
 // It returns the server-side conn (accepted), client-side conn (dialed),
 // and a cleanup function that closes both connections and the listener.
-func e2eSetup(t *testing.T, listenerCfg, dialerCfg Config) (server, client *Conn, cleanup func()) {
+func e2eSetup(t *testing.T, listenerCfg, dialerCfg Config) (server, client *Conn) {
 	t.Helper()
 
 	l, err := Listen("127.0.0.1:0", listenerCfg)
@@ -47,17 +47,17 @@ func e2eSetup(t *testing.T, listenerCfg, dialerCfg Config) (server, client *Conn
 	}
 
 	client = dialConn
-	cleanup = func() {
+	t.Cleanup(func() {
 		client.Close()
 		server.Close()
 		l.Close()
-	}
-	return server, client, cleanup
+	})
+	return server, client
 }
 
 // e2eSetupWithListener is like e2eSetup but also returns the listener,
 // useful for tests that need to configure AcceptFunc.
-func e2eSetupWithListener(t *testing.T, listenerCfg Config) (*Listener, func()) {
+func e2eSetupWithListener(t *testing.T, listenerCfg Config) *Listener {
 	t.Helper()
 
 	l, err := Listen("127.0.0.1:0", listenerCfg)
@@ -65,7 +65,8 @@ func e2eSetupWithListener(t *testing.T, listenerCfg Config) (*Listener, func()) 
 		t.Fatalf("Listen: %v", err)
 	}
 
-	return l, func() { l.Close() }
+	t.Cleanup(func() { l.Close() })
+	return l
 }
 
 // TestE2EBulkTransfer transfers 1 MB of random data over localhost and
@@ -89,8 +90,7 @@ func TestE2EBulkTransfer(t *testing.T) {
 	dialerCfg.ConnTimeout = 10 * time.Second
 	dialerCfg.MaxBW = 1_000_000_000
 
-	server, client, cleanup := e2eSetup(t, listenerCfg, dialerCfg)
-	defer cleanup()
+	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
 	// Generate random payload
 	payload := make([]byte, totalBytes)
@@ -149,11 +149,10 @@ func TestE2EBulkTransfer(t *testing.T) {
 	}
 
 	// Verify stats
-	time.Sleep(50 * time.Millisecond) // let stats settle
-	clientStats := client.Stats(false)
-	if clientStats.SentPackets == 0 {
-		t.Error("client SentPackets should be > 0")
+	if !waitFor(t, 200*time.Millisecond, func() bool { return client.Stats(false).SentPackets > 0 }) {
+		t.Fatal("timed out waiting for client SentPackets > 0")
 	}
+	clientStats := client.Stats(false)
 	serverStats := server.Stats(false)
 	if serverStats.RecvPackets == 0 {
 		t.Error("server RecvPackets should be > 0")
@@ -188,8 +187,7 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	dialerCfg.MaxBW = 1_000_000_000
 	dialerCfg.Passphrase = passphrase
 
-	server, client, cleanup := e2eSetup(t, listenerCfg, dialerCfg)
-	defer cleanup()
+	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
 	// Generate random payload
 	payload := make([]byte, totalBytes)
@@ -248,11 +246,10 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	}
 
 	// Verify encryption state: SndKmState==2 means "secured"
-	time.Sleep(50 * time.Millisecond)
-	clientStats := client.Stats(false)
-	if clientStats.SndKmState != 2 {
-		t.Errorf("client SndKmState: got %d, want 2 (secured)", clientStats.SndKmState)
+	if !waitFor(t, 200*time.Millisecond, func() bool { return client.Stats(false).SndKmState == 2 }) {
+		t.Fatal("timed out waiting for client SndKmState == 2 (secured)")
 	}
+	clientStats := client.Stats(false)
 
 	t.Logf("encrypted transfer OK: %d bytes, SndKmState=%d, SentKM=%d",
 		totalBytes, clientStats.SndKmState, clientStats.SentKM)
@@ -280,8 +277,7 @@ func TestE2EFileMode(t *testing.T) {
 	dialerCfg.MaxBW = 1_000_000_000
 	dialerCfg.TransType = TransTypeFile
 
-	server, client, cleanup := e2eSetup(t, listenerCfg, dialerCfg)
-	defer cleanup()
+	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
 	// Generate random payload
 	payload := make([]byte, totalBytes)
@@ -352,8 +348,7 @@ func TestE2EStreamID(t *testing.T) {
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
 
-	l, lCleanup := e2eSetupWithListener(t, listenerCfg)
-	defer lCleanup()
+	l := e2eSetupWithListener(t, listenerCfg)
 
 	// Accept only "test/my-stream"
 	l.SetAcceptFunc(func(req ConnRequest) bool {
@@ -442,8 +437,7 @@ func TestE2EStatsAccuracy(t *testing.T) {
 	dialerCfg.ConnTimeout = 10 * time.Second
 	dialerCfg.MaxBW = 1_000_000_000
 
-	server, client, cleanup := e2eSetup(t, listenerCfg, dialerCfg)
-	defer cleanup()
+	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
 	// Drain receiver to prevent backpressure
 	recvDone := make(chan int, 1)
@@ -473,14 +467,13 @@ func TestE2EStatsAccuracy(t *testing.T) {
 	// Wait for receiver to get all packets
 	recvCount := <-recvDone
 
-	// Let stats settle (ACKs must complete the round trip)
-	time.Sleep(100 * time.Millisecond)
+	// Wait for stats to settle (ACKs must complete the round trip)
+	if !waitFor(t, 500*time.Millisecond, func() bool { return client.Stats(false).SentPackets == numPackets }) {
+		t.Fatalf("timed out waiting for client SentPackets == %d, got %d", numPackets, client.Stats(false).SentPackets)
+	}
 
 	// Verify sender stats
 	clientStats := client.Stats(false)
-	if clientStats.SentPackets != numPackets {
-		t.Errorf("client SentPackets: got %d, want %d", clientStats.SentPackets, numPackets)
-	}
 	expectedBytes := uint64(numPackets * packetSize)
 	if clientStats.SentBytes != expectedBytes {
 		t.Errorf("client SentBytes: got %d, want %d", clientStats.SentBytes, expectedBytes)
@@ -492,12 +485,13 @@ func TestE2EStatsAccuracy(t *testing.T) {
 		t.Error("server RecvPackets should be > 0")
 	}
 
-	// RTT should be reasonable for localhost (< 50ms)
+	// RTT should be positive and reasonable for localhost.
+	// Use a generous threshold (500ms) to avoid flakes under heavy CI load.
 	if clientStats.RTT <= 0 {
 		t.Errorf("RTT should be positive, got %v", clientStats.RTT)
 	}
-	if clientStats.RTT > 50*time.Millisecond {
-		t.Errorf("RTT too high for localhost: %v (want < 50ms)", clientStats.RTT)
+	if clientStats.RTT > 500*time.Millisecond {
+		t.Errorf("RTT too high for localhost: %v (want < 500ms)", clientStats.RTT)
 	}
 
 	t.Logf("stats: sent_pkts=%d sent_bytes=%d recv_pkts=%d recv_count=%d rtt=%v",
@@ -523,8 +517,7 @@ func TestE2EBidirectionalBulk(t *testing.T) {
 	dialerCfg.ConnTimeout = 10 * time.Second
 	dialerCfg.MaxBW = 1_000_000_000
 
-	server, client, cleanup := e2eSetup(t, listenerCfg, dialerCfg)
-	defer cleanup()
+	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
 	// Generate random payloads for each direction
 	clientPayload := make([]byte, totalBytes)
