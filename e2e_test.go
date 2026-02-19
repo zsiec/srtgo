@@ -22,30 +22,35 @@ func e2eSetup(t *testing.T, listenerCfg, dialerCfg Config) (server, client *Conn
 	}
 
 	var (
-		dialConn *Conn
-		dialErr  error
-		wg       sync.WaitGroup
+		acceptConn *Conn
+		acceptErr  error
+		dialConn   *Conn
+		dialErr    error
+		wg         sync.WaitGroup
 	)
 
-	wg.Add(1)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		acceptConn, acceptErr = l.Accept()
+	}()
 	go func() {
 		defer wg.Done()
 		dialConn, dialErr = Dial(l.Addr().String(), dialerCfg)
 	}()
-
-	server, err = l.Accept()
-	if err != nil {
-		l.Close()
-		t.Fatalf("Accept: %v", err)
-	}
-
 	wg.Wait()
+
+	if acceptErr != nil {
+		l.Close()
+		t.Fatalf("Accept: %v", acceptErr)
+	}
 	if dialErr != nil {
-		server.Close()
+		acceptConn.Close()
 		l.Close()
 		t.Fatalf("Dial: %v", dialErr)
 	}
 
+	server = acceptConn
 	client = dialConn
 	t.Cleanup(func() {
 		client.Close()
@@ -177,13 +182,13 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
-	listenerCfg.ConnTimeout = 10 * time.Second
+	listenerCfg.ConnTimeout = 30 * time.Second // PBKDF2 + race detector needs headroom
 	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 	listenerCfg.Passphrase = passphrase
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
-	dialerCfg.ConnTimeout = 10 * time.Second
+	dialerCfg.ConnTimeout = 30 * time.Second // PBKDF2 + race detector needs headroom
 	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 	dialerCfg.Passphrase = passphrase
 
