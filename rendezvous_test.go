@@ -10,6 +10,22 @@ import (
 	"github.com/zsiec/srtgo/internal/packet"
 )
 
+// requireUDP sends a single UDP packet to localhost and skips the test if the
+// OS blocks it (EPERM). This happens in CI environments where the macOS
+// Application Firewall blocks UDP sends from race-instrumented test binaries.
+func requireUDP(t *testing.T) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping: cannot bind UDP: %v", err)
+	}
+	defer conn.Close()
+	_, err = conn.WriteTo([]byte("probe"), conn.LocalAddr())
+	if err != nil {
+		t.Skipf("skipping: UDP send blocked (CI firewall): %v", err)
+	}
+}
+
 // --- Unit tests for cookie contest ---
 
 func TestRdvCookieContest(t *testing.T) {
@@ -227,6 +243,8 @@ func TestRdvStateString(t *testing.T) {
 }
 
 func TestRendezvousBasic(t *testing.T) {
+	requireUDP(t)
+
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 3 * time.Second
@@ -303,6 +321,8 @@ func TestRendezvousBasic(t *testing.T) {
 }
 
 func TestRendezvousEncrypted(t *testing.T) {
+	requireUDP(t)
+
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 3 * time.Second
@@ -360,6 +380,8 @@ func TestRendezvousEncrypted(t *testing.T) {
 }
 
 func TestRendezvousTimeout(t *testing.T) {
+	requireUDP(t)
+
 	cfg := DefaultConfig()
 	cfg.ConnTimeout = 500 * time.Millisecond
 
@@ -391,6 +413,8 @@ func TestRendezvousCookieDraw(t *testing.T) {
 }
 
 func TestRendezvousFileMode(t *testing.T) {
+	requireUDP(t)
+
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 3 * time.Second
@@ -581,6 +605,8 @@ func TestRendezvousCookieContest_SpecialCases(t *testing.T) {
 }
 
 func TestRendezvousWithStreamID(t *testing.T) {
+	requireUDP(t)
+
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 3 * time.Second
