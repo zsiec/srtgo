@@ -812,6 +812,7 @@ func (g *Group) writeBackup(b []byte) (int, error) {
 			mc.backupState = BackupActiveFresh
 			mc.activeSince = now
 			mc.lastResponse = now
+			logger := g.logger
 			g.mu.Unlock()
 
 			if curseq == -1 {
@@ -820,7 +821,7 @@ func (g *Group) writeBackup(b []byte) (int, error) {
 				g.lastSchedSeqNo.Store(curseq)
 			}
 
-			logf(g.logger, LogNote, LogGroup, g.groupID,
+			logf(logger, LogNote, LogGroup, g.groupID,
 				"backup: activated standby member %d (weight=%d)", mc.token, mc.weight)
 
 			// Break after first successful standby activation.
@@ -1116,15 +1117,16 @@ func (g *Group) memberRecvLoop(mc *memberConn) {
 
 // markBroken transitions a member to broken state.
 func (g *Group) markBroken(mc *memberConn) {
-	logf(g.logger, LogWarning, LogGroup, g.groupID,
-		"member %d marked broken (addr=%s)", mc.token, mc.conn.RemoteAddr())
-
 	g.mu.Lock()
 	mc.status = MemberBroken
 	if g.mode == GroupBackup {
 		mc.backupState = BackupBroken
 	}
+	logger := g.logger
 	g.mu.Unlock()
+
+	logf(logger, LogWarning, LogGroup, g.groupID,
+		"member %d marked broken (addr=%s)", mc.token, mc.conn.RemoteAddr())
 }
 
 // allBroken returns true if all members are broken.
