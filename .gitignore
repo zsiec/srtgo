@@ -1,0 +1,18 @@
+# Binaries
+*.exe
+*.test
+*.out
+
+# Reference implementations (development only)
+/srt-reference/
+/gosrt-reference/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Claude Code
+.claude/

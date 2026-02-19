@@ -1,0 +1,16 @@
+.PHONY: test lint bench build examples
+
+test:
+	go test -race -count=1 -timeout 120s ./...
+
+lint:
+	go vet ./...
+
+bench:
+	go test -bench=. -benchmem ./...
+
+build:
+	go build ./...
+
+examples:
+	go build ./examples/...
