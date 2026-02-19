@@ -1,11 +1,12 @@
 package srt
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"net"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -298,10 +299,10 @@ func (g *Group) SetStabilityTimeout(d time.Duration) {
 // weight is the priority (higher = preferred for backup activation).
 func (g *Group) AddConn(conn *Conn, token int, weight uint16) error {
 	if g.closed.Load() {
-		return errors.New("srt: group closed")
+		return ErrGroupClosed
 	}
 	if conn == nil {
-		return errors.New("srt: nil connection")
+		return ErrNilConnection
 	}
 
 	mc := &memberConn{
@@ -357,10 +358,10 @@ func (g *Group) AddConn(conn *Conn, token int, weight uint16) error {
 // MemberIdle or MemberBroken accordingly.
 func (g *Group) AddPendingConn(conn *Conn, token int, weight uint16) error {
 	if g.closed.Load() {
-		return errors.New("srt: group closed")
+		return ErrGroupClosed
 	}
 	if conn == nil {
-		return errors.New("srt: nil connection")
+		return ErrNilConnection
 	}
 
 	now := time.Now()
@@ -388,7 +389,7 @@ func (g *Group) AddPendingConn(conn *Conn, token int, weight uint16) error {
 // token is a caller-chosen identifier; weight is the priority.
 func (g *Group) Connect(addr string, cfg Config, token int, weight uint16) error {
 	if g.closed.Load() {
-		return errors.New("srt: group closed")
+		return ErrGroupClosed
 	}
 
 	conn, err := Dial(addr, cfg)
@@ -407,7 +408,7 @@ func (g *Group) Connect(addr string, cfg Config, token int, weight uint16) error
 // Returns the number of bytes written and an error if no member could send.
 func (g *Group) Write(b []byte) (int, error) {
 	if g.closed.Load() {
-		return 0, errors.New("srt: group closed")
+		return 0, ErrGroupClosed
 	}
 
 	g.writeMu.Lock()
@@ -427,7 +428,7 @@ func (g *Group) Write(b []byte) (int, error) {
 // Packets already delivered via another link are silently dropped.
 func (g *Group) Read(b []byte) (int, error) {
 	if g.closed.Load() {
-		return 0, errors.New("srt: group closed")
+		return 0, ErrGroupClosed
 	}
 
 	g.readMu.Lock()
@@ -436,7 +437,7 @@ func (g *Group) Read(b []byte) (int, error) {
 	for {
 		select {
 		case <-g.done:
-			return 0, errors.New("srt: group closed")
+			return 0, ErrGroupClosed
 		case res := <-g.recvCh:
 			if res.err != nil {
 				// If all members are broken, return the error
@@ -774,8 +775,8 @@ func (g *Group) writeBackup(b []byte) (int, error) {
 
 	if needActivation && len(standbyMembers) > 0 {
 		// Sort standby by weight descending for best-first activation.
-		sort.Slice(standbyMembers, func(i, j int) bool {
-			return standbyMembers[i].weight > standbyMembers[j].weight
+		slices.SortFunc(standbyMembers, func(a, b *memberConn) int {
+			return cmp.Compare(b.weight, a.weight) // descending
 		})
 
 		for _, mc := range standbyMembers {
@@ -1027,7 +1028,7 @@ func (g *Group) pruneAckedMessages() {
 
 	// Find maximum ACK'd sequence across all members.
 	g.mu.RLock()
-	var maxACK int64 = -1
+	maxACK := int64(-1)
 	for _, mc := range g.members {
 		if mc.status == MemberBroken {
 			continue

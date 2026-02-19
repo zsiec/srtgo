@@ -348,7 +348,7 @@ func TestMuxDropWhenChannelFull(t *testing.T) {
 	binary.BigEndian.PutUint32(raw[12:], socketID)
 	binary.BigEndian.PutUint32(raw[16:], 0xCAFE)
 
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		binary.BigEndian.PutUint32(raw[0:], uint32(i+1)) // unique seq
 		binary.BigEndian.PutUint32(raw[8:], uint32(i))   // timestamp
 		clientConn.Write(raw[:])
@@ -394,7 +394,7 @@ func TestMuxHandshakeDropWhenFull(t *testing.T) {
 	binary.BigEndian.PutUint16(raw[0:], 0x8000) // control, type=HANDSHAKE
 	binary.BigEndian.PutUint32(raw[12:], 0)     // dest socket ID = 0
 
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		binary.BigEndian.PutUint32(raw[8:], uint32(i)) // vary timestamp
 		clientConn.Write(raw[:])
 	}

@@ -303,8 +303,8 @@ func (c *CIFNAK) MarshalCIF() ([]byte, error) {
 		return nil, nil
 	}
 
-	// Simple encoding: encode ranges
-	var encoded []uint32
+	// Simple encoding: encode ranges (pre-allocate for worst case: all singles)
+	encoded := make([]uint32, 0, len(c.LossList))
 	i := 0
 	for i < len(c.LossList) {
 		start := c.LossList[i]

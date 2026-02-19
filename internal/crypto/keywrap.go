@@ -43,8 +43,8 @@ func KeyWrap(kek, plaintext []byte) ([]byte, error) {
 
 	// 6 rounds of wrapping
 	var b [aes.BlockSize]byte
-	for j := 0; j < 6; j++ {
-		for i := 0; i < n; i++ {
+	for j := range 6 {
+		for i := range n {
 			// B = AES(K, A || R[i])
 			copy(b[:8], a[:])
 			copy(b[8:], r[i*8:(i+1)*8])

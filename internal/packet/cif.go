@@ -551,11 +551,13 @@ func unmarshalIP(data []byte) net.IP {
 
 // marshalStreamID encodes a stream ID with the SRT 4-byte word reversal.
 func marshalStreamID(sid string) []byte {
-	data := []byte(sid)
-	// Pad to multiple of 4
-	if rem := len(data) % 4; rem != 0 {
-		data = append(data, make([]byte, 4-rem)...)
+	// Single allocation: string length + padding to multiple of 4
+	size := len(sid)
+	if rem := size % 4; rem != 0 {
+		size += 4 - rem
 	}
+	data := make([]byte, size)
+	copy(data, sid)
 	// Reverse bytes within each 4-byte word
 	for i := 0; i < len(data); i += 4 {
 		data[i+0], data[i+3] = data[i+3], data[i+0]

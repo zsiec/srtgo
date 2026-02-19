@@ -323,7 +323,7 @@ func (rb *RecvBuffer) readMessageInOrder() ([]packet.Packet, bool) {
 
 	// All packets available — consume them (advance startSeq)
 	pkts := make([]packet.Packet, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		si := int(uint32(rb.startSeq)) & rb.mask
 		p := rb.entries[si].pkt
 		if rb.numOutOfOrderPkts > 0 && !p.Header.Order {
@@ -355,7 +355,7 @@ func (rb *RecvBuffer) readMessageOutOfOrder() ([]packet.Packet, bool) {
 	readPos := rb.firstReadableOOO
 
 	// Collect all packets in this message from readPos forward until PP_LAST.
-	var pkts []packet.Packet
+	pkts := make([]packet.Packet, 0, 8) // typical message size
 	for i := readPos; ; i = (i + 1) & rb.mask {
 		entry := &rb.entries[i]
 		if entry.state != EntryAvailable {

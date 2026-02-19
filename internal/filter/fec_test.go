@@ -180,7 +180,7 @@ func TestGroupClipRecovery(t *testing.T) {
 
 	// Build FEC from all 3 packets (sender side)
 	senderGroup := newGroup(0, 1, 4)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		senderGroup.clipPacket(len(payloads[i]), flags[i], timestamps[i], payloads[i])
 	}
 
@@ -205,7 +205,7 @@ func TestGroupClipRecovery(t *testing.T) {
 		t.Fatalf("recovered length: got %d, want %d", recoveredLen, len(payloads[1]))
 	}
 
-	for i := 0; i < len(payloads[1]); i++ {
+	for i := range len(payloads[1]) {
 		if recvGroup.payloadClip[i] != payloads[1][i] {
 			t.Fatalf("recovered payload[%d]: got 0x%02x, want 0x%02x",
 				i, recvGroup.payloadClip[i], payloads[1][i])
@@ -220,7 +220,7 @@ func TestFECSenderRowOnly(t *testing.T) {
 	sender := NewFECSender(cfg, 10, 0)
 
 	// Feed 3 packets — should trigger a row FEC after the 3rd
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		payload := []byte{byte(i + 1), byte(i + 2)}
 		sender.FeedSource(uint32(i), uint32((i+1)*100), 0, payload)
 	}
@@ -260,7 +260,7 @@ func TestFECSenderMultipleRows(t *testing.T) {
 	sender := NewFECSender(cfg, 10, 0)
 
 	fecCount := 0
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, []byte{byte(i)})
 		for {
 			_, _, _, _, ok := sender.PackControlPacket()
@@ -283,7 +283,7 @@ func TestFECSender2D(t *testing.T) {
 	sender := NewFECSender(cfg, 10, 0)
 
 	var rowFEC, colFEC int
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, []byte{byte(i)})
 		for {
 			_, idx, _, _, ok := sender.PackControlPacket()
@@ -322,7 +322,7 @@ func TestFECReceiverRowRecovery(t *testing.T) {
 	}
 	timestamps := []uint32{100, 200, 300}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
 	}
 	fecData, _, fecSeqNo, fecTS, ok := sender.PackControlPacket()
@@ -400,7 +400,7 @@ func TestFECReceiverColumnRecovery(t *testing.T) {
 		timestamp uint32
 	}
 	var fecPkts []fecPkt
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		payloads[i] = []byte{byte(i * 10), byte(i*10 + 1)}
 		timestamps[i] = uint32((i + 1) * 100)
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
@@ -429,7 +429,7 @@ func TestFECReceiverColumnRecovery(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Receive all data packets except seq 3
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if i == 3 {
 			continue // lost
 		}
@@ -468,7 +468,7 @@ func TestFECReceiverDataBeforeFEC(t *testing.T) {
 		{0xCA, 0xFE},
 	}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, payloads[i])
 	}
 	fecData, _, fecSeqNo, fecTS, _ := sender.PackControlPacket()
@@ -512,13 +512,13 @@ func TestFECReceiverNoLoss(t *testing.T) {
 
 	sender := NewFECSender(cfg, payloadSize, 0)
 	payloads := [][]byte{{1}, {2}, {3}}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, payloads[i])
 	}
 	fecData, _, fecSeqNo, fecTS, _ := sender.PackControlPacket()
 
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), payloads[i])
 	}
 
@@ -564,7 +564,7 @@ func TestEvenColumnBases(t *testing.T) {
 	sender := NewFECSender(cfg, 10, 0)
 
 	// Even layout: col i base = ISN + i
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		expected := uint32(i)
 		if sender.cols[i].base != expected {
 			t.Errorf("col %d base: got %d, want %d", i, sender.cols[i].base, expected)
@@ -649,7 +649,7 @@ func TestCheckLargeDropTriggersFullReset(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Feed some initial packets
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), []byte{byte(i)})
 	}
 
@@ -712,7 +712,7 @@ func TestCollectLossReportDeferredTiming(t *testing.T) {
 
 	// Build FEC from 6 packets
 	payloads := make([][]byte, 6)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		payloads[i] = []byte{byte(i)}
 		sender.FeedSource(uint32(i), uint32(i*100), 0, payloads[i])
 	}
@@ -849,7 +849,7 @@ func TestGetColumnGroupIndexByColX(t *testing.T) {
 	receiver := NewFECReceiver(cfg, 10, 0)
 
 	// In-bounds: colx 0, 1, 2 should return the index directly
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		idx := receiver.getColumnGroupIndexByColX(i)
 		if idx != i {
 			t.Errorf("getColumnGroupIndexByColX(%d): got %d, want %d", i, idx, i)
@@ -910,7 +910,7 @@ func TestCrossRebuildVertical(t *testing.T) {
 		timestamp uint32
 	}
 	var fecPkts []fecPkt
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		payloads[i] = []byte{byte(i*10 + 1), byte(i*10 + 2), byte(i*10 + 3)}
 		timestamps[i] = uint32((i + 1) * 100)
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
@@ -942,7 +942,7 @@ func TestCrossRebuildVertical(t *testing.T) {
 
 	// Receiver: lose seq 1 and seq 4
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if i == 1 || i == 4 {
 			continue // lost
 		}
@@ -1007,7 +1007,7 @@ func TestHangHorizontalDataHasFECThenLastPacket(t *testing.T) {
 	}
 	timestamps := []uint32{100, 200, 300}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
 	}
 	fecData, _, fecSeqNo, fecTS, ok := sender.PackControlPacket()
@@ -1065,7 +1065,7 @@ func TestDismissOldColumnsEvenLayout(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Feed enough data packets to populate groups
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), []byte{byte(i)})
 	}
 
@@ -1105,7 +1105,7 @@ func TestDismissOldColumnsStaircaseMindist(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Feed packets up to seq 11
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), []byte{byte(i)})
 	}
 
@@ -1135,7 +1135,7 @@ func TestDismissOldColumnsDismissedGuard(t *testing.T) {
 	// Feed packets 0-5 via markCell + hangVerticalData directly so that
 	// the Receive function's internal dismissOldColumns is not called.
 	// Just use markCell to mark received packets.
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if i == 3 {
 			continue // lost
 		}
@@ -1213,7 +1213,7 @@ func TestCheckLargeDropColumnTrimming(t *testing.T) {
 
 	// Feed packets through several matrices to build up column series.
 	// matrixSize = 6. Feed 5 complete matrices = 30 packets.
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), []byte{byte(i)})
 	}
 
@@ -1248,7 +1248,7 @@ func TestCheckLargeDropColumnTrimmingStaircase(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Feed many packets to build up > 4 column series
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		receiver.Receive(uint32(i), uint32(i*100), 0, uint32(i+1), []byte{byte(i)})
 	}
 
@@ -1314,7 +1314,7 @@ func TestColsOnlySuppressesRowFEC(t *testing.T) {
 
 	var rowFEC, colFEC int
 	// Feed a full matrix (6 packets)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, []byte{byte(i)})
 		for {
 			_, idx, _, _, ok := sender.PackControlPacket()
@@ -1345,7 +1345,7 @@ func TestColsOnlyRowOnlyConfig(t *testing.T) {
 	sender := NewFECSender(cfg, 10, 0)
 
 	fecCount := 0
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, []byte{byte(i)})
 		for {
 			_, _, _, _, ok := sender.PackControlPacket()
@@ -1440,7 +1440,7 @@ func TestReceiverStaircaseColumnRecovery(t *testing.T) {
 		timestamp uint32
 	}
 	var fecPkts []fecPkt
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		payloads[i] = []byte{byte(i*11 + 1), byte(i*11 + 2)}
 		timestamps[i] = uint32((i + 1) * 100)
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
@@ -1512,7 +1512,7 @@ func TestHangVerticalDataHasFECThenLastPacket(t *testing.T) {
 		timestamp uint32
 	}
 	var fecPkts []fecPkt
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		payloads[i] = []byte{byte(i*7 + 1), byte(i*7 + 2)}
 		timestamps[i] = uint32((i + 1) * 100)
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
@@ -1539,7 +1539,7 @@ func TestHangVerticalDataHasFECThenLastPacket(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Receive all except seq 3 (col 0, row 1)
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		if i == 3 {
 			continue
 		}
@@ -1568,7 +1568,7 @@ func TestDismissOldColumnsWithLosses(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Mark cells directly to avoid Receive's internal dismissOldColumns call
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if i == 3 {
 			continue // lost
 		}
@@ -1705,7 +1705,7 @@ func TestCrossRebuildHorizontal(t *testing.T) {
 		timestamp uint32
 	}
 	var fecPkts []fecPkt
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		payloads[i] = []byte{byte(i*13 + 1), byte(i*13 + 2)}
 		timestamps[i] = uint32((i + 1) * 100)
 		sender.FeedSource(uint32(i), timestamps[i], 0, payloads[i])
@@ -1742,7 +1742,7 @@ func TestCrossRebuildHorizontal(t *testing.T) {
 	receiver := NewFECReceiver(cfg, payloadSize, 0)
 
 	// Receive all except seq 4 and seq 5
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if i == 4 || i == 5 {
 			continue
 		}
@@ -1822,7 +1822,7 @@ func BenchmarkFECReceiverRecover(b *testing.B) {
 	}
 
 	// Build one complete group
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		sender.FeedSource(uint32(i), uint32(i*100), 0, payload)
 	}
 	fecData, _, fecSeqNo, fecTS, _ := sender.PackControlPacket()

@@ -30,9 +30,7 @@ func (e *sndRateEstimator) init(now time.Time) {
 	e.curSlot = 0
 	e.filled = 0
 	e.slotTime = now
-	for i := range e.slots {
-		e.slots[i] = sndRateSlot{}
-	}
+	clear(e.slots[:])
 }
 
 // onPacketSent records a packet+byte count into the current slot.

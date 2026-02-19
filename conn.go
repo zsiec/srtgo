@@ -137,8 +137,8 @@ type Conn struct {
 	// Mode flags
 	sndSyn           bool          // true = blocking Write (default), false = non-blocking
 	rcvSyn           bool          // true = blocking Read (default), false = non-blocking
-	tsbpdEnabled     bool          // false for file mode
-	tlpktdropEnabled bool          // false for file mode
+	tsbpdEnabled     atomic.Bool   // false for file mode
+	tlpktdropEnabled atomic.Bool   // false for file mode
 	periodicNAK      bool          // false for file mode
 	peerNakReport    bool          // true if peer sends periodic NAK reports
 	retransmitAlgo   int           // 0=always immediate, 1=timing gate (default 1 for live)
@@ -525,11 +525,9 @@ func newConn(cfg ConnConfig) *Conn {
 		linger:          cfg.Linger,
 		peerIdleTimeout: cfg.PeerIdleTimeout,
 
-		sndSyn:           cfg.SndSyn,
-		rcvSyn:           cfg.RcvSyn,
-		tsbpdEnabled:     tsbpdEnabled,
-		tlpktdropEnabled: tlpktdropEnabled,
-		periodicNAK:      !isFileMode && cfg.NAKReport, // disabled for file mode
+		sndSyn:      cfg.SndSyn,
+		rcvSyn:      cfg.RcvSyn,
+		periodicNAK: !isFileMode && cfg.NAKReport, // disabled for file mode
 		peerNakReport:    cfg.PeerNakReport,
 		retransmitAlgo:   cfg.RetransmitAlgo,
 
@@ -555,6 +553,8 @@ func newConn(cfg ConnConfig) *Conn {
 	}
 
 	// Initialize atomic socket option fields
+	c.tsbpdEnabled.Store(tsbpdEnabled)
+	c.tlpktdropEnabled.Store(tlpktdropEnabled)
 	c.sndSynFlag.Store(cfg.SndSyn)
 	c.rcvSynFlag.Store(cfg.RcvSyn)
 	c.lossMaxTTL.Store(int32(cfg.LossMaxTTL))
@@ -748,7 +748,7 @@ func (c *Conn) OverrideSndSeqNo(nextSeq seq.Number) bool {
 // In stream mode, Read returns data from the next available packet.
 func (c *Conn) Read(b []byte) (int, error) {
 	for {
-		if c.tsbpdEnabled {
+		if c.tsbpdEnabled.Load() {
 			// Live mode: TSBPD-aware read with too-late drop
 			now := c.clk.Now()
 			if dropped := c.recvBuf.DropTooLate(now, c.tsbpdTimer.DeliveryTime); dropped > 0 {
@@ -852,7 +852,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	// Check peer health before sending.
 	if !c.peerHealth.Load() {
-		return 0, errors.New("srt: peer error")
+		return 0, ErrPeerError
 	}
 
 	// Validate API compatibility per CC algorithm.
@@ -863,12 +863,12 @@ func (c *Conn) Write(b []byte) (int, error) {
 	}
 
 	// Drop packets past the TSBPD deadline before queuing new data.
-	if c.tlpktdropEnabled {
+	if c.tlpktdropEnabled.Load() {
 		c.checkSendDrop()
 	}
 
 	// In live/TSBPD mode, reject multi-packet messages.
-	if c.tsbpdEnabled && len(b) > c.payloadSize {
+	if c.tsbpdEnabled.Load() && len(b) > c.payloadSize {
 		return 0, fmt.Errorf("srt: payload size %d exceeds maximum %d", len(b), c.payloadSize)
 	}
 
@@ -907,7 +907,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	// send buffer, then send on wire. All fragments are inserted under a single lock.
 	pkts := make([]packet.Packet, numPkts)
 	chunkSizes := make([]int, numPkts)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		start := i * c.payloadSize
 		end := start + c.payloadSize
 		if end > len(b) {
@@ -1299,7 +1299,7 @@ func (c *Conn) updateAutoInputBW() {
 // fit in a single packet. In file/message mode, messages are auto-fragmented.
 // Returns an error if the message exceeds the maximum allowed size.
 func (c *Conn) WriteMessage(b []byte) (int, error) {
-	if c.tsbpdEnabled && len(b) > c.payloadSize {
+	if c.tsbpdEnabled.Load() && len(b) > c.payloadSize {
 		return 0, fmt.Errorf("srt: message size %d exceeds maximum %d bytes", len(b), c.payloadSize)
 	}
 	return c.Write(b)
@@ -2044,7 +2044,7 @@ func (c *Conn) timerLoop() {
 				if now.Sub(lastRspTime) > expTimeout {
 					// EXP fired: check if connection should break
 					if expCount > maxExpCount && now.Sub(lastRspTime) > c.peerIdleTimeout {
-						c.setShutdownErr(errors.New("srt: connection timeout"))
+						c.setShutdownErr(ErrConnectionTimeout)
 						c.Close()
 						return
 					}
@@ -2071,7 +2071,7 @@ func (c *Conn) timerLoop() {
 				//: Two blind retransmit algorithms.
 				// LATEREXMIT (file mode): retransmit when loss list empty (both data+NAK lost).
 				// FASTREXMIT (live mode): retransmit ALL unacked when peer has no periodic NAK.
-				if !c.tsbpdEnabled {
+				if !c.tsbpdEnabled.Load() {
 					// LATEREXMIT: only when loss list empty
 					if c.flightSize() > 0 && c.sndLossCount.Load() <= 0 {
 						c.retransmitAllInFlight()
@@ -2086,12 +2086,12 @@ func (c *Conn) timerLoop() {
 			}
 
 			// Too-late packet drop (sender side) — only in live mode
-			if c.tlpktdropEnabled {
+			if c.tlpktdropEnabled.Load() {
 				c.checkSendDrop()
 			}
 
 			// Too-late packet drop (receiver side) — only when TSBPD is active
-			if c.tsbpdEnabled && c.tsbpdTimer != nil {
+			if c.tsbpdEnabled.Load() && c.tsbpdTimer != nil {
 				if dropped := c.recvBuf.DropTooLate(c.clk.Now(), c.tsbpdTimer.DeliveryTime); dropped > 0 {
 					c.recvDropped.Add(uint64(dropped))
 					c.recvDroppedBytes.Add(uint64(dropped) * uint64(c.payloadSize))
@@ -2125,7 +2125,7 @@ func (c *Conn) handleControlPacket(p packet.Packet) {
 	case packet.CtrlTypeKeepalive:
 		// KeepAlive received — peerActivity already bumped above.
 		//: update TSBPD drift + wrap from keepalive.
-		if c.tsbpdEnabled && c.tsbpdTimer != nil {
+		if c.tsbpdEnabled.Load() && c.tsbpdTimer != nil {
 			now := c.clk.Now()
 			c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
 			c.tsbpdTimer.OnACK(p.Header.Timestamp, now, -1) // -1 = no RTT sample
@@ -2157,7 +2157,7 @@ func (c *Conn) handleControlPacket(p packet.Packet) {
 		// peer health as false; send operations should check this flag.
 		c.peerHealth.Store(false)
 	case packet.CtrlTypeShutdown:
-		c.setShutdownErr(errors.New("srt: peer shutdown"))
+		c.setShutdownErr(ErrPeerShutdown)
 		c.Close()
 	default:
 		// Unknown control packet — ignore
@@ -2186,7 +2186,7 @@ func (c *Conn) handleDataPacket(p packet.Packet) {
 			//: If TSBPD is disabled, timestamp also
 			// has to be zeroed in the AAD so it matches the sender's AAD.
 			savedTS := p.Header.Timestamp
-			if !c.tsbpdEnabled {
+			if !c.tsbpdEnabled.Load() {
 				p.Header.Timestamp = 0
 			}
 			var buf [16]byte
@@ -2223,7 +2223,7 @@ func (c *Conn) handleDataPacket(p packet.Packet) {
 
 	// TSBPD timestamp wrap detection: SRT timestamps are 32-bit and wrap
 	// every ~71.6 minutes. Update the wrap state machine for every packet.
-	if c.tsbpdEnabled && c.tsbpdTimer != nil {
+	if c.tsbpdEnabled.Load() && c.tsbpdTimer != nil {
 		c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
 	}
 
@@ -2355,7 +2355,7 @@ func (c *Conn) handleDataPacket(p packet.Packet) {
 		// Quick ACK for file mode: non-full-payload packets trigger immediate
 		// Full ACK to speed up CC feedback.needsQuickACK.
 		// Only for non-belated, non-retransmitted (in-order) packets.
-		if !c.tsbpdEnabled && !p.Header.Retransmitted && len(p.Data) < c.payloadSize {
+		if !c.tsbpdEnabled.Load() && !p.Header.Retransmitted && len(p.Data) < c.payloadSize {
 			c.sendFullACK()
 		}
 
@@ -2768,7 +2768,7 @@ func (c *Conn) handleACKACK(p packet.Packet) {
 	//: TSBPD drift samples come from ACKACK timestamps,
 	// not data packets. The ACKACK's timestamp reflects the sender's current
 	// clock, making it ideal for drift estimation.
-	if c.tsbpdEnabled && c.tsbpdTimer != nil {
+	if c.tsbpdEnabled.Load() && c.tsbpdTimer != nil {
 		//: pass raw RTT from this ACKACK pair, not the
 		// smoothed EWMA. The drift tracer needs instantaneous measurements
 		// for responsive path-delay compensation.
@@ -2897,7 +2897,7 @@ func (c *Conn) retransmitAllInFlight() {
 
 func (c *Conn) handleDropReq(p packet.Packet) {
 	//: skip DROPREQ if TLPKTDROP is not enabled.
-	if !c.tlpktdropEnabled {
+	if !c.tlpktdropEnabled.Load() {
 		return
 	}
 
@@ -2912,7 +2912,7 @@ func (c *Conn) handleDropReq(p packet.Packet) {
 	//: When both TLPktDrop AND TsbPd are enabled, don't
 	// drop from the recv buffer — TSBPD will handle it naturally as too-late.
 	// Only drop from the buffer when either is disabled (file mode, etc.).
-	if !c.tlpktdropEnabled || !c.tsbpdEnabled {
+	if !c.tlpktdropEnabled.Load() || !c.tsbpdEnabled.Load() {
 		lastPlusOne := seq.Number(dr.LastSeqNo).Inc()
 		dropped := c.recvBuf.Drop(lastPlusOne)
 		if dropped > 0 {
@@ -3103,7 +3103,7 @@ func (c *Conn) processFreshLoss() {
 	// Build NAK for expired entries
 	if expiredEnd > 0 {
 		var losses []uint32
-		for i := 0; i < expiredEnd; i++ {
+		for i := range expiredEnd {
 			e := c.freshLoss[i]
 			s := seq.Number(e.seqLo)
 			end := seq.Number(e.seqHi)
@@ -3515,7 +3515,7 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Enable TSBPD on receiver side with negotiated latency
 	if peerFlags&packet.FlagTSBPDSend != 0 {
-		c.tsbpdEnabled = true
+		c.tsbpdEnabled.Store(true)
 		c.tsbpdDelay = clock.Microseconds(negotiatedLatency) * clock.Millisecond
 		if c.tsbpdTimer == nil {
 			now := c.clk.Now()
@@ -3528,7 +3528,7 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Negotiate TLPKTDROP
 	if peerFlags&packet.FlagTLPktDrop != 0 {
-		c.tlpktdropEnabled = true
+		c.tlpktdropEnabled.Store(true)
 	}
 
 	// Negotiate periodic NAK
@@ -3536,10 +3536,10 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Send HSRSP back to peer
 	respFlags := uint32(packet.FlagCrypt | packet.FlagRexmit)
-	if c.tsbpdEnabled {
+	if c.tsbpdEnabled.Load() {
 		respFlags |= packet.FlagTSBPDRecv
 	}
-	if c.tlpktdropEnabled {
+	if c.tlpktdropEnabled.Load() {
 		respFlags |= packet.FlagTLPktDrop
 	}
 	if c.periodicNAK {

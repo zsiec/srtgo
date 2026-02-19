@@ -32,7 +32,7 @@ func TestBufferIIR_Smoothing(t *testing.T) {
 
 	// Run multiple updates; the average should remain stable
 	// since the buffer size doesn't change.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		c.updateBufferIIR()
 	}
 
@@ -53,7 +53,7 @@ func TestSendRate_ViaConn(t *testing.T) {
 	defer c.Close()
 
 	// Record some sends
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		c.recordSendRate(1, 1316)
 	}
 

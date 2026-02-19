@@ -196,16 +196,12 @@ func (ctx *Context) ClearSEK(key packet.PacketEncryption) {
 
 	switch key {
 	case packet.EncryptionEven:
-		for i := range ctx.evenSEK {
-			ctx.evenSEK[i] = 0
-		}
+		clear(ctx.evenSEK)
 		ctx.evenSEK = nil
 		ctx.evenCipher = nil
 		ctx.evenAEAD = nil
 	case packet.EncryptionOdd:
-		for i := range ctx.oddSEK {
-			ctx.oddSEK[i] = 0
-		}
+		clear(ctx.oddSEK)
 		ctx.oddSEK = nil
 		ctx.oddCipher = nil
 		ctx.oddAEAD = nil
@@ -255,7 +251,7 @@ func (ctx *Context) xorPayload(data []byte, key packet.PacketEncryption, seqNo u
 	//   CTR[14..15] = 0 (block counter, incremented by AES-CTR)
 	var ctr [16]byte
 	binary.BigEndian.PutUint32(ctr[10:], seqNo)
-	for i := 0; i < 14; i++ {
+	for i := range 14 {
 		ctr[i] ^= salt[i]
 	}
 
@@ -335,14 +331,14 @@ func (ctx *Context) buildGCMNonce(salt [16]byte, seqNo uint32, legacy bool) [GCM
 		// v1.5.3: build a 16-byte CTR-style IV, then take bytes [4:16]
 		var iv [16]byte
 		binary.BigEndian.PutUint32(iv[12:], seqNo) // pki at offset 12 (last 4 bytes)
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			iv[i] ^= salt[i]
 		}
 		copy(nonce[:], iv[4:16])
 	} else {
 		// v1.5.4+: standard format
 		binary.BigEndian.PutUint32(nonce[8:], seqNo)
-		for i := 0; i < GCMNonceSize; i++ {
+		for i := range GCMNonceSize {
 			nonce[i] ^= salt[i]
 		}
 	}

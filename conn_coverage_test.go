@@ -66,7 +66,7 @@ func TestConnHandleFECPacket_WithReceiver(t *testing.T) {
 	c.fecARQLevel = filter.ARQOnReq
 
 	// Feed 2 of 3 data packets to partially fill a row group
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		seqNo := seq.Number(isn).Add(uint32(i)).Value()
 		payload := make([]byte, 100)
 		for j := range payload {
@@ -84,7 +84,7 @@ func TestConnHandleFECPacket_WithReceiver(t *testing.T) {
 
 	// Build a proper FEC control packet using the sender
 	fecSender := filter.NewFECSender(fecCfg, c.payloadSize, isn)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		seqNo := seq.Number(isn).Add(uint32(i)).Value()
 		payload := make([]byte, 100)
 		for j := range payload {
@@ -225,7 +225,7 @@ func TestConnHandleDataPacket_FECReceiverFeedOnInsert(t *testing.T) {
 	isn := c.recvBuf.ACKSequence().Value()
 	c.fecReceiver = filter.NewFECReceiver(fecCfg, c.payloadSize, isn)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		seqNo := seq.Number(isn).Add(uint32(i)).Value()
 		p := packet.NewData(c.localAddr, seqNo, uint32(i*1000), c.socketID, make([]byte, 50))
 		p.Header.MessageNumber = 1
@@ -352,10 +352,10 @@ func TestConnRetransmitAllInFlight_FASTREXMIT(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	sender.tsbpdEnabled = true
+	sender.tsbpdEnabled.Store(true)
 	sender.peerNakReport = false
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -389,7 +389,7 @@ func TestConnRetransmitAllInFlight_WithRexmitShaper(t *testing.T) {
 
 	sender.rexmitShaper = newRexmitTokenBucket(100) // 100 bytes/sec
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -421,7 +421,7 @@ func TestConnRetransmitAllInFlight_WithGCMEncryption(t *testing.T) {
 	sender.cryptoCtx = gcmCtx
 	sender.activeKey = packet.EncryptionEven
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		data := make([]byte, 100)
 		for j := range data {
 			data[j] = byte(j)
@@ -517,7 +517,7 @@ func TestConnSendPacket_ConnectionClosed(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	for i := 0; i < sender.fc+10; i++ {
+	for range sender.fc + 10 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -613,7 +613,7 @@ func TestConnWrite_NonBlockingWouldBlock(t *testing.T) {
 	sender.sndSynFlag.Store(false)
 	sender.sndSyn = false
 
-	for i := 0; i < sender.sendBuf.Capacity(); i++ {
+	for range sender.sendBuf.Capacity() {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -635,7 +635,7 @@ func TestConnWrite_WithWriteDeadlineFullBuffer(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	for i := 0; i < sender.sendBuf.Capacity(); i++ {
+	for range sender.sendBuf.Capacity() {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -702,8 +702,8 @@ func TestConnHandleDataPacket_QuickACKFileMode(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
-	c.tlpktdropEnabled = false
+	c.tsbpdEnabled.Store(false)
+	c.tlpktdropEnabled.Store(false)
 	c.payloadSize = 1316
 
 	baseSeq := c.recvBuf.ACKSequence()
@@ -725,8 +725,8 @@ func TestConnHandleDataPacket_NoQuickACKFullPayload(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
-	c.tlpktdropEnabled = false
+	c.tsbpdEnabled.Store(false)
+	c.tlpktdropEnabled.Store(false)
 	c.payloadSize = 100
 
 	baseSeq := c.recvBuf.ACKSequence()
@@ -748,13 +748,13 @@ func TestConnHandleDataPacket_TSBPDTimestampUpdate(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	if !c.tsbpdEnabled || c.tsbpdTimer == nil {
+	if !c.tsbpdEnabled.Load() || c.tsbpdTimer == nil {
 		t.Skip("TSBPD not enabled on test conn")
 	}
 
 	baseSeq := c.recvBuf.ACKSequence()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		ts := uint32(i * 10000)
 		p := packet.NewData(c.localAddr, baseSeq.Add(uint32(i)).Value(), ts, c.socketID, []byte("data"))
 		p.Header.MessageNumber = 1
@@ -851,7 +851,7 @@ func TestConnHandleFECPacket_LossReport(t *testing.T) {
 
 	fecSender := filter.NewFECSender(fecCfg, c.payloadSize, isn)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		seqNo := seq.Number(isn).Add(uint32(i)).Value()
 		payload := make([]byte, 50)
 		for j := range payload {
@@ -897,7 +897,7 @@ func TestConnWrite_WithFECSender(t *testing.T) {
 	sndISN := sender.sendISN.Value()
 	sender.fecSender = filter.NewFECSender(fecCfg, sender.payloadSize, sndISN)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		data := make([]byte, 100)
 		_, err := sender.Write(data)
 		if err != nil {
@@ -1011,7 +1011,7 @@ func TestConnHandleDataPacket_GCMNonTSBPD(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
+	c.tsbpdEnabled.Store(false)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {
@@ -1123,11 +1123,11 @@ func TestConnWrite_FileModeMultiPacketDeadline(t *testing.T) {
 	defer cleanup()
 
 	// Configure as file mode (no TSBPD, no packet size limit)
-	sender.tsbpdEnabled = false
-	sender.tlpktdropEnabled = false
+	sender.tsbpdEnabled.Store(false)
+	sender.tlpktdropEnabled.Store(false)
 
 	// Fill the send buffer
-	for i := 0; i < sender.sendBuf.Capacity(); i++ {
+	for range sender.sendBuf.Capacity() {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -1155,11 +1155,11 @@ func TestConnWrite_FileModeConnectionClose(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	sender.tsbpdEnabled = false
-	sender.tlpktdropEnabled = false
+	sender.tsbpdEnabled.Store(false)
+	sender.tlpktdropEnabled.Store(false)
 
 	// Fill the send buffer
-	for i := 0; i < sender.sendBuf.Capacity(); i++ {
+	for range sender.sendBuf.Capacity() {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -1190,7 +1190,7 @@ func TestConnWrite_SendDropCheckTlpktDrop(t *testing.T) {
 	defer cleanup()
 
 	// TSBPD and tlpktdrop are enabled by default in live mode
-	if !sender.tlpktdropEnabled {
+	if !sender.tlpktdropEnabled.Load() {
 		t.Skip("tlpktdrop not enabled")
 	}
 
@@ -1219,7 +1219,7 @@ func TestConnSendPacket_WithFECSender(t *testing.T) {
 	sender.fecSender = filter.NewFECSender(fecCfg, sender.payloadSize, sndISN)
 
 	// Send 3 packets to complete one FEC row group
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		data := make([]byte, 100)
 		seqNo := sender.sendBuf.NextSeq()
 		p := packet.NewData(sender.remoteAddr, seqNo.Value(),
