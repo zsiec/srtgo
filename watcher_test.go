@@ -288,7 +288,7 @@ func TestWatcherMultipleConns(t *testing.T) {
 
 	// Should receive events from both
 	seen := make(map[*Conn]bool)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case ev := <-w.eventCh:
 			seen[ev.Conn] = true

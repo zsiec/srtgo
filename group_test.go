@@ -1103,7 +1103,7 @@ func TestGroupSilenceRedundantLinks_SendsKeepalive(t *testing.T) {
 	g.AddConn(c2, 2, 50)
 
 	// Write several times to activate both and stabilize one.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		g.Write([]byte("data"))
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1900,7 +1900,7 @@ func TestGroupBufferMsg(t *testing.T) {
 	defer g.Close()
 
 	// Buffer some messages
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		g.bufferMsg([]byte("test data"), uint32(i*1000), uint32(i))
 	}
 
@@ -1920,7 +1920,7 @@ func TestGroupBufferMsg_OverCapacity(t *testing.T) {
 	// Set small capacity
 	g.senderBufCap = 3
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		g.bufferMsg([]byte("test"), uint32(i*1000), uint32(i))
 	}
 
@@ -2049,7 +2049,7 @@ func TestGroupWriteBackup_Failover(t *testing.T) {
 	go drainConn(s1)
 
 	// Write several more times to establish c1 as running
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		g.Write([]byte("data"))
 		time.Sleep(10 * time.Millisecond)
 	}

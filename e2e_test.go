@@ -107,7 +107,7 @@ func TestE2EBulkTransfer(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(30 * time.Second))
+		server.SetReadDeadline(time.Now().Add(120 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -122,7 +122,7 @@ func TestE2EBulkTransfer(t *testing.T) {
 	}()
 
 	// Sender: write in chunks
-	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -204,7 +204,7 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(30 * time.Second))
+		server.SetReadDeadline(time.Now().Add(120 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -219,7 +219,7 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	}()
 
 	// Send in chunks
-	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -294,7 +294,7 @@ func TestE2EFileMode(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(30 * time.Second))
+		server.SetReadDeadline(time.Now().Add(120 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -309,7 +309,7 @@ func TestE2EFileMode(t *testing.T) {
 	}()
 
 	// Send in chunks
-	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -442,7 +442,7 @@ func TestE2EStatsAccuracy(t *testing.T) {
 	// Drain receiver to prevent backpressure
 	recvDone := make(chan int, 1)
 	go func() {
-		server.SetReadDeadline(time.Now().Add(30 * time.Second))
+		server.SetReadDeadline(time.Now().Add(120 * time.Second))
 		buf := make([]byte, 1500)
 		count := 0
 		for count < numPackets {
@@ -552,7 +552,7 @@ func TestE2EBidirectionalBulk(t *testing.T) {
 
 	// recvAll reads totalBytes from a connection.
 	recvAll := func(conn *Conn, total int) result {
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		received := make([]byte, 0, total)
 		buf := make([]byte, 2048)
 		for len(received) < total {

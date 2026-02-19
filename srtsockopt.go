@@ -447,10 +447,10 @@ func (c *Conn) GetOption(opt SockOpt) (any, error) {
 		return c.messageAPI, nil
 
 	case SockOptTSBPDMode:
-		return c.tsbpdEnabled, nil
+		return c.tsbpdEnabled.Load(), nil
 
 	case SockOptTLPktDrop:
-		return c.tlpktdropEnabled, nil
+		return c.tlpktdropEnabled.Load(), nil
 
 	case SockOptNAKReport:
 		return c.periodicNAK, nil
@@ -721,7 +721,7 @@ func (c *Conn) connState() ConnState {
 // recomputeSendDropThresh recalculates the sender drop threshold
 // from the current TSBPD delay and sndDropDelay values.
 func (c *Conn) recomputeSendDropThresh() {
-	if !c.tsbpdEnabled || c.sndDropDelay == -1 {
+	if !c.tsbpdEnabled.Load() || c.sndDropDelay == -1 {
 		c.sendDropThresh = 0
 		return
 	}

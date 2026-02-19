@@ -2,7 +2,6 @@ package srt
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -158,7 +157,7 @@ func (l *Listener) Accept() (*Conn, error) {
 	case c := <-l.backlog:
 		return c, nil
 	case <-l.ctx.Done():
-		return nil, errors.New("srt: listener closed")
+		return nil, ErrListenerClosed
 	}
 }
 
@@ -318,7 +317,7 @@ func (l *Listener) handleConclusion(p packet.Packet, hs *packet.CIFHandshake) {
 	// The ONLY flag-based rejection is message API vs stream mode mismatch.
 	// All other flags (TSBPD, TLPKTDROP, NAKReport, Rexmit) are recorded as peer capabilities
 	// and negotiated, never rejected.
-	var peerMessageAPI bool = true // default: message mode (no FlagStream)
+	peerMessageAPI := true // default: message mode (no FlagStream)
 	var peerFlags uint32
 	if hs.HasHS && hs.SRTHS != nil {
 		peerFlags = hs.SRTHS.SRTFlags

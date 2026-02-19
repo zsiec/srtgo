@@ -1125,7 +1125,7 @@ func TestHandleConclusionDuplicateConclusion(t *testing.T) {
 	srcConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	var hs2 packet.CIFHandshake
 	found := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		n, _, err = srcConn.ReadFrom(respBuf)
 		if err != nil {
 			break
@@ -1568,7 +1568,7 @@ func TestHandleConclusionV4DuplicateConclusion(t *testing.T) {
 	srcConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	var hs2 packet.CIFHandshake
 	found := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		n, _, err = srcConn.ReadFrom(respBuf)
 		if err != nil {
 			break

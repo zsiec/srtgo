@@ -116,7 +116,7 @@ func (sb *SendBuffer) NAK(lossSeqs []uint32) []packet.Packet {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
-	var retransmit []packet.Packet
+	retransmit := make([]packet.Packet, 0, len(lossSeqs))
 	for _, seqNo := range lossSeqs {
 		s := seq.Number(seqNo)
 		if s.LessThan(sb.startSeq) || sb.nextSeq.LessThanOrEqual(s) {
@@ -150,7 +150,7 @@ func (sb *SendBuffer) NAKTimed(lossSeqs []uint32, now clock.Timestamp, rtt, rttV
 	}
 	timeNAK := now.Add(-rexmitGate)
 
-	var retransmit []packet.Packet
+	retransmit := make([]packet.Packet, 0, len(lossSeqs))
 	for _, seqNo := range lossSeqs {
 		s := seq.Number(seqNo)
 		if s.LessThan(sb.startSeq) || sb.nextSeq.LessThanOrEqual(s) {
@@ -298,7 +298,7 @@ func (sb *SendBuffer) GetAllUnacked() []packet.Packet {
 		return nil
 	}
 
-	var pkts []packet.Packet
+	pkts := make([]packet.Packet, 0, sb.size)
 	s := sb.startSeq
 	for s.LessThan(sb.nextSeq) {
 		idx := int(uint32(s)) & sb.mask
@@ -370,7 +370,7 @@ func (sb *SendBuffer) SetMsgTTLBatch(ttl int64, n int) {
 	if sb.size == 0 || n <= 0 {
 		return
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := sb.nextSeq.Add(uint32(-n + i))
 		idx := int(uint32(s)) & sb.mask
 		if sb.entries[idx].used {

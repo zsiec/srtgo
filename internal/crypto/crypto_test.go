@@ -736,7 +736,7 @@ func TestBuildGCMNonceModernFormat(t *testing.T) {
 	expected[9] = byte(seqNo >> 16)
 	expected[10] = byte(seqNo >> 8)
 	expected[11] = byte(seqNo)
-	for i := 0; i < GCMNonceSize; i++ {
+	for i := range GCMNonceSize {
 		expected[i] ^= salt[i]
 	}
 
@@ -763,7 +763,7 @@ func TestBuildGCMNonceLegacyFormat(t *testing.T) {
 	iv[13] = byte(seqNo >> 16)
 	iv[14] = byte(seqNo >> 8)
 	iv[15] = byte(seqNo)
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		iv[i] ^= salt[i]
 	}
 	var expected [GCMNonceSize]byte

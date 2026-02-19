@@ -11,7 +11,7 @@ func TestSndRateEstimator_Basic(t *testing.T) {
 	e.init(now)
 
 	// Send 100 packets of 1000 bytes in the first window
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		e.onPacketSent(now.Add(time.Duration(i)*time.Millisecond), 1, 1000)
 	}
 
@@ -40,9 +40,9 @@ func TestSndRateEstimator_MultipleWindows(t *testing.T) {
 	e.init(now)
 
 	// Send packets across 5 windows
-	for w := 0; w < 5; w++ {
+	for w := range 5 {
 		windowStart := now.Add(time.Duration(w) * sndRateWindow)
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			e.onPacketSent(windowStart.Add(time.Duration(i)*5*time.Millisecond), 1, 500)
 		}
 	}
@@ -73,7 +73,7 @@ func TestSndRateEstimator_WrapAround(t *testing.T) {
 	e.init(now)
 
 	// Fill all 10 slots and then some to test wrap-around
-	for w := 0; w < 15; w++ {
+	for w := range 15 {
 		windowStart := now.Add(time.Duration(w) * sndRateWindow)
 		e.onPacketSent(windowStart, 10, 5000)
 		e.rotate(windowStart.Add(sndRateWindow))
@@ -236,7 +236,7 @@ func TestSndRateEstimator_GetRateFullSlots(t *testing.T) {
 	e.init(now)
 
 	// Fill all 10 slots with known data
-	for i := 0; i < sndRateNumSlots; i++ {
+	for i := range sndRateNumSlots {
 		windowStart := now.Add(time.Duration(i) * sndRateWindow)
 		e.onPacketSent(windowStart, 100, 50000)
 		if i < sndRateNumSlots-1 {
@@ -265,7 +265,7 @@ func TestSndRateEstimator_GetRateAccuracy(t *testing.T) {
 	now := time.Now()
 	e.init(now)
 
-	for w := 0; w < 5; w++ {
+	for w := range 5 {
 		windowStart := now.Add(time.Duration(w) * sndRateWindow)
 		// 200 packets per window
 		e.onPacketSent(windowStart, 200, 200000)

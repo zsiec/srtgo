@@ -86,11 +86,11 @@ func TestCppCompat_Rebuild(t *testing.T) {
 	sources := make([]srcPkt, numPkts)
 	seq := isn
 	ts := timestampT0
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		divergence := plsize - minSize - 1
 		length := minSize + rng.Intn(divergence)
 		payload := make([]byte, length)
-		for b := 0; b < length; b++ {
+		for b := range length {
 			payload[b] = byte(rng.Intn(255))
 		}
 		sources[i] = srcPkt{seqNo: seq, timestamp: ts, payload: payload}
@@ -100,7 +100,7 @@ func TestCppCompat_Rebuild(t *testing.T) {
 
 	// --- Sender side: feed all 7 packets, extract FEC control packet ---
 	sender := NewFECSender(cfg, plsize, isn)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		sender.FeedSource(sources[i].seqNo, sources[i].timestamp, 0, sources[i].payload)
 	}
 
@@ -114,7 +114,7 @@ func TestCppCompat_Rebuild(t *testing.T) {
 
 	// --- Receiver side: feed 6 of 7 data packets (skip index 4) ---
 	receiver := NewFECReceiver(cfg, plsize, isn)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		if i == lostIdx {
 			continue
 		}
@@ -195,11 +195,11 @@ func TestCppCompat_NoRebuild(t *testing.T) {
 	sources := make([]srcPkt, numPkts)
 	seq := isn
 	ts := timestampT0
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		divergence := plsize - minSize - 1
 		length := minSize + rng.Intn(divergence)
 		payload := make([]byte, length)
-		for b := 0; b < length; b++ {
+		for b := range length {
 			payload[b] = byte(rng.Intn(255))
 		}
 		sources[i] = srcPkt{seqNo: seq, timestamp: ts, payload: payload}
@@ -209,7 +209,7 @@ func TestCppCompat_NoRebuild(t *testing.T) {
 
 	// --- Sender side ---
 	sender := NewFECSender(cfg, plsize, isn)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		sender.FeedSource(sources[i].seqNo, sources[i].timestamp, 0, sources[i].payload)
 	}
 
@@ -220,7 +220,7 @@ func TestCppCompat_NoRebuild(t *testing.T) {
 
 	// --- Receiver side: skip indices 4 and 6 ---
 	receiver := NewFECReceiver(cfg, plsize, isn)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		if i == 4 || i == 6 {
 			continue
 		}
@@ -369,7 +369,7 @@ func TestCppCompat_Prepare(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	seq := isn
 	ts := uint32(10)
-	for i := 0; i < 7; i++ {
+	for range 7 {
 		length := 732 + rng.Intn(plsize-732-1)
 		payload := make([]byte, length)
 		for b := range payload {

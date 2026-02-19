@@ -121,7 +121,7 @@ func (w *Watcher) Add(conn *Conn) error {
 // transitions (not-ready -> ready), matching epoll EPOLLET semantics.
 func (w *Watcher) AddWithOpts(conn *Conn, opts WatchOpts) error {
 	if conn == nil {
-		return errors.New("srt: nil connection")
+		return ErrNilConnection
 	}
 
 	w.mu.Lock()
@@ -155,7 +155,7 @@ func (w *Watcher) AddWithOpts(conn *Conn, opts WatchOpts) error {
 // Remove unregisters a connection. No further events will be delivered for it.
 func (w *Watcher) Remove(conn *Conn) error {
 	if conn == nil {
-		return errors.New("srt: nil connection")
+		return ErrNilConnection
 	}
 
 	w.mu.Lock()

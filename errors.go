@@ -57,6 +57,27 @@ type RejectReason = packet.HandshakeType
 // with that code (e.g., RejPeer, or user-defined codes >= RejUserDefined).
 type AcceptRejectFunc func(req ConnRequest) RejectReason
 
-// ErrWouldBlock is returned when a non-blocking send or receive cannot complete
-// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false).
-var ErrWouldBlock = errors.New("srt: operation would block")
+// Sentinel errors for common conditions.
+var (
+	// ErrWouldBlock is returned when a non-blocking send or receive cannot complete
+	// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false).
+	ErrWouldBlock = errors.New("srt: operation would block")
+
+	// ErrGroupClosed is returned when operating on a closed Group.
+	ErrGroupClosed = errors.New("srt: group closed")
+
+	// ErrListenerClosed is returned when Accept is called on a closed Listener.
+	ErrListenerClosed = errors.New("srt: listener closed")
+
+	// ErrNilConnection is returned when a nil Conn is passed to a group or watcher.
+	ErrNilConnection = errors.New("srt: nil connection")
+
+	// ErrPeerError is returned when the peer sends an error.
+	ErrPeerError = errors.New("srt: peer error")
+
+	// ErrConnectionTimeout is returned when the connection times out due to inactivity.
+	ErrConnectionTimeout = errors.New("srt: connection timeout")
+
+	// ErrPeerShutdown is returned when the peer sends a shutdown control packet.
+	ErrPeerShutdown = errors.New("srt: peer shutdown")
+)
