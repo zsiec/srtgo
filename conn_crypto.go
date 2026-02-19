@@ -253,7 +253,7 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Enable TSBPD on receiver side with negotiated latency
 	if peerFlags&packet.FlagTSBPDSend != 0 {
-		c.tsbpdEnabled = true
+		c.tsbpdEnabled.Store(true)
 		c.tsbpdDelay = clock.Microseconds(negotiatedLatency) * clock.Millisecond
 		if c.tsbpdTimer == nil {
 			now := c.clk.Now()
@@ -266,7 +266,7 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Negotiate TLPKTDROP
 	if peerFlags&packet.FlagTLPktDrop != 0 {
-		c.tlpktdropEnabled = true
+		c.tlpktdropEnabled.Store(true)
 	}
 
 	// Negotiate periodic NAK
@@ -274,10 +274,10 @@ func (c *Conn) handleHSREQ(p packet.Packet) {
 
 	// Send HSRSP back to peer
 	respFlags := uint32(packet.FlagCrypt | packet.FlagRexmit)
-	if c.tsbpdEnabled {
+	if c.tsbpdEnabled.Load() {
 		respFlags |= packet.FlagTSBPDRecv
 	}
-	if c.tlpktdropEnabled {
+	if c.tlpktdropEnabled.Load() {
 		respFlags |= packet.FlagTLPktDrop
 	}
 	if c.periodicNAK {
