@@ -83,12 +83,12 @@ func TestE2EBulkTransfer(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
-	listenerCfg.MaxBW = 1_000_000_000
+	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 10 * time.Second
-	dialerCfg.MaxBW = 1_000_000_000
+	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
@@ -178,13 +178,13 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
-	listenerCfg.MaxBW = 1_000_000_000
+	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 	listenerCfg.Passphrase = passphrase
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 10 * time.Second
-	dialerCfg.MaxBW = 1_000_000_000
+	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 	dialerCfg.Passphrase = passphrase
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
@@ -268,13 +268,13 @@ func TestE2EFileMode(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
-	listenerCfg.MaxBW = 1_000_000_000
+	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 	listenerCfg.TransType = TransTypeFile
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 10 * time.Second
-	dialerCfg.MaxBW = 1_000_000_000
+	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 	dialerCfg.TransType = TransTypeFile
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
@@ -430,12 +430,12 @@ func TestE2EStatsAccuracy(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
-	listenerCfg.MaxBW = 1_000_000_000
+	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 10 * time.Second
-	dialerCfg.MaxBW = 1_000_000_000
+	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
@@ -510,12 +510,12 @@ func TestE2EBidirectionalBulk(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 10 * time.Second
-	listenerCfg.MaxBW = 1_000_000_000
+	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 10 * time.Second
-	dialerCfg.MaxBW = 1_000_000_000
+	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
 
