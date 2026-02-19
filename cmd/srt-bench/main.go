@@ -56,7 +56,7 @@ type Result struct {
 func makeCfg(transType string) srt.Config {
 	cfg := srt.DefaultConfig()
 	cfg.Latency = 120 * time.Millisecond
-	cfg.MaxBW = 1_000_000_000 / 8 // 1 Gbps
+	cfg.MaxBW = 10_000_000_000 / 8 // 10 Gbps
 	cfg.ConnTimeout = 5 * time.Second
 	cfg.FC = 25600
 	cfg.SendBufSize = 8192

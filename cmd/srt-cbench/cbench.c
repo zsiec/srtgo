@@ -45,7 +45,7 @@ static SRTSOCKET make_socket(const char *transtype)
     srt_setsockflag(s, SRTO_TRANSTYPE, &tt, sizeof(tt));
 
     int latency   = 120;              /* ms  */
-    int64_t maxbw = 1000000000 / 8;   /* 125 MB/s = 1 Gbps */
+    int64_t maxbw = (int64_t)10000000000 / 8; /* 10 Gbps */
     int fc        = 25600;
     int sndbuf    = 8192 * 1500;      /* SRT byte count = slots * ~pkt_size */
     int rcvbuf    = 8192 * 1500;

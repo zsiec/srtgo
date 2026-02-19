@@ -3,8 +3,8 @@
 **Date**: 2026-02-19
 **Platform**: Apple M1 Pro (arm64), macOS Darwin 25.2.0
 **Go**: 1.24.3 (srtgo) | **C++**: libsrt 1.5.4 (Homebrew)
-**Test duration**: 10s per test, localhost `127.0.0.1`
-**Config**: MaxBW=1 Gbps, Latency=120 ms, FC=25600, no encryption
+**Test duration**: 10s per test, localhost `127.0.0.1`, 10 runs per config
+**Config**: MaxBW=10 Gbps (uncapped), Latency=120 ms, FC=25600, no encryption
 
 ## Methodology
 
@@ -13,158 +13,152 @@ Both Go and C++ use **purpose-built benchmark tools** with identical methodology
 - Tight `srt_send`/`srt_recv` loop with the same SRT config
 - JSON output with throughput, RTT, loss, retransmits, drops
 - CPU/RSS measured via `/usr/bin/time -l` on both sides
+- **10 runs per configuration** for statistical validity
 
 The C benchmark (`cbench.c`) links directly against libsrt with the same
-configuration as the Go tool. Both tools use MaxBW=1 Gbps, Latency=120 ms,
-FC=25600.
+configuration as the Go tool. MaxBW is set to 10 Gbps (effectively uncapped)
+so the rate limiter does not mask real throughput differences.
 
 ## Test Matrix
 
 | # | Test | Description |
 |---|------|-------------|
-| 1 | Go loopback | Both sides in one process (quick smoke test) |
-| 2 | Go separate | Sender + receiver as separate OS processes |
-| 3 | C++ separate | Sender + receiver as separate OS processes |
-| 4 | Go -> C++ | Go sender to C++ receiver (isolates Go sender) |
-| 5 | C++ -> Go | C++ sender to Go receiver (isolates Go receiver) |
+| 1 | Go separate | Sender + receiver as separate OS processes |
+| 2 | C++ separate | Sender + receiver as separate OS processes |
 
 ---
 
-## 1. Throughput
+## 1. Throughput (10-run statistics)
 
 ### Live Mode
 
-| Test | Throughput | RTT | Loss | Retransmits | Drops |
-|------|----------:|-----:|-----:|------------:|------:|
-| Go loopback | 1,131.7 Mbps | 0.11 ms | 0.00% | 0 | 0 |
-| **Go separate** | **1,083.4 Mbps** | 0.13 ms | 0.00% | 0 | 0 |
-| **C++ separate** | **1,031.0 Mbps** | 0.04 ms | 0.00% | 0 | 0 |
-| Go -> C++ | 117.8 Mbps | 0.25 ms | 18.9% | 5 | 25,181 |
-| C++ -> Go | 1,047.0 Mbps | 0.20 ms | 0.00% | 0 | 0 |
+| Metric | Go (Mbps) | C++ (Mbps) |
+|--------|----------:|----------:|
+| **Mean** | **1,134** | **1,244** |
+| Median | 1,134 | 1,252 |
+| Std Dev | 106 | 36 |
+| Min | 888 | 1,154 |
+| Max | 1,286 | 1,280 |
+| Win rate | 2/10 | 8/10 |
 
-**Go is 1.05x FASTER than C++ in live mode (separate-process comparison).**
+**C++ is 1.10x faster than Go in live mode (mean throughput).**
 
-### File Mode
+Go achieves 91% of C++ throughput on average but has 3x more variance (stddev
+106 vs 36). C++ live mode is highly consistent.
 
-| Test | Throughput | RTT | Loss | Retransmits |
-|------|----------:|-----:|-----:|------------:|
-| Go loopback | 1,241.6 Mbps | 0.28 ms | 0.00% | 0 |
-| **Go separate** | **1,020.8 Mbps** | 0.21 ms | 0.00% | 0 |
-| **C++ separate** | **931.2 Mbps** | 0.31 ms | 0.00% | 0 |
-| Go -> C++ | 1,218.8 Mbps | 0.08 ms | 0.00% | 0 |
-| C++ -> Go | 843.9 Mbps | 0.18 ms | 0.00% | 0 |
+Per-run data:
 
-**Go is 1.10x FASTER than C++ in file mode (separate-process comparison).**
-
----
-
-## 2. Resource Usage
-
-### Live Mode (sender + receiver combined)
-
-| Test | CPU user | CPU sys | CPU total | RSS (peak) |
-|------|--------:|-------:|----------:|-----------:|
-| Go loopback | 6.74s | 19.70s | **26.44s** | 82.7 MB |
-| Go separate | 8.04s | 20.27s | **28.31s** | 69.7 MB |
-| C++ separate | 1.98s | 9.94s | **11.92s** | 18.0 MB |
-| Go -> C++ | 0.22s | 0.99s | **1.21s** | 22.9 MB |
-| C++ -> Go | 5.31s | 9.09s | **14.40s** | 51.5 MB |
+| Run | Go (Mbps) | C++ (Mbps) | Ratio | Winner |
+|----:|----------:|----------:|------:|--------|
+| 1 | 888 | 1,232 | 0.72x | C++ |
+| 2 | 1,066 | 1,280 | 0.83x | C++ |
+| 3 | 1,117 | 1,257 | 0.89x | C++ |
+| 4 | 1,133 | 1,230 | 0.92x | C++ |
+| 5 | 1,135 | 1,277 | 0.89x | C++ |
+| 6 | 1,143 | 1,279 | 0.89x | C++ |
+| 7 | 1,094 | 1,249 | 0.88x | C++ |
+| 8 | 1,248 | 1,254 | 1.00x | C++ |
+| 9 | 1,232 | 1,154 | 1.07x | Go |
+| 10 | 1,286 | 1,227 | 1.05x | Go |
 
 ### File Mode
 
-| Test | CPU user | CPU sys | CPU total | RSS (peak) |
-|------|--------:|-------:|----------:|-----------:|
-| Go loopback | 6.42s | 20.45s | **26.87s** | 38.5 MB |
-| Go separate | 6.58s | 18.79s | **25.37s** | 24.2 MB |
-| C++ separate | 2.28s | 10.11s | **12.39s** | 15.9 MB |
-| Go -> C++ | 2.47s | 9.37s | **11.84s** | 22.6 MB |
-| C++ -> Go | 4.14s | 7.75s | **11.89s** | 16.6 MB |
+| Metric | Go (Mbps) | C++ (Mbps) |
+|--------|----------:|----------:|
+| **Mean** | **918** | **1,513** |
+| Median | 1,363 | 1,507 |
+| Std Dev | 603 | 120 |
+| Min | 4 | 1,314 |
+| Max | 1,479 | 1,706 |
+| Win rate | 2/10 | 8/10 |
+
+**C++ is 1.65x faster than Go in file mode (mean throughput).**
+
+However, Go's mean is dragged down by catastrophic outlier runs. When Go
+doesn't hit an outlier, it's competitive (median 1,363 vs C++ 1,507 = 0.90x).
+See section 3 for analysis of the outlier dips.
+
+Per-run data:
+
+| Run | Go (Mbps) | C++ (Mbps) | Ratio | Winner |
+|----:|----------:|----------:|------:|--------|
+| 1 | 1,333 | 1,479 | 0.90x | C++ |
+| 2 | 1,415 | 1,382 | 1.02x | Go |
+| 3 | 1,479 | 1,527 | 0.97x | C++ |
+| 4 | 76 | 1,681 | 0.04x | C++ |
+| 5 | 1,395 | 1,706 | 0.82x | C++ |
+| 6 | 420 | 1,402 | 0.30x | C++ |
+| 7 | 1,393 | 1,314 | 1.06x | Go |
+| 8 | 265 | 1,486 | 0.18x | C++ |
+| 9 | 1,401 | 1,581 | 0.89x | C++ |
+| 10 | 4 | 1,571 | 0.00x | C++ |
 
 ---
 
-## 3. CPU Efficiency (normalized)
+## 2. Previous Results at MaxBW=1 Gbps (rate-limited)
 
-| Test | Throughput | CPU / 10s | CPU-seconds per Gbps |
-|------|----------:|----------:|---------------------:|
-| Go separate (live) | 1,083.4 Mbps | 28.31s | **26.1** |
-| C++ separate (live) | 1,031.0 Mbps | 11.92s | **11.6** |
-| Go separate (file) | 1,020.8 Mbps | 25.37s | **24.9** |
-| C++ separate (file) | 931.2 Mbps | 12.39s | **13.3** |
+When both implementations are capped at 1 Gbps (the SRT default), they appear
+roughly equal because both saturate the rate limiter:
 
-Go achieves equal or better throughput than C++, but uses ~2.3x more CPU to do so.
-The additional CPU is primarily `sys` time from per-packet syscalls and the
-`runtime.Gosched()` pacing mechanism which yields the goroutine between sends.
+| Mode | Go Mean | C++ Mean | Ratio | Go Wins |
+|------|--------:|---------:|------:|--------:|
+| Live | 1,021 Mbps | 1,049 Mbps | 0.97x | 5/10 |
+| File | 914 Mbps | 922 Mbps | 0.99x | 7/10 |
 
----
-
-## 4. Cross-Test Analysis
-
-The cross-tests isolate each Go component against the known-good C++ reference:
-
-| Go component | Direction | Throughput | vs C++ baseline |
-|-------------|-----------|----------:|----------------|
-| **Go sender** | -> C++ recv (live) | 117.8 Mbps | 11% of C++ |
-| **Go receiver** | <- C++ send (live) | 1,047.0 Mbps | **102% of C++** |
-| **Go sender** | -> C++ recv (file) | 1,218.8 Mbps | **131% of C++** |
-| **Go receiver** | <- C++ send (file) | 843.9 Mbps | **91% of C++** |
-
-The Go **receiver in live mode matches C++** (1,047 vs 1,031 Mbps).
-The Go **sender in file mode beats C++** (1,219 vs 931 Mbps).
-The Go **sender in live mode** has a known cross-implementation timing issue
-(see section 6).
+This is misleading — neither implementation is running at its true limit.
+The 10 Gbps cap results (section 1) reveal the real performance gap.
 
 ---
 
-## 5. Memory
+## 3. Analysis: Go File Mode Outlier Dips
 
-| Metric | Go | C++ | Ratio |
-|--------|---:|----:|------:|
-| Live mode RSS | 69.7 MB | 18.0 MB | Go uses **3.9x** more |
-| File mode RSS | 24.2 MB | 15.9 MB | Go uses **1.5x** more |
+Go file mode suffers from periodic catastrophic throughput dips (4-420 Mbps
+in 4 of 10 runs). These dips do not occur in C++ or in Go live mode.
 
-Go uses more memory due to goroutine stacks, GC heap, and larger default
-buffer sizes (`max(bufSize, FC)` ensures buffers are at least as large as
-the flow control window).
+Root cause investigation:
+- **FileCC congestion control**: Go's AIMD FileCC is sensitive to GC pauses.
+  A stop-the-world GC pause can cause the sender to miss its send window,
+  triggering a timeout that crashes the congestion window back to slow start.
+- **goroutine scheduling**: Under high load with no rate limiter, all 3
+  goroutines (recvLoop, timerLoop, Write) contend for CPU. Occasional
+  scheduling delays cascade through the congestion controller.
+- C++ does not have GC or goroutine scheduling — its FileCC runs in a tight
+  single-threaded loop with deterministic timing.
 
----
-
-## 6. Known Issues
-
-### Go -> C++ Live Mode: Cross-Implementation Timing
-
-The Go sender achieves 1,083 Mbps against a Go receiver but only ~118 Mbps
-against a C++ receiver in live mode. This is a cross-implementation timing
-issue, not a fundamental throughput limitation:
-
-- The Go sender uses `runtime.Gosched()` for sub-200us pacing, which yields
-  the goroutine for ~5-20us (vs `time.Sleep`'s ~50us minimum on macOS).
-- This creates slightly different packet timing patterns compared to C++'s
-  `nanosleep`-based pacing.
-- The C++ receiver occasionally cannot drain the kernel buffer fast enough,
-  leading to kernel-level drops that cascade into SRT-level loss.
-- File mode (which uses adaptive congestion control) does NOT have this issue
-  and achieves 1,219 Mbps Go -> C++.
-
-This issue is specific to live mode's fixed-rate pacing and only manifests
-in cross-implementation scenarios. Go-to-Go communication is unaffected.
+This is the primary area for future optimization work.
 
 ---
 
-## 7. Summary Table
+## 4. Summary
 
 | Metric | Live Mode | File Mode |
 |--------|-----------|-----------|
-| Throughput delta | Go is **1.05x faster** | Go is **1.10x faster** |
-| CPU efficiency (per Gbps) | Go uses **2.3x more** | Go uses **1.9x more** |
-| Memory (RSS) | Go uses **3.9x more** | Go uses **1.5x more** |
-| Go receiver | **102% of C++** | **91% of C++** |
-| Go sender (cross-impl) | **11% of C++** (timing issue) | **131% of C++** |
+| Throughput (mean) | C++ is **1.10x faster** | C++ is **1.65x faster** |
+| Throughput (median) | C++ is **1.10x faster** | C++ is **1.11x faster** |
+| Go consistency | stddev 106 (vs C++ 36) | stddev 603 (vs C++ 120) |
+| Go at 1 Gbps cap | **matches C++** (0.97x) | **matches C++** (0.99x) |
+
+### What this means
+
+- **At typical SRT bitrates (< 1 Gbps)**: Go matches C++ throughput. Most
+  real-world SRT streams run at 2-50 Mbps (video) or up to 200 Mbps (high
+  bitrate contribution). Both implementations are equally fast here.
+
+- **Above 1 Gbps**: C++ pulls ahead, especially in file mode. Go's
+  goroutine scheduling and GC introduce variance that C++ avoids with
+  deterministic threading.
+
+- **CPU efficiency**: Go uses ~2x more CPU than C++ at equivalent throughput,
+  primarily from per-packet syscalls and `runtime.Gosched()` pacing yields.
+
+- **Memory**: Go uses 1.5-4x more RSS due to goroutine stacks, GC heap,
+  and larger default buffer sizes.
 
 ---
 
-## 8. Performance Optimizations Applied
+## 5. Performance Optimizations Applied
 
-The following optimizations brought Go from 80 Mbps to 1,083 Mbps (13.5x):
+The following optimizations brought Go from 80 Mbps to 1,134 Mbps (14x):
 
 1. **Gosched-based pacing**: `runtime.Gosched()` for waits under 200us
    instead of `time.Sleep` (which has ~50us minimum overhead on macOS).
@@ -196,11 +190,8 @@ The following optimizations brought Go from 80 Mbps to 1,083 Mbps (13.5x):
   jitter, loss) would change the picture — congestion control behavior differs
   under actual network conditions.
 
-- **Go loopback mode**: The single-process loopback test has goroutine CPU
-  contention. Always use separate-process tests for accurate comparison.
+- **Run-to-run variance**: Go results vary more than C++ (stddev 106-603 vs
+  36-120) due to goroutine scheduling and GC timing.
 
-- **Run-to-run variance**: Results vary ~10-15% between runs due to system
-  load and scheduling. Use multiple runs for stable conclusions.
-
-- **Go -> C++ live**: This specific test is highly variable (118-489 Mbps
-  across runs) due to the cross-implementation timing issue described above.
+- **Go file mode outliers**: 4 of 10 file mode runs had catastrophic dips.
+  Median (1,363 Mbps) is more representative than mean (918 Mbps).
