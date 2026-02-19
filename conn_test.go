@@ -2463,16 +2463,16 @@ func TestFileModeNoTLPktDrop(t *testing.T) {
 	defer cleanup()
 
 	// Verify mode flags
-	if sender.tsbpdEnabled {
+	if sender.tsbpdEnabled.Load() {
 		t.Error("sender tsbpdEnabled should be false in file mode")
 	}
-	if sender.tlpktdropEnabled {
+	if sender.tlpktdropEnabled.Load() {
 		t.Error("sender tlpktdropEnabled should be false in file mode")
 	}
-	if receiver.tsbpdEnabled {
+	if receiver.tsbpdEnabled.Load() {
 		t.Error("receiver tsbpdEnabled should be false in file mode")
 	}
-	if receiver.tlpktdropEnabled {
+	if receiver.tlpktdropEnabled.Load() {
 		t.Error("receiver tlpktdropEnabled should be false in file mode")
 	}
 	if sender.tsbpdTimer != nil {
@@ -2672,7 +2672,7 @@ func TestFileModeQuickACK(t *testing.T) {
 	}
 
 	// Verify receiver is in file mode (TSBPD disabled)
-	if receiver.tsbpdEnabled {
+	if receiver.tsbpdEnabled.Load() {
 		t.Fatal("receiver should be in file mode with TSBPD disabled")
 	}
 
@@ -2895,7 +2895,7 @@ func TestMultiPacketMessageLiveReject(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	if !sender.tsbpdEnabled {
+	if !sender.tsbpdEnabled.Load() {
 		t.Skip("sender not in live mode")
 	}
 
@@ -3449,7 +3449,7 @@ func TestFASTREXMITFiresWhenPeerNakReportFalse(t *testing.T) {
 	defer cleanup()
 
 	// Configure as live mode with peerNakReport=false
-	c.tsbpdEnabled = true
+	c.tsbpdEnabled.Store(true)
 	c.peerNakReport = false
 
 	// Push some packets
@@ -3479,7 +3479,7 @@ func TestFASTREXMITSuppressedWhenPeerNakReportTrue(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = true
+	c.tsbpdEnabled.Store(true)
 	c.peerNakReport = true
 
 	// Push packets into send buffer
@@ -3500,7 +3500,7 @@ func TestFASTREXMITSuppressedWhenPeerNakReportTrue(t *testing.T) {
 	// Since tsbpdEnabled=true && peerNakReport=true, neither fires.
 
 	// Verify by checking that we're in the suppressed branch:
-	if !c.tsbpdEnabled {
+	if !c.tsbpdEnabled.Load() {
 		t.Error("tsbpdEnabled should be true for live mode")
 	}
 	if !c.peerNakReport {
@@ -3520,7 +3520,7 @@ func TestLATEREXMITOnlyWhenLossListEmpty(t *testing.T) {
 	defer cleanup()
 
 	// Configure as file mode
-	c.tsbpdEnabled = false
+	c.tsbpdEnabled.Store(false)
 
 	// Push packets
 	for i := range 5 {
@@ -4096,14 +4096,14 @@ func TestConnHandleDropReq(t *testing.T) {
 	defer cleanup()
 
 	// DROPREQ should be skipped when TLPKTDROP is disabled
-	c.tlpktdropEnabled = false
+	c.tlpktdropEnabled.Store(false)
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeDropReq, c.socketID, 0)
 	p.Data = make([]byte, 12)
 	c.handleDropReq(p)
 	// Should not panic or do anything
 
 	// With TLPKTDROP enabled but too-short data
-	c.tlpktdropEnabled = true
+	c.tlpktdropEnabled.Store(true)
 	p2 := packet.NewControl(c.localAddr, packet.CtrlTypeDropReq, c.socketID, 0)
 	p2.Data = make([]byte, 8) // too short (<12 bytes)
 	c.handleDropReq(p2)
@@ -4533,7 +4533,7 @@ func TestConnHandleDropReq_TLPktDropDisabled(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tlpktdropEnabled = false
+	c.tlpktdropEnabled.Store(false)
 
 	// Should return early without processing
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeDropReq, c.socketID, 0)
@@ -4546,7 +4546,7 @@ func TestConnHandleDropReq_ShortData(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tlpktdropEnabled = true
+	c.tlpktdropEnabled.Store(true)
 
 	// Data too short (< 12 bytes) — should return early
 	p := packet.NewControl(c.localAddr, packet.CtrlTypeDropReq, c.socketID, 0)
@@ -4590,8 +4590,8 @@ func TestConnHandleDropReq_FileModeDrops(t *testing.T) {
 
 	// File mode: tlpktdropEnabled = false, tsbpdEnabled = false
 	// Manually enable tlpktdrop to test the drop path
-	c.tlpktdropEnabled = true
-	c.tsbpdEnabled = false
+	c.tlpktdropEnabled.Store(true)
+	c.tsbpdEnabled.Store(false)
 
 	// Build a valid CIFDropReq
 	dr := &packet.CIFDropReq{
@@ -4772,7 +4772,7 @@ func TestConnRecomputeSendDropThresh(t *testing.T) {
 	}
 
 	// With tsbpdEnabled = false, threshold should be 0
-	c.tsbpdEnabled = false
+	c.tsbpdEnabled.Store(false)
 	c.sndDropDelay = 0
 	c.recomputeSendDropThresh()
 	if c.sendDropThresh != 0 {
@@ -4780,7 +4780,7 @@ func TestConnRecomputeSendDropThresh(t *testing.T) {
 	}
 
 	// With tsbpdEnabled = true and sndDropDelay = 0
-	c.tsbpdEnabled = true
+	c.tsbpdEnabled.Store(true)
 	c.sndDropDelay = 0
 	c.recomputeSendDropThresh()
 	if c.sendDropThresh <= 0 {
@@ -4852,8 +4852,8 @@ func TestConnCheckSendDrop_WithOldPackets(t *testing.T) {
 	defer cleanup()
 
 	// Ensure sender has drop enabled
-	sender.tsbpdEnabled = true
-	sender.tlpktdropEnabled = true
+	sender.tsbpdEnabled.Store(true)
+	sender.tlpktdropEnabled.Store(true)
 	sender.sendDropThresh = 1 // 1 microsecond = basically everything is old
 
 	// Push some packets into the send buffer
@@ -4970,7 +4970,7 @@ func TestConnWriteMessageAPISizeLimit(t *testing.T) {
 
 	// Enable message API
 	c.messageAPI = true
-	c.tsbpdEnabled = false // disable TSBPD to allow multi-packet
+	c.tsbpdEnabled.Store(false) // disable TSBPD to allow multi-packet
 
 	// Message exceeding send buffer capacity should fail
 	bigMsg := make([]byte, c.sendBuf.Capacity()*c.payloadSize+100)

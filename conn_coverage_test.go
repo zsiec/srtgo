@@ -352,7 +352,7 @@ func TestConnRetransmitAllInFlight_FASTREXMIT(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	sender.tsbpdEnabled = true
+	sender.tsbpdEnabled.Store(true)
 	sender.peerNakReport = false
 
 	for range 5 {
@@ -702,8 +702,8 @@ func TestConnHandleDataPacket_QuickACKFileMode(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
-	c.tlpktdropEnabled = false
+	c.tsbpdEnabled.Store(false)
+	c.tlpktdropEnabled.Store(false)
 	c.payloadSize = 1316
 
 	baseSeq := c.recvBuf.ACKSequence()
@@ -725,8 +725,8 @@ func TestConnHandleDataPacket_NoQuickACKFullPayload(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
-	c.tlpktdropEnabled = false
+	c.tsbpdEnabled.Store(false)
+	c.tlpktdropEnabled.Store(false)
 	c.payloadSize = 100
 
 	baseSeq := c.recvBuf.ACKSequence()
@@ -748,7 +748,7 @@ func TestConnHandleDataPacket_TSBPDTimestampUpdate(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	if !c.tsbpdEnabled || c.tsbpdTimer == nil {
+	if !c.tsbpdEnabled.Load() || c.tsbpdTimer == nil {
 		t.Skip("TSBPD not enabled on test conn")
 	}
 
@@ -1011,7 +1011,7 @@ func TestConnHandleDataPacket_GCMNonTSBPD(t *testing.T) {
 	c, _, cleanup := testSingleConn(t)
 	defer cleanup()
 
-	c.tsbpdEnabled = false
+	c.tsbpdEnabled.Store(false)
 
 	gcmCtx, err := crypto.NewWithMode(16, crypto.CipherGCM)
 	if err != nil {
@@ -1123,8 +1123,8 @@ func TestConnWrite_FileModeMultiPacketDeadline(t *testing.T) {
 	defer cleanup()
 
 	// Configure as file mode (no TSBPD, no packet size limit)
-	sender.tsbpdEnabled = false
-	sender.tlpktdropEnabled = false
+	sender.tsbpdEnabled.Store(false)
+	sender.tlpktdropEnabled.Store(false)
 
 	// Fill the send buffer
 	for range sender.sendBuf.Capacity() {
@@ -1155,8 +1155,8 @@ func TestConnWrite_FileModeConnectionClose(t *testing.T) {
 	sender, _, cleanup := testConnPair(t)
 	defer cleanup()
 
-	sender.tsbpdEnabled = false
-	sender.tlpktdropEnabled = false
+	sender.tsbpdEnabled.Store(false)
+	sender.tlpktdropEnabled.Store(false)
 
 	// Fill the send buffer
 	for range sender.sendBuf.Capacity() {
@@ -1190,7 +1190,7 @@ func TestConnWrite_SendDropCheckTlpktDrop(t *testing.T) {
 	defer cleanup()
 
 	// TSBPD and tlpktdrop are enabled by default in live mode
-	if !sender.tlpktdropEnabled {
+	if !sender.tlpktdropEnabled.Load() {
 		t.Skip("tlpktdrop not enabled")
 	}
 

@@ -153,10 +153,10 @@ func TestDialFileMode(t *testing.T) {
 	defer clientConn.Close()
 
 	// Verify both sides are in file mode
-	if clientConn.tsbpdEnabled {
+	if clientConn.tsbpdEnabled.Load() {
 		t.Error("client tsbpdEnabled should be false")
 	}
-	if serverConn.tsbpdEnabled {
+	if serverConn.tsbpdEnabled.Load() {
 		t.Error("server tsbpdEnabled should be false")
 	}
 
@@ -698,7 +698,7 @@ func TestDialCongestionFileNegotiation(t *testing.T) {
 	defer clientConn.Close()
 
 	// Both should be in file mode (TSBPD disabled)
-	if clientConn.tsbpdEnabled {
+	if clientConn.tsbpdEnabled.Load() {
 		t.Error("client tsbpdEnabled should be false in file mode")
 	}
 }
