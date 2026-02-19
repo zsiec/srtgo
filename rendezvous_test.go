@@ -325,7 +325,7 @@ func TestRendezvousEncrypted(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
-	cfg.ConnTimeout = 3 * time.Second
+	cfg.ConnTimeout = 10 * time.Second // encryption + race detector need headroom
 	cfg.Passphrase = "rendezvous-secret-key"
 
 	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
