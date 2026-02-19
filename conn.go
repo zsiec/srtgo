@@ -852,7 +852,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	// Check peer health before sending.
 	if !c.peerHealth.Load() {
-		return 0, errors.New("srt: peer error")
+		return 0, ErrPeerError
 	}
 
 	// Validate API compatibility per CC algorithm.
@@ -907,7 +907,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	// send buffer, then send on wire. All fragments are inserted under a single lock.
 	pkts := make([]packet.Packet, numPkts)
 	chunkSizes := make([]int, numPkts)
-	for i := 0; i < numPkts; i++ {
+	for i := range numPkts {
 		start := i * c.payloadSize
 		end := start + c.payloadSize
 		if end > len(b) {
@@ -2044,7 +2044,7 @@ func (c *Conn) timerLoop() {
 				if now.Sub(lastRspTime) > expTimeout {
 					// EXP fired: check if connection should break
 					if expCount > maxExpCount && now.Sub(lastRspTime) > c.peerIdleTimeout {
-						c.setShutdownErr(errors.New("srt: connection timeout"))
+						c.setShutdownErr(ErrConnectionTimeout)
 						c.Close()
 						return
 					}
@@ -2157,7 +2157,7 @@ func (c *Conn) handleControlPacket(p packet.Packet) {
 		// peer health as false; send operations should check this flag.
 		c.peerHealth.Store(false)
 	case packet.CtrlTypeShutdown:
-		c.setShutdownErr(errors.New("srt: peer shutdown"))
+		c.setShutdownErr(ErrPeerShutdown)
 		c.Close()
 	default:
 		// Unknown control packet — ignore
@@ -3103,7 +3103,7 @@ func (c *Conn) processFreshLoss() {
 	// Build NAK for expired entries
 	if expiredEnd > 0 {
 		var losses []uint32
-		for i := 0; i < expiredEnd; i++ {
+		for i := range expiredEnd {
 			e := c.freshLoss[i]
 			s := seq.Number(e.seqLo)
 			end := seq.Number(e.seqHi)

@@ -2345,7 +2345,7 @@ func TestWriteSetsMessageNumber(t *testing.T) {
 
 	// Simulate 3 writes by calling nextMessageNumber directly
 	// (Write goes through the mux which requires a real peer)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		num := c.nextMessageNumber()
 		if num != uint32(i+2) { // starts at 1, first call returns 2
 			t.Errorf("nextMessageNumber %d: got %d, want %d", i, num, i+2)
@@ -2647,7 +2647,7 @@ func TestTokenBucketProbeBorrowing(t *testing.T) {
 	defer cleanup()
 
 	// Send 16 packets to trigger a probe (every 16th packet)
-	for i := 0; i < 17; i++ {
+	for range 17 {
 		sender.Write([]byte("pkt"))
 	}
 
@@ -2753,7 +2753,7 @@ func TestSndLossCountTracking(t *testing.T) {
 	}
 
 	// Send some packets to populate the send buffer
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sender.Write([]byte("data"))
 	}
 
@@ -2814,7 +2814,7 @@ func TestMultiPacketMessageSendReceive(t *testing.T) {
 	if n != msgSize {
 		t.Errorf("Read: got %d bytes, want %d", n, msgSize)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if buf[i] != byte(i%256) {
 			t.Errorf("Read: byte %d: got %d, want %d", i, buf[i], byte(i%256))
 			break
@@ -4269,7 +4269,7 @@ func TestRexmitTokenBucket(t *testing.T) {
 	}
 
 	// Drain the bucket completely
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if !tb.allow(10) {
 			break // bucket drained
 		}
@@ -4738,7 +4738,7 @@ func TestConnConnState_Broken(t *testing.T) {
 	defer cleanup()
 
 	// Set a "broken" shutdown error
-	c.setShutdownErr(errors.New("srt: connection timeout"))
+	c.setShutdownErr(ErrConnectionTimeout)
 	c.Close()
 
 	// Wait for close
@@ -4832,9 +4832,9 @@ func TestConnWriteNonBlocking(t *testing.T) {
 
 	// Fill send buffer to capacity
 	data := make([]byte, sender.payloadSize)
-	for i := 0; i < sender.fc+10; i++ {
+	for range sender.fc + 10 {
 		_, err := sender.Write(data)
-		if err == ErrWouldBlock {
+		if errors.Is(err, ErrWouldBlock) {
 			// Good — buffer full in non-blocking mode
 			return
 		}
@@ -4857,7 +4857,7 @@ func TestConnCheckSendDrop_WithOldPackets(t *testing.T) {
 	sender.sendDropThresh = 1 // 1 microsecond = basically everything is old
 
 	// Push some packets into the send buffer
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -5094,7 +5094,7 @@ func TestConnRetransmitAllInFlight_WithPackets(t *testing.T) {
 	defer cleanup()
 
 	// Push some packets into the send buffer
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -5123,14 +5123,14 @@ func TestConnSendPacket_NonBlocking(t *testing.T) {
 	sender.sndSynFlag.Store(false)
 
 	// Fill the send buffer beyond flow control limit
-	for i := 0; i < sender.fc+10; i++ {
+	for range sender.fc + 10 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
 		p.Header.MessageNumber = 1
 		p.Header.PacketPosition = packet.PositionSingle
 		err := sender.sendPacket(p, 100)
-		if err == ErrWouldBlock {
+		if errors.Is(err, ErrWouldBlock) {
 			// Good — buffer full in non-blocking mode
 			return
 		}
@@ -5150,7 +5150,7 @@ func TestConnSendPacket_WriteDeadline(t *testing.T) {
 	sender.SetWriteDeadline(time.Now().Add(-1 * time.Second))
 
 	// Fill the send buffer
-	for i := 0; i < sender.fc+10; i++ {
+	for range sender.fc + 10 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -5192,7 +5192,7 @@ func TestConnHandleNAK_BelowACK(t *testing.T) {
 	defer cleanup()
 
 	// Push some packets first
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, sender.sendBuf.NextSeq().Value(),
 			sender.clk.Now().SRTTimestamp(), sender.peerSocketID, data)
@@ -5226,7 +5226,7 @@ func TestConnHandleNAK_WithRetransmit(t *testing.T) {
 
 	// Push packets
 	var seqs []uint32
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		nextSeq := sender.sendBuf.NextSeq()
 		data := make([]byte, 100)
 		p := packet.NewData(sender.remoteAddr, nextSeq.Value(),

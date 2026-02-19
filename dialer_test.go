@@ -234,7 +234,7 @@ func TestFileTransferLargeData(t *testing.T) {
 	// Send in a goroutine
 	sendDone := make(chan error, 1)
 	go func() {
-		for i := 0; i < numChunks; i++ {
+		for i := range numChunks {
 			start := i * chunkSize
 			end := start + chunkSize
 			_, err := clientConn.Write(sendData[start:end])

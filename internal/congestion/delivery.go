@@ -2,7 +2,7 @@ package congestion
 
 import (
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/zsiec/srtgo/internal/clock"
 )
@@ -99,7 +99,7 @@ func deliveryRateFilter(timeWindow, bytesWindow []int, maxPayloadSize int) (pktR
 	// Find median using a sorted copy
 	replica := make([]int, n)
 	copy(replica, timeWindow)
-	sort.Ints(replica)
+	slices.Sort(replica)
 	median := replica[n/2]
 
 	if median <= 0 {

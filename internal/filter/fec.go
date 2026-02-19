@@ -46,9 +46,7 @@ func (g *fecGroup) reset(newBase uint32) {
 	g.lengthClip = 0
 	g.flagClip = 0
 	g.timestampClip = 0
-	for i := range g.payloadClip {
-		g.payloadClip[i] = 0
-	}
+	clear(g.payloadClip)
 }
 
 // clipData XORs a packet's metadata and payload into the group accumulator.
@@ -128,7 +126,7 @@ func NewFECSender(cfg Config, payloadSize int, isn uint32) *FECSender {
 // configureColumns initializes column groups starting from isn.
 func (s *FECSender) configureColumns(isn uint32) {
 	if s.cfg.Layout == LayoutEven {
-		for i := 0; i < s.cfg.Cols; i++ {
+		for i := range s.cfg.Cols {
 			base := seqAdd(isn, uint32(i))
 			s.cols[i] = newGroup(base, s.sizeRow(), s.payloadSize)
 		}
@@ -138,7 +136,7 @@ func (s *FECSender) configureColumns(isn uint32) {
 	// Staircase layout: column bases staggered by (1 + sizeRow) per column,
 	// wrapping after numberRows columns.
 	offset := 0
-	for i := 0; i < s.cfg.Cols; i++ {
+	for i := range s.cfg.Cols {
 		base := seqAdd(isn, uint32(offset))
 		s.cols[i] = newGroup(base, s.sizeRow(), s.payloadSize)
 
@@ -290,7 +288,7 @@ func NewFECReceiver(cfg Config, payloadSize int, isn uint32) *FECReceiver {
 	r := &FECReceiver{
 		cfg:         cfg,
 		payloadSize: payloadSize,
-		cells:       make(map[uint32]bool),
+		cells:       make(map[uint32]bool, cfg.Cols*cfg.Rows),
 		cellBase:    isn,
 	}
 
@@ -299,7 +297,7 @@ func NewFECReceiver(cfg Config, payloadSize int, isn uint32) *FECReceiver {
 	if cfg.Rows > 1 {
 		initialRows = cfg.Rows + 1
 	}
-	for i := 0; i < initialRows; i++ {
+	for i := range initialRows {
 		base := seqAdd(isn, uint32(i*cfg.Cols))
 		g := rcvGroup{fecGroup: newGroup(base, 1, payloadSize)}
 		r.rowGroups = append(r.rowGroups, g)
@@ -319,14 +317,14 @@ func NewFECReceiver(cfg Config, payloadSize int, isn uint32) *FECReceiver {
 // Appends numCols new groups for each new series.
 func (r *FECReceiver) extendColumnSeries(seriesBase uint32) {
 	if r.cfg.Layout == LayoutEven {
-		for i := 0; i < r.cfg.Cols; i++ {
+		for i := range r.cfg.Cols {
 			base := seqAdd(seriesBase, uint32(i))
 			r.colGroups = append(r.colGroups, rcvGroup{fecGroup: newGroup(base, r.cfg.Cols, r.payloadSize)})
 		}
 	} else {
 		// Staircase layout
 		offset := 0
-		for i := 0; i < r.cfg.Cols; i++ {
+		for i := range r.cfg.Cols {
 			base := seqAdd(seriesBase, uint32(offset))
 			r.colGroups = append(r.colGroups, rcvGroup{fecGroup: newGroup(base, r.cfg.Cols, r.payloadSize)})
 			if i%r.cfg.Rows == r.cfg.Rows-1 {
@@ -658,7 +656,7 @@ func (r *FECReceiver) getColumnGroupIndex(seqNo uint32) int {
 		if r.colSeries+neededSeries > fecMaxRcvHistory {
 			return -1
 		}
-		for s := 0; s < neededSeries; s++ {
+		for range neededSeries {
 			nextSeries := r.colSeries
 			sbase := seqAdd(r.colBaseISN, uint32(nextSeries*r.matrixSize()))
 			r.extendColumnSeries(sbase)
@@ -700,7 +698,7 @@ func (r *FECReceiver) getColumnGroupIndexByColX(colx int) int {
 // findLostInRow finds the single missing sequence number in a row group.
 // Returns -1 if none found.
 func (r *FECReceiver) findLostInRow(g *rcvGroup) int {
-	for i := 0; i < r.sizeRow(); i++ {
+	for i := range r.sizeRow() {
 		s := seqAdd(g.base, uint32(i))
 		if !r.cells[s] {
 			return int(s)
@@ -711,7 +709,7 @@ func (r *FECReceiver) findLostInRow(g *rcvGroup) int {
 
 // findLostInColumn finds the single missing sequence number in a column group.
 func (r *FECReceiver) findLostInColumn(g *rcvGroup) int {
-	for i := 0; i < r.sizeCol(); i++ {
+	for i := range r.sizeCol() {
 		s := seqAdd(g.base, uint32(i*r.sizeRow()))
 		if !r.cells[s] {
 			return int(s)
@@ -803,7 +801,7 @@ func (r *FECReceiver) fullReset(seqNo uint32) {
 	}
 
 	// Clear cell map
-	r.cells = make(map[uint32]bool)
+	clear(r.cells)
 }
 
 // dismissOldColumns checks if any column groups have been passed by the current
@@ -908,7 +906,7 @@ func (r *FECReceiver) collectLossReport() []uint32 {
 			continue
 		}
 		// Collect irrecoverable losses from this row
-		for j := 0; j < r.sizeRow(); j++ {
+		for j := range r.sizeRow() {
 			seq := seqAdd(g.base, uint32(j))
 			if !r.cells[seq] {
 				losses = append(losses, seq)

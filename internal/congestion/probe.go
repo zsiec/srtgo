@@ -2,7 +2,7 @@ package congestion
 
 import (
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/zsiec/srtgo/internal/clock"
 )
@@ -146,7 +146,7 @@ func peakRangeFilter(window []int, scratch []int) float64 {
 	// Find median using the scratch buffer
 	replica := scratch[:n]
 	copy(replica, window)
-	sort.Ints(replica)
+	slices.Sort(replica)
 	median := replica[n/2]
 
 	if median <= 0 {
