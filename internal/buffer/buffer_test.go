@@ -1499,8 +1499,8 @@ func TestSendBufferNAKTimed(t *testing.T) {
 		sb.Push(p, sentAt)
 	}
 
-	rtt := clock.Microseconds(10000)    // 10ms
-	rttVar := clock.Microseconds(1000)  // 1ms
+	rtt := clock.Microseconds(10000)   // 10ms
+	rttVar := clock.Microseconds(1000) // 1ms
 	// rexmitGate = rtt - 4*rttVar = 10000 - 4000 = 6000us
 	// timeNAK = now - 6000
 

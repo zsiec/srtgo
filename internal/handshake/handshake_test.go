@@ -660,9 +660,9 @@ func TestBuildWavehandWithPBKEYLEN(t *testing.T) {
 		wantEnc   uint16
 	}{
 		{0, 0},
-		{16, 2},  // AES-128
-		{24, 3},  // AES-192
-		{32, 4},  // AES-256
+		{16, 2}, // AES-128
+		{24, 3}, // AES-192
+		{32, 4}, // AES-256
 	}
 
 	for _, tt := range tests {
@@ -737,19 +737,19 @@ func TestBuildRendezvousConclusionRequest(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 6000}
 	p := BuildRendezvousConclusion(
 		42, 1000, 1500, 8192,
-		99,           // peerSocketID
-		0xDEADBEEF,   // cookie
-		true,         // isRequest (INITIATOR)
-		120, 120,     // latency
-		0,            // srtFlags (use default)
-		"live",       // congestionType
-		"",           // filterConfig
-		0, 0, 0,      // group
-		"",           // streamID
+		99,         // peerSocketID
+		0xDEADBEEF, // cookie
+		true,       // isRequest (INITIATOR)
+		120, 120,   // latency
+		0,       // srtFlags (use default)
+		"live",  // congestionType
+		"",      // filterConfig
+		0, 0, 0, // group
+		"", // streamID
 		addr,
-		nil,          // km
-		true,         // hasExt
-		0,            // keyLength
+		nil,  // km
+		true, // hasExt
+		0,    // keyLength
 	)
 	defer p.Release()
 
@@ -802,19 +802,19 @@ func TestBuildRendezvousConclusionResponse(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 6000}
 	p := BuildRendezvousConclusion(
 		42, 1000, 1500, 8192,
-		99,          // peerSocketID
-		0xCAFEBABE,  // cookie
-		false,       // isRequest=false (RESPONDER)
-		200, 150,    // latency
-		0,           // srtFlags (use default)
-		"file",      // congestionType
-		"",          // filterConfig
-		0, 0, 0,     // group
-		"",          // streamID
+		99,         // peerSocketID
+		0xCAFEBABE, // cookie
+		false,      // isRequest=false (RESPONDER)
+		200, 150,   // latency
+		0,       // srtFlags (use default)
+		"file",  // congestionType
+		"",      // filterConfig
+		0, 0, 0, // group
+		"", // streamID
 		addr,
-		nil,         // km
-		true,        // hasExt
-		0,           // keyLength
+		nil,  // km
+		true, // hasExt
+		0,    // keyLength
 	)
 	defer p.Release()
 
@@ -876,7 +876,7 @@ func TestBuildRendezvousConclusionWithStreamID(t *testing.T) {
 		42, 1000, 1500, 8192,
 		99, 0x1234,
 		true, 120, 120, 0, "live", "", 0, 0, 0,
-		"my/stream",  // streamID
+		"my/stream", // streamID
 		addr, nil,
 		true, // hasExt
 		0,
@@ -1001,9 +1001,9 @@ func TestBuildRendezvousConclusionWithPBKEYLEN(t *testing.T) {
 		wantEnc   uint16
 	}{
 		{0, 0},
-		{16, 2},  // AES-128
-		{24, 3},  // AES-192
-		{32, 4},  // AES-256
+		{16, 2}, // AES-128
+		{24, 3}, // AES-192
+		{32, 4}, // AES-256
 	}
 
 	for _, tt := range tests {
@@ -1029,7 +1029,7 @@ func TestBuildRendezvousConclusionDefaultCongestion(t *testing.T) {
 	p := BuildRendezvousConclusion(
 		42, 1000, 1500, 8192, 99, 0x1234,
 		true, 120, 120, 0,
-		"",  // empty congestionType
+		"", // empty congestionType
 		"", 0, 0, 0, "", addr, nil,
 		true, 0,
 	)
@@ -1374,9 +1374,9 @@ func TestBuildInductionResponseWithPBKEYLEN(t *testing.T) {
 		wantEnc   uint16
 	}{
 		{0, 0},
-		{16, 2},  // AES-128
-		{24, 3},  // AES-192
-		{32, 4},  // AES-256
+		{16, 2}, // AES-128
+		{24, 3}, // AES-192
+		{32, 4}, // AES-256
 	}
 
 	for _, tt := range tests {

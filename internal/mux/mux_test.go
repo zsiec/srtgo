@@ -241,10 +241,10 @@ func TestMuxSendNilAddr(t *testing.T) {
 	// Build a packet with nil Addr
 	p := packet.Packet{
 		Header: packet.Header{
-			SequenceNumber:        1,
-			DestinationSocketID:   42,
-			Timestamp:             1000,
-			Addr:                  nil, // nil address
+			SequenceNumber:      1,
+			DestinationSocketID: 42,
+			Timestamp:           1000,
+			Addr:                nil, // nil address
 		},
 		Data: []byte("test"),
 	}
@@ -392,7 +392,7 @@ func TestMuxHandshakeDropWhenFull(t *testing.T) {
 	// Flood with handshake packets (destSocketID=0) to fill the handshake channel (128)
 	var raw [packet.HeaderSize + 48]byte
 	binary.BigEndian.PutUint16(raw[0:], 0x8000) // control, type=HANDSHAKE
-	binary.BigEndian.PutUint32(raw[12:], 0)      // dest socket ID = 0
+	binary.BigEndian.PutUint32(raw[12:], 0)     // dest socket ID = 0
 
 	for i := 0; i < 200; i++ {
 		binary.BigEndian.PutUint32(raw[8:], uint32(i)) // vary timestamp

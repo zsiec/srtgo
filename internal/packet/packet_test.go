@@ -1272,7 +1272,7 @@ func TestCIFHandshakeGroupExtension(t *testing.T) {
 		},
 		HasGroup:    true,
 		GroupID:     0xDEAD0001,
-		GroupType:   2,  // backup
+		GroupType:   2, // backup
 		GroupFlags:  0,
 		GroupWeight: 50,
 	}
@@ -1426,15 +1426,15 @@ func TestCIFHandshakeUnmarshalNonConclusionEarlyReturn(t *testing.T) {
 func TestCIFHandshakeConclusionNoExtensions(t *testing.T) {
 	// Build raw 48 bytes with v5 CONCLUSION but ExtensionField=0
 	data := make([]byte, 48)
-	binary.BigEndian.PutUint32(data[0:], 5)          // version 5
-	binary.BigEndian.PutUint16(data[4:], 0)          // encryption
-	binary.BigEndian.PutUint16(data[6:], 0)          // extension field = 0
-	binary.BigEndian.PutUint32(data[8:], 100)        // ISN
-	binary.BigEndian.PutUint32(data[12:], 1500)      // MTU
-	binary.BigEndian.PutUint32(data[16:], 8192)      // FC
+	binary.BigEndian.PutUint32(data[0:], 5)           // version 5
+	binary.BigEndian.PutUint16(data[4:], 0)           // encryption
+	binary.BigEndian.PutUint16(data[6:], 0)           // extension field = 0
+	binary.BigEndian.PutUint32(data[8:], 100)         // ISN
+	binary.BigEndian.PutUint32(data[12:], 1500)       // MTU
+	binary.BigEndian.PutUint32(data[16:], 8192)       // FC
 	binary.BigEndian.PutUint32(data[20:], 0xFFFFFFFF) // CONCLUSION
-	binary.BigEndian.PutUint32(data[24:], 1)         // SRT socket ID
-	binary.BigEndian.PutUint32(data[28:], 0)         // cookie
+	binary.BigEndian.PutUint32(data[24:], 1)          // SRT socket ID
+	binary.BigEndian.PutUint32(data[28:], 0)          // cookie
 	copy(data[32:], net.IPv4(127, 0, 0, 1).To4())
 
 	parsed := &CIFHandshake{}
@@ -1523,9 +1523,9 @@ func TestCIFHandshakeDuplicateExtension(t *testing.T) {
 func TestCIFHandshakeHSExtWrongLength(t *testing.T) {
 	// Build a CONCLUSION and manually add an HSREQ with wrong length (8 instead of 12)
 	data := make([]byte, 48)
-	binary.BigEndian.PutUint32(data[0:], 5)          // version 5
-	binary.BigEndian.PutUint16(data[4:], 0)          // encryption
-	binary.BigEndian.PutUint16(data[6:], 1)          // extension field: HasHS
+	binary.BigEndian.PutUint32(data[0:], 5)           // version 5
+	binary.BigEndian.PutUint16(data[4:], 0)           // encryption
+	binary.BigEndian.PutUint16(data[6:], 1)           // extension field: HasHS
 	binary.BigEndian.PutUint32(data[20:], 0xFFFFFFFF) // CONCLUSION
 	copy(data[32:], net.IPv4(127, 0, 0, 1).To4())
 
@@ -1787,9 +1787,9 @@ func TestParseControlPacketNoPayload(t *testing.T) {
 func TestCIFHandshakeStreamIDTooLong(t *testing.T) {
 	// Build a CONCLUSION with an oversized SID extension
 	data := make([]byte, 48)
-	binary.BigEndian.PutUint32(data[0:], 5)          // version 5
-	binary.BigEndian.PutUint16(data[4:], 0)          // encryption
-	binary.BigEndian.PutUint16(data[6:], 4)          // extension field: config
+	binary.BigEndian.PutUint32(data[0:], 5)           // version 5
+	binary.BigEndian.PutUint16(data[4:], 0)           // encryption
+	binary.BigEndian.PutUint16(data[6:], 4)           // extension field: config
 	binary.BigEndian.PutUint32(data[20:], 0xFFFFFFFF) // CONCLUSION
 	copy(data[32:], net.IPv4(127, 0, 0, 1).To4())
 
@@ -1978,12 +1978,12 @@ func TestCIFKeyMaterialDataTooShortForSalt(t *testing.T) {
 	data := make([]byte, 24)
 	data[0] = 0x12 // S=0, V=1, PT=2
 	binary.BigEndian.PutUint16(data[1:], 0x2029)
-	data[3] = 0x01  // KF=even
-	data[8] = 2     // CTR
-	data[9] = 0     // auth=0
-	data[10] = 2    // SE=2
-	data[14] = 4    // SLen=16
-	data[15] = 4    // KLen=16
+	data[3] = 0x01 // KF=even
+	data[8] = 2    // CTR
+	data[9] = 0    // auth=0
+	data[10] = 2   // SE=2
+	data[14] = 4   // SLen=16
+	data[15] = 4   // KLen=16
 
 	km := &CIFKeyMaterial{}
 	if err := km.UnmarshalCIF(data); err == nil {

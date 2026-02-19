@@ -4023,10 +4023,10 @@ func TestConnHandleKMResponse_ErrorCodes(t *testing.T) {
 
 	// 4-byte KMRSP with error code (e.g., SRT_KM_S_BADSECRET=4)
 	tests := []struct {
-		name     string
-		kmState  int32
-		wantSnd  int32
-		wantRcv  int32
+		name    string
+		kmState int32
+		wantSnd int32
+		wantRcv int32
 	}{
 		{"nosecret", 3, 3, 3},
 		{"badsecret", 4, 4, 4},

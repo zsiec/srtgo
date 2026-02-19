@@ -782,10 +782,10 @@ func TestFileCCRateIncreaseLowB(t *testing.T) {
 
 	cc.mu.Lock()
 	cc.slowStart = false
-	cc.sndPeriod = 10.0  // very fast — rate > available BW
+	cc.sndPeriod = 10.0 // very fast — rate > available BW
 	cc.rtt = 50_000
 	cc.deliveryRate = 5000
-	cc.bwEstimate = 100  // very low estimate
+	cc.bwEstimate = 100 // very low estimate
 	cc.lastDecPeriod = 10.0
 	cc.lastAck = 100
 	cc.loss = false

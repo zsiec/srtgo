@@ -468,9 +468,9 @@ func TestHandleConclusionGroupReject(t *testing.T) {
 		HasCongestion:  true,
 		CongestionType: "live",
 		HasGroup:       true,
-		GroupID:         42,
-		GroupType:       1, // broadcast
-		GroupWeight:     0,
+		GroupID:        42,
+		GroupType:      1, // broadcast
+		GroupWeight:    0,
 	}
 
 	cifData, _ := hs.MarshalCIF()
@@ -542,9 +542,9 @@ func TestHandleConclusionGroupBalancingReject(t *testing.T) {
 		HasCongestion:  true,
 		CongestionType: "live",
 		HasGroup:       true,
-		GroupID:         42,
-		GroupType:       uint8(GroupBalancing),
-		GroupWeight:     0,
+		GroupID:        42,
+		GroupType:      uint8(GroupBalancing),
+		GroupWeight:    0,
 	}
 
 	cifData, _ := hs.MarshalCIF()

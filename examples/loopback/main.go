@@ -36,8 +36,8 @@ func main() {
 	// --- Listener ---
 
 	cfg := srt.DefaultConfig()
-	cfg.TransType = srt.TransTypeFile   // reliable delivery, no packet drops
-	cfg.MaxBW = 1_000_000_000 / 8       // 1 Gbps
+	cfg.TransType = srt.TransTypeFile // reliable delivery, no packet drops
+	cfg.MaxBW = 1_000_000_000 / 8     // 1 Gbps
 	cfg.ConnTimeout = 5 * time.Second
 
 	ln, err := srt.Listen("127.0.0.1:0", cfg)
