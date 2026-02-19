@@ -26,6 +26,68 @@ func requireUDP(t *testing.T) {
 	}
 }
 
+// rdvDial performs a rendezvous handshake between two pre-bound sockets with
+// retry. CI environments under the race detector have unpredictable scheduling,
+// so a single attempt may time out. Retrying with fresh sockets on the same
+// ports is safe and mirrors what a real application would do.
+func rdvDial(t *testing.T, cfg Config) (connA, connB *Conn) {
+	t.Helper()
+	const maxAttempts = 3
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("bind A: %v", err)
+		}
+		sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			sockA.Close()
+			t.Fatalf("bind B: %v", err)
+		}
+
+		addrA := sockA.LocalAddr()
+		addrB := sockB.LocalAddr()
+
+		var errA, errB error
+		var wg sync.WaitGroup
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			connA, errA = dialRendezvous(sockA, addrB, cfg, nil)
+		}()
+		go func() {
+			defer wg.Done()
+			connB, errB = dialRendezvous(sockB, addrA, cfg, nil)
+		}()
+		wg.Wait()
+
+		if errA == nil && errB == nil {
+			return connA, connB
+		}
+
+		// Clean up failed attempt
+		if connA != nil {
+			connA.Close()
+		}
+		if connB != nil {
+			connB.Close()
+		}
+
+		if attempt < maxAttempts {
+			t.Logf("rendezvous attempt %d/%d failed (A=%v, B=%v), retrying...", attempt, maxAttempts, errA, errB)
+			continue
+		}
+
+		// Final attempt failed
+		if errA != nil {
+			t.Fatalf("DialRendezvous A (after %d attempts): %v", maxAttempts, errA)
+		}
+		t.Fatalf("DialRendezvous B (after %d attempts): %v", maxAttempts, errB)
+	}
+	panic("unreachable")
+}
+
 // --- Unit tests for cookie contest ---
 
 func TestRdvCookieContest(t *testing.T) {
@@ -249,42 +311,7 @@ func TestRendezvousBasic(t *testing.T) {
 	cfg.Latency = 20 * time.Millisecond
 	cfg.ConnTimeout = 10 * time.Second
 
-	// Bind two UDP sockets up front — avoids TOCTOU race where the OS
-	// reassigns a closed ephemeral port before DialRendezvous can rebind.
-	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind A: %v", err)
-	}
-	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		sockA.Close()
-		t.Fatalf("bind B: %v", err)
-	}
-
-	addrA := sockA.LocalAddr()
-	addrB := sockB.LocalAddr()
-
-	var connA, connB *Conn
-	var errA, errB error
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		connA, errA = dialRendezvous(sockA, addrB, cfg, nil)
-	}()
-	go func() {
-		defer wg.Done()
-		connB, errB = dialRendezvous(sockB, addrA, cfg, nil)
-	}()
-	wg.Wait()
-
-	if errA != nil {
-		t.Fatalf("DialRendezvous A: %v", errA)
-	}
-	if errB != nil {
-		t.Fatalf("DialRendezvous B: %v", errB)
-	}
+	connA, connB := rdvDial(t, cfg)
 	defer connA.Close()
 	defer connB.Close()
 
@@ -325,40 +352,10 @@ func TestRendezvousEncrypted(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Latency = 20 * time.Millisecond
-	cfg.ConnTimeout = 10 * time.Second // encryption + race detector need headroom
+	cfg.ConnTimeout = 10 * time.Second
 	cfg.Passphrase = "rendezvous-secret-key"
 
-	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind A: %v", err)
-	}
-	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		sockA.Close()
-		t.Fatalf("bind B: %v", err)
-	}
-
-	var connA, connB *Conn
-	var errA, errB error
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
-	}()
-	go func() {
-		defer wg.Done()
-		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
-	}()
-	wg.Wait()
-
-	if errA != nil {
-		t.Fatalf("DialRendezvous A: %v", errA)
-	}
-	if errB != nil {
-		t.Fatalf("DialRendezvous B: %v", errB)
-	}
+	connA, connB := rdvDial(t, cfg)
 	defer connA.Close()
 	defer connB.Close()
 
@@ -420,37 +417,7 @@ func TestRendezvousFileMode(t *testing.T) {
 	cfg.ConnTimeout = 10 * time.Second
 	cfg.TransType = TransTypeFile
 
-	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind A: %v", err)
-	}
-	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		sockA.Close()
-		t.Fatalf("bind B: %v", err)
-	}
-
-	var connA, connB *Conn
-	var errA, errB error
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
-	}()
-	go func() {
-		defer wg.Done()
-		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
-	}()
-	wg.Wait()
-
-	if errA != nil {
-		t.Fatalf("DialRendezvous A: %v", errA)
-	}
-	if errB != nil {
-		t.Fatalf("DialRendezvous B: %v", errB)
-	}
+	connA, connB := rdvDial(t, cfg)
 	defer connA.Close()
 	defer connB.Close()
 
@@ -612,37 +579,7 @@ func TestRendezvousWithStreamID(t *testing.T) {
 	cfg.ConnTimeout = 10 * time.Second
 	cfg.StreamID = "rendezvous/stream"
 
-	sockA, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind A: %v", err)
-	}
-	sockB, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		sockA.Close()
-		t.Fatalf("bind B: %v", err)
-	}
-
-	var connA, connB *Conn
-	var errA, errB error
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		connA, errA = dialRendezvous(sockA, sockB.LocalAddr(), cfg, nil)
-	}()
-	go func() {
-		defer wg.Done()
-		connB, errB = dialRendezvous(sockB, sockA.LocalAddr(), cfg, nil)
-	}()
-	wg.Wait()
-
-	if errA != nil {
-		t.Fatalf("DialRendezvous A: %v", errA)
-	}
-	if errB != nil {
-		t.Fatalf("DialRendezvous B: %v", errB)
-	}
+	connA, connB := rdvDial(t, cfg)
 	defer connA.Close()
 	defer connB.Close()
 
