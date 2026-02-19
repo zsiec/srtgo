@@ -12,9 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sync"
-	"time"
 
 	"github.com/zsiec/srtgo/internal/packet"
 )
@@ -133,34 +131,28 @@ func (m *Mux) LocalAddr() net.Addr {
 
 // readLoop is the single goroutine that reads from the UDP socket and
 // dispatches packets to registered connections.
+//
+// Shutdown: Close() calls m.conn.Close() which unblocks ReadFrom with
+// a "use of closed connection" error. No SetReadDeadline overhead.
 func (m *Mux) readLoop() {
 	defer close(m.done)
 
 	buf := make([]byte, m.mss)
 
 	for {
-		// Check for shutdown
-		select {
-		case <-m.ctx.Done():
-			return
-		default:
-		}
-
-		// Set a read deadline so we can periodically check for shutdown
-		m.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-
 		n, addr, err := m.conn.ReadFrom(buf)
 		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
-			}
-			// Check if we're shutting down
+			// Socket closed or context cancelled — clean shutdown
 			select {
 			case <-m.ctx.Done():
 				return
 			default:
 			}
-			// Unexpected error; log and continue.
+			// Check for closed socket (conn.Close was called)
+			if isClosedErr(err) {
+				return
+			}
+			// Transient error — continue
 			continue
 		}
 
@@ -195,4 +187,10 @@ func (m *Mux) readLoop() {
 			p.Release()
 		}
 	}
+}
+
+// isClosedErr returns true if err indicates a closed network connection.
+func isClosedErr(err error) bool {
+	// net.ErrClosed was added in Go 1.16
+	return errors.Is(err, net.ErrClosed)
 }
