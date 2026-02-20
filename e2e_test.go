@@ -183,13 +183,13 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
 	listenerCfg.ConnTimeout = 30 * time.Second // PBKDF2 + race detector needs headroom
-	listenerCfg.MaxBW = 50_000_000 // 400 Mbps — enough for correctness, fast under -race
+	listenerCfg.MaxBW = 50_000_000             // 400 Mbps — enough for correctness, fast under -race
 	listenerCfg.Passphrase = passphrase
 
 	dialerCfg := DefaultConfig()
 	dialerCfg.Latency = 20 * time.Millisecond
 	dialerCfg.ConnTimeout = 30 * time.Second // PBKDF2 + race detector needs headroom
-	dialerCfg.MaxBW = 50_000_000 // 400 Mbps
+	dialerCfg.MaxBW = 50_000_000             // 400 Mbps
 	dialerCfg.Passphrase = passphrase
 
 	server, client := e2eSetup(t, listenerCfg, dialerCfg)
