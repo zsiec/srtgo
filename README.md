@@ -369,6 +369,7 @@ The [`examples/`](examples/) directory contains runnable demos:
 | [receiver](examples/receiver) | Listens for a connection and writes received data to stdout | `go run ./examples/receiver -addr :4200` |
 | [filetransfer](examples/filetransfer) | Reliable file transfer using file mode | `go run ./examples/filetransfer -mode send -file data.bin` |
 | [server](examples/server) | Server framework with publish/subscribe routing | `go run ./examples/server` |
+| [interop](examples/interop) | Media relay for interop testing with FFmpeg, VLC, and C++ SRT tools | `go run ./examples/interop` |
 
 Start with `loopback` to verify everything works — it requires no setup:
 
@@ -393,6 +394,42 @@ Transfer complete
   Received:    7202 packets (10485760 bytes)
   Retransmits: 0
   Integrity:   SHA-256 verified
+```
+
+## Testing
+
+### Unit Tests
+
+```bash
+go test -race -count=1 -timeout 120s ./...
+```
+
+### Interop Tests
+
+The interop test suite validates srtgo against the C++ reference implementation (`srt-live-transmit`). Tests cover live and file modes, encryption, FEC, stream IDs, payload sizes, statistics, and more across both Go-to-C++ and C++-to-Go directions.
+
+Requires `srt-tools` to be installed:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install srt-tools
+
+# macOS
+brew install srt
+```
+
+Run the interop tests:
+
+```bash
+go test -tags interop -run TestInterop -v -count=1 -timeout 600s
+```
+
+Interop tests run automatically in CI on both Ubuntu and macOS.
+
+### Benchmarks
+
+```bash
+go test -bench=. -benchmem ./...
 ```
 
 ## Contributing
