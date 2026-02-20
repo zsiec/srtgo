@@ -3506,9 +3506,12 @@ func TestRetransmitAlgoTimingGate(t *testing.T) {
 	np2.MarshalCIF(nak)
 	c.handleNAK(np2)
 
-	// With timing gate, the retransmit may be suppressed because the
+	// With timing gate, the retransmit should be suppressed because the
 	// rexmitTime was just set. The timing gate checks if lastRexmit >= timeNAK.
 	// Since we just retransmitted, it should be suppressed.
+	if c.retransCount.Load() != retransBefore {
+		t.Error("second NAK should be suppressed by timing gate")
+	}
 }
 
 func TestRetransmitAlgoImmediate(t *testing.T) {
