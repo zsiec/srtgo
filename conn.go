@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +37,6 @@ const (
 	defaultMinNAKInterval = 300 * time.Millisecond // initial minimum NAK interval (overridden by CC)
 	minExpInterval        = 300 * time.Millisecond // minimum EXP interval per SRT spec
 	maxExpCount           = 16                     // COMM_RESPONSE_MAX_EXP
-	pacingSpinThresholdUS = 200                    // below this (µs), use Gosched instead of time.Sleep
 )
 
 // watchChannels holds the mirror channels for Watcher integration.
@@ -1265,20 +1263,7 @@ func (c *Conn) sendPacket(p packet.Packet, dataLen int) error {
 	return nil
 }
 
-// pacingSleep waits for the given number of microseconds. For short waits
-// (below pacingSpinThresholdUS), it yields the goroutine via runtime.Gosched()
-// which takes ~5-20µs — much less than time.Sleep's ~50µs minimum on macOS.
-// For longer waits, it uses time.Sleep which is more CPU-efficient.
-func pacingSleep(us int64) {
-	if us <= 0 {
-		return
-	}
-	if us < pacingSpinThresholdUS {
-		runtime.Gosched()
-		return
-	}
-	time.Sleep(time.Duration(us) * time.Microsecond)
-}
+// pacingSleep is defined in pacing.go (native) and pacing_js.go (WASM).
 
 // sendFECPackets emits pending FEC control packets from the sender.
 // FEC packets share the last data packet's seqno and have MessageNumber=0,
