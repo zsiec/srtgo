@@ -17,11 +17,11 @@ const (
 	CtrlTypeKeepalive CtrlType = 0x0001
 	CtrlTypeACK       CtrlType = 0x0002
 	CtrlTypeNAK       CtrlType = 0x0003
-	CtrlTypeWarn      CtrlType = 0x0004 // unused
+	CtrlTypeWarn      CtrlType = 0x0004 // reserved for future use
 	CtrlTypeShutdown  CtrlType = 0x0005
 	CtrlTypeACKACK    CtrlType = 0x0006
-	CtrlTypeDropReq   CtrlType = 0x0007 // unused
-	CtrlTypePeerError CtrlType = 0x0008 // unused
+	CtrlTypeDropReq   CtrlType = 0x0007
+	CtrlTypePeerError CtrlType = 0x0008
 	CtrlTypeUser      CtrlType = 0x7FFF
 )
 

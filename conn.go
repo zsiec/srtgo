@@ -190,6 +190,7 @@ type Conn struct {
 	lightACKCount   atomic.Int32  // escalating lite ACK threshold multiplier
 	peerActivity    atomic.Uint64 // bumped on any received packet (data or control) for timeout
 	peerHealth      atomic.Bool   // false when PEERERROR received
+	peerErrorCode   atomic.Uint32 // error code from last PEERERROR (e.g. 4000 = filesystem)
 	lastRecvSnap    uint64        // snapshot of peerActivity for timeout detection
 	lastACKACKTime  atomic.Int64  // timestamp (UnixNano) of last ACKACK sent (for 10ms throttle)
 	lastACKACKSeq   atomic.Uint32 // ACK seqno of last ACKACK sent (retransmit if same comes again)
@@ -874,8 +875,11 @@ func (c *Conn) Write(b []byte) (int, error) {
 	default:
 	}
 
-	// Check peer health before sending.
+	// Check peer health before sending (one-shot: reset after reporting).
+	// Matches C++ m_bPeerHealth behavior: the flag is cleared once so the
+	// application gets exactly one ErrPeerError and can then retry or close.
 	if !c.peerHealth.Load() {
+		c.peerHealth.Store(true)
 		return 0, ErrPeerError
 	}
 
@@ -1795,9 +1799,11 @@ func (c *Conn) handleControlPacket(p packet.Packet) {
 			c.handleKMResponse(p)
 		}
 	case packet.CtrlTypePeerError:
-		//: UMSG_PEERERROR sets = false.
-		// This indicates the peer has hit an unrecoverable error. We mark
-		// peer health as false; send operations should check this flag.
+		// UMSG_PEERERROR: the peer hit an unrecoverable error (e.g. filesystem
+		// failure during file transfer). Store the error code for diagnostics
+		// and mark peer health as false so Write returns ErrPeerError.
+		// The error code is in the TypeSpecific field (C++ SRT_PH_MSGNO).
+		c.peerErrorCode.Store(p.Header.TypeSpecific)
 		c.peerHealth.Store(false)
 	case packet.CtrlTypeShutdown:
 		c.setShutdownErr(ErrPeerShutdown)
@@ -2366,6 +2372,18 @@ func (c *Conn) sendDropReq(firstSeq, lastSeq uint32) {
 	dp.Release()
 }
 
+// sendPeerError sends a PEERERROR control packet to the peer, signaling an
+// unrecoverable processing error (e.g. filesystem write failure during file
+// transfer). The error code is carried in the TypeSpecific field per the
+// SRT spec (Section 3.2.10). This unblocks the sender from waiting for
+// further responses.
+func (c *Conn) sendPeerError(errorCode uint32) {
+	p := packet.NewControl(c.remoteAddr, packet.CtrlTypePeerError, c.peerSocketID, c.clk.Now().SRTTimestamp())
+	p.Header.TypeSpecific = errorCode
+	c.m.Send(p)
+	p.Release()
+}
+
 func (c *Conn) handleACKACK(p packet.Packet) {
 	c.recvACKACKs.Add(1)
 	// ACKACK echoes the ACK sequence number in TypeSpecific.
@@ -2898,6 +2916,15 @@ func (c *Conn) freshLossRemove(sequence uint32) int {
 		return hadTTL
 	}
 	return 0
+}
+
+// SendPeerError sends a PEERERROR control packet to the peer, signaling an
+// unrecoverable processing error. This unblocks the peer's send operations.
+// The errorCode is carried in the TypeSpecific header field per the SRT
+// specification (Section 3.2.10). Use PeerErrorFileSystem (4000) for
+// filesystem errors during file transfer.
+func (c *Conn) SendPeerError(errorCode uint32) {
+	c.sendPeerError(errorCode)
 }
 
 // SendKeepAlive sends an immediate keepalive to the peer.
