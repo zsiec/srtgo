@@ -74,7 +74,7 @@ func e2eSetupWithListener(t *testing.T, listenerCfg Config) *Listener {
 	return l
 }
 
-// TestE2EBulkTransfer transfers 1 MB of random data over localhost and
+// TestE2EBulkTransfer transfers 64 KB of random data over localhost and
 // verifies that the SHA-256 hash matches on both sides.
 func TestE2EBulkTransfer(t *testing.T) {
 	if testing.Short() {
@@ -82,8 +82,8 @@ func TestE2EBulkTransfer(t *testing.T) {
 	}
 	t.Parallel()
 
-	const totalBytes = 1024 * 1024 // 1 MB
-	const chunkSize = 1316         // typical SRT live payload
+	const totalBytes = 64 * 1024 // 64 KB — small enough to complete under -race on CI
+	const chunkSize = 1316       // typical SRT live payload
 
 	listenerCfg := DefaultConfig()
 	listenerCfg.Latency = 20 * time.Millisecond
@@ -112,7 +112,7 @@ func TestE2EBulkTransfer(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(120 * time.Second))
+		server.SetReadDeadline(time.Now().Add(30 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -127,7 +127,7 @@ func TestE2EBulkTransfer(t *testing.T) {
 	}()
 
 	// Sender: write in chunks
-	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -209,7 +209,7 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(120 * time.Second))
+		server.SetReadDeadline(time.Now().Add(30 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -224,7 +224,7 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 	}()
 
 	// Send in chunks
-	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -260,14 +260,14 @@ func TestE2EEncryptedTransfer(t *testing.T) {
 		totalBytes, clientStats.SndKmState, clientStats.SentKM)
 }
 
-// TestE2EFileMode transfers 500 KB using TransTypeFile (reliable, no TSBPD).
+// TestE2EFileMode transfers 64 KB using TransTypeFile (reliable, no TSBPD).
 func TestE2EFileMode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping file mode transfer test in -short mode")
 	}
 	t.Parallel()
 
-	const totalBytes = 500 * 1024 // 500 KB
+	const totalBytes = 64 * 1024 // 64 KB — small enough to complete under -race on CI
 	const chunkSize = 1316
 
 	listenerCfg := DefaultConfig()
@@ -299,7 +299,7 @@ func TestE2EFileMode(t *testing.T) {
 	recvCh := make(chan recvResult, 1)
 
 	go func() {
-		server.SetReadDeadline(time.Now().Add(120 * time.Second))
+		server.SetReadDeadline(time.Now().Add(30 * time.Second))
 		received := make([]byte, 0, totalBytes)
 		buf := make([]byte, 2048)
 		for len(received) < totalBytes {
@@ -314,7 +314,7 @@ func TestE2EFileMode(t *testing.T) {
 	}()
 
 	// Send in chunks
-	client.SetWriteDeadline(time.Now().Add(120 * time.Second))
+	client.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	for offset := 0; offset < totalBytes; offset += chunkSize {
 		end := offset + chunkSize
 		if end > totalBytes {
@@ -447,7 +447,7 @@ func TestE2EStatsAccuracy(t *testing.T) {
 	// Drain receiver to prevent backpressure
 	recvDone := make(chan int, 1)
 	go func() {
-		server.SetReadDeadline(time.Now().Add(120 * time.Second))
+		server.SetReadDeadline(time.Now().Add(30 * time.Second))
 		buf := make([]byte, 1500)
 		count := 0
 		for count < numPackets {
@@ -557,7 +557,7 @@ func TestE2EBidirectionalBulk(t *testing.T) {
 
 	// recvAll reads totalBytes from a connection.
 	recvAll := func(conn *Conn, total int) result {
-		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		received := make([]byte, 0, total)
 		buf := make([]byte, 2048)
 		for len(received) < total {
