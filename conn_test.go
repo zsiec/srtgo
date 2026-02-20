@@ -4360,13 +4360,118 @@ func TestConnHandleControlPacket_PeerError(t *testing.T) {
 		t.Fatal("peerHealth should start as true")
 	}
 
-	// Send a PEERERROR control packet
+	// Send a PEERERROR control packet with filesystem error code
 	p := packet.NewControl(c.localAddr, packet.CtrlTypePeerError, c.socketID, 0)
+	p.Header.TypeSpecific = PeerErrorFileSystem
 	c.handleControlPacket(p)
 
 	// peerHealth should now be false
 	if c.peerHealth.Load() {
 		t.Error("peerHealth should be false after PEERERROR")
+	}
+
+	// Error code should be stored
+	if code := c.peerErrorCode.Load(); code != PeerErrorFileSystem {
+		t.Errorf("peerErrorCode = %d, want %d", code, PeerErrorFileSystem)
+	}
+}
+
+func TestConnHandleControlPacket_PeerErrorCustomCode(t *testing.T) {
+	c, _ := testSingleConn(t)
+
+	// Send a PEERERROR with a non-standard error code
+	p := packet.NewControl(c.localAddr, packet.CtrlTypePeerError, c.socketID, 0)
+	p.Header.TypeSpecific = 9999
+	c.handleControlPacket(p)
+
+	if c.peerHealth.Load() {
+		t.Error("peerHealth should be false after PEERERROR")
+	}
+	if code := c.peerErrorCode.Load(); code != 9999 {
+		t.Errorf("peerErrorCode = %d, want 9999", code)
+	}
+}
+
+func TestConnSendPeerError(t *testing.T) {
+	c, m := testSingleConn(t)
+
+	// Create a second UDP socket to receive the PEERERROR packet
+	peerAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	peerConn, err := net.ListenUDP("udp", peerAddr)
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer peerConn.Close()
+
+	// Point our conn at the peer
+	c.remoteAddr = peerConn.LocalAddr()
+	_ = m // keep mux alive
+
+	// Send PEERERROR
+	c.sendPeerError(PeerErrorFileSystem)
+
+	// Read the packet from the peer side
+	buf := make([]byte, 1500)
+	peerConn.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := peerConn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+
+	// Parse the received packet
+	var hdr packet.Header
+	if err := hdr.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("Unmarshal header: %v", err)
+	}
+
+	if !hdr.IsControl {
+		t.Fatal("expected control packet")
+	}
+	if hdr.ControlType != packet.CtrlTypePeerError {
+		t.Errorf("ControlType = %v, want CtrlTypePeerError", hdr.ControlType)
+	}
+	if hdr.TypeSpecific != PeerErrorFileSystem {
+		t.Errorf("TypeSpecific = %d, want %d (PeerErrorFileSystem)", hdr.TypeSpecific, PeerErrorFileSystem)
+	}
+	if hdr.DestinationSocketID != c.peerSocketID {
+		t.Errorf("DestinationSocketID = %d, want %d", hdr.DestinationSocketID, c.peerSocketID)
+	}
+}
+
+func TestConnSendPeerErrorPublicAPI(t *testing.T) {
+	c, m := testSingleConn(t)
+
+	// Create a peer to receive the packet
+	peerAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	peerConn, err := net.ListenUDP("udp", peerAddr)
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer peerConn.Close()
+
+	c.remoteAddr = peerConn.LocalAddr()
+	_ = m
+
+	// Use the public API
+	c.SendPeerError(PeerErrorFileSystem)
+
+	buf := make([]byte, 1500)
+	peerConn.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := peerConn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+
+	var hdr packet.Header
+	if err := hdr.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("Unmarshal header: %v", err)
+	}
+
+	if hdr.ControlType != packet.CtrlTypePeerError {
+		t.Errorf("ControlType = %v, want CtrlTypePeerError", hdr.ControlType)
+	}
+	if hdr.TypeSpecific != PeerErrorFileSystem {
+		t.Errorf("TypeSpecific = %d, want %d", hdr.TypeSpecific, PeerErrorFileSystem)
 	}
 }
 
@@ -4886,6 +4991,12 @@ func TestConnWritePeerHealthCheck(t *testing.T) {
 	}
 	if err != nil && err.Error() != "srt: peer error" {
 		t.Errorf("unexpected error: %v", err)
+	}
+
+	// One-shot behavior (matching C++): after reporting the error once,
+	// peerHealth resets to true so the next Write attempt can proceed.
+	if !c.peerHealth.Load() {
+		t.Error("peerHealth should be reset to true after one-shot error report")
 	}
 }
 

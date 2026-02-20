@@ -48,6 +48,16 @@ const (
 	RejXUnavailable   = packet.HandshakeType(1503) // service unavailable
 )
 
+// Peer error codes sent via PEERERROR control packets (Section 3.2.10).
+// The error code is carried in the TypeSpecific field of the control header.
+const (
+	// PeerErrorFileSystem indicates a filesystem error on the peer (e.g. disk
+	// write failure during file transfer). This is the only error code defined
+	// in the SRT specification and the C++ reference implementation.
+	// Matches C++ CUDTException::EFILE = MJ_FILESYSTEM * 1000 = 4000.
+	PeerErrorFileSystem uint32 = 4000
+)
+
 // RejectReason is a type alias for rejection codes used in AcceptRejectFunc.
 type RejectReason = packet.HandshakeType
 
