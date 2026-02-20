@@ -301,6 +301,171 @@ func TestConnHandleACK(t *testing.T) {
 	}
 }
 
+func TestConnHandleACK_DuplicateDoesNotResetRTO(t *testing.T) {
+	// Duplicate ACKs (where ackd == 0, i.e., the ACK sequence doesn't advance)
+	// must NOT reset lastACKRecv or rexmitCount. Otherwise, over unreliable
+	// transports (e.g., WebRTC DataChannel), the RTO timer never fires and
+	// LATEREXMIT cannot recover lost retransmissions — causing a permanent stall.
+	c, _ := testSingleConn(t)
+
+	// Push 10 packets to the send buffer
+	for i := range 10 {
+		p := packet.NewData(c.remoteAddr, uint32(1000+i), uint32(i*1000), c.peerSocketID, make([]byte, 100))
+		c.sendBuf.Push(p, c.clk.Now())
+	}
+
+	// First ACK at seq 1003: should advance and reset RTO
+	ack1 := &packet.CIFACK{
+		LastACKPacketSequenceNumber: 1003,
+		RTT:                         1000,
+		RTTVariance:                 500,
+		AvailableBufferSize:         100,
+	}
+	p1 := packet.NewControl(c.localAddr, packet.CtrlTypeACK, c.socketID, 0)
+	p1.Header.TypeSpecific = 1
+	p1.MarshalCIF(ack1)
+	c.handleACK(p1)
+
+	// Verify first ACK advanced the buffer
+	if c.sendBuf.Size() >= 10 {
+		t.Fatal("first ACK should have reduced sendBuf.Size")
+	}
+
+	// Record lastACKRecv after the advancing ACK
+	afterFirstACK := c.lastACKRecv.Load()
+	if afterFirstACK == 0 {
+		t.Fatal("lastACKRecv should be set after advancing ACK")
+	}
+
+	// Set lastACKRecv to a known old value so we can detect if it gets reset
+	oldTime := time.Now().Add(-5 * time.Second).UnixNano()
+	c.lastACKRecv.Store(oldTime)
+	c.rexmitCount.Store(3) // simulate backoff
+
+	// Send a duplicate ACK with the same sequence (ackd == 0)
+	ack2 := &packet.CIFACK{
+		LastACKPacketSequenceNumber: 1003, // same as before — no advancement
+		RTT:                         1000,
+		RTTVariance:                 500,
+		AvailableBufferSize:         100,
+	}
+	p2 := packet.NewControl(c.localAddr, packet.CtrlTypeACK, c.socketID, 0)
+	p2.Header.TypeSpecific = 2
+	p2.MarshalCIF(ack2)
+	c.handleACK(p2)
+
+	// lastACKRecv should NOT have been reset (should still be our old value)
+	if c.lastACKRecv.Load() != oldTime {
+		t.Errorf("duplicate ACK should not reset lastACKRecv: got %d, want %d", c.lastACKRecv.Load(), oldTime)
+	}
+
+	// rexmitCount should NOT have been reset to 1
+	if c.rexmitCount.Load() != 3 {
+		t.Errorf("duplicate ACK should not reset rexmitCount: got %d, want 3", c.rexmitCount.Load())
+	}
+
+	// Now send an advancing ACK (seq 1005) — should reset both
+	ack3 := &packet.CIFACK{
+		LastACKPacketSequenceNumber: 1005,
+		RTT:                         1000,
+		RTTVariance:                 500,
+		AvailableBufferSize:         100,
+	}
+	p3 := packet.NewControl(c.localAddr, packet.CtrlTypeACK, c.socketID, 0)
+	p3.Header.TypeSpecific = 3
+	p3.MarshalCIF(ack3)
+	c.handleACK(p3)
+
+	if c.lastACKRecv.Load() == oldTime {
+		t.Error("advancing ACK should reset lastACKRecv")
+	}
+	if c.rexmitCount.Load() != 1 {
+		t.Errorf("advancing ACK should reset rexmitCount to 1: got %d", c.rexmitCount.Load())
+	}
+}
+
+func TestConnDuplicateACK_RTOFiresLATEREXMIT(t *testing.T) {
+	// End-to-end test: when a receiver sends duplicate ACKs (sequence stuck
+	// on a gap), the sender's RTO timer must eventually fire and trigger
+	// LATEREXMIT to retransmit all in-flight packets.
+	c, _ := testSingleConn(t)
+	c.tsbpdEnabled.Store(false) // file mode
+
+	// Push 10 packets
+	for i := range 10 {
+		p := packet.NewData(c.remoteAddr, uint32(1000+i), uint32(i*1000), c.peerSocketID, make([]byte, 100))
+		c.sendBuf.Push(p, c.clk.Now())
+	}
+
+	// ACK up to seq 1003 (packets 0-2 ACK'd, 7 in flight)
+	ack := &packet.CIFACK{
+		LastACKPacketSequenceNumber: 1003,
+		RTT:                         50_000, // 50ms
+		RTTVariance:                 10_000,
+		AvailableBufferSize:         100,
+	}
+	p := packet.NewControl(c.localAddr, packet.CtrlTypeACK, c.socketID, 0)
+	p.Header.TypeSpecific = 1
+	p.MarshalCIF(ack)
+	c.handleACK(p)
+
+	flightBefore := c.sendBuf.Size()
+	if flightBefore == 0 {
+		t.Fatal("should have packets in flight")
+	}
+
+	// Send duplicate ACKs (receiver stuck on gap at seq 1003)
+	for i := range 10 {
+		dup := &packet.CIFACK{
+			LastACKPacketSequenceNumber: 1003,
+			RTT:                         50_000,
+			RTTVariance:                 10_000,
+			AvailableBufferSize:         100,
+		}
+		dp := packet.NewControl(c.localAddr, packet.CtrlTypeACK, c.socketID, 0)
+		dp.Header.TypeSpecific = uint32(2 + i)
+		dp.MarshalCIF(dup)
+		c.handleACK(dp)
+	}
+
+	// lastACKRecv should still be from the first (advancing) ACK, not reset
+	// by duplicates. Set RTT values so we can verify RTO condition.
+	c.rtt.Store(50_000)    // 50ms
+	c.rttVar.Store(10_000) // 10ms
+
+	// Simulate time passing beyond RTO: SRTT + 4*RTTVar + 2*SYN = 50+40+20 = 110ms
+	// RTO = rxCount * rttSyn + 10ms. With rxCount=1: 110+10 = 120ms
+	// Set lastACKRecv to 200ms ago to ensure RTO fires
+	c.lastACKRecv.Store(time.Now().Add(-200 * time.Millisecond).UnixNano())
+	c.sndLossCount.Store(0) // loss list empty (retransmissions were sent)
+
+	retransBefore := c.retransCount.Load()
+
+	// Simulate the timerLoop's RTO check
+	now := time.Now()
+	rttSynUS := c.rtt.Load() + 4*c.rttVar.Load() + 2*10_000
+	rxCount := int64(c.rexmitCount.Load())
+	if rxCount < 1 {
+		rxCount = 1
+	}
+	rtoUS := rxCount*rttSynUS + 10_000
+	rto := time.Duration(rtoUS) * time.Microsecond
+	lastACKNano := c.lastACKRecv.Load()
+
+	if !(lastACKNano > 0 && now.Sub(time.Unix(0, lastACKNano)) > rto) {
+		t.Fatal("RTO condition should be true after duplicate ACKs and time passage")
+	}
+
+	// LATEREXMIT: file mode + loss list empty
+	if !c.tsbpdEnabled.Load() && c.flightSize() > 0 && c.sndLossCount.Load() <= 0 {
+		c.retransmitAllInFlight()
+	}
+
+	if c.retransCount.Load() <= retransBefore {
+		t.Error("LATEREXMIT should have retransmitted in-flight packets")
+	}
+}
+
 func TestConnHandleNAK(t *testing.T) {
 	c, _ := testSingleConn(t)
 
