@@ -12,6 +12,7 @@
 # Reference implementations (development only)
 /srt-reference/
 /gosrt-reference/
+./research
 
 # IDE / OS
 .DS_Store

@@ -1432,6 +1432,7 @@ func (c *Conn) Close() error {
 		// Send shutdown control packet (skip if peer already gone or ID unknown)
 		if !peerGone && c.peerSocketID != 0 {
 			p := packet.NewControl(c.remoteAddr, packet.CtrlTypeShutdown, c.peerSocketID, c.clk.Now().SRTTimestamp())
+			p.SetData([]byte{0, 0, 0, 0}) // libsrt requires non-empty CIF (writev constraint)
 			c.m.Send(p)
 			p.Release()
 		}
@@ -2167,6 +2168,7 @@ func (c *Conn) handleACK(p packet.Packet) {
 	if sinceLastAA >= synInterval || ackSeqNoFromACK == c.lastACKACKSeq.Load() {
 		ackack := packet.NewControl(c.remoteAddr, packet.CtrlTypeACKACK, c.peerSocketID, c.clk.Now().SRTTimestamp())
 		ackack.Header.TypeSpecific = ackSeqNoFromACK
+		ackack.SetData([]byte{0, 0, 0, 0}) // libsrt requires non-empty CIF (writev constraint)
 		c.m.Send(ackack)
 		ackack.Release()
 		c.sentACKACKs.Add(1)
@@ -2876,6 +2878,7 @@ func (c *Conn) SendKeepAlive() {
 
 func (c *Conn) sendKeepAlive() {
 	p := packet.NewControl(c.remoteAddr, packet.CtrlTypeKeepalive, c.peerSocketID, c.clk.Now().SRTTimestamp())
+	p.SetData([]byte{0, 0, 0, 0}) // libsrt requires non-empty CIF (writev constraint)
 	c.m.Send(p)
 	p.Release()
 

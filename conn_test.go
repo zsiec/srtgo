@@ -4415,6 +4415,65 @@ func TestConnHandleControlPacket_KeepaliveWithGroup(t *testing.T) {
 	}
 }
 
+func TestControlPacketMinimumCIF(t *testing.T) {
+	// libsrt silently drops control packets without at least 4 bytes of CIF data.
+	// OBE discovered this: "control info field should be none but writev does not allow this."
+	// Verify our Keepalive, Shutdown, and ACKACK packets include the 4-byte CIF padding.
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234}
+	clk := clock.NewMockClock()
+	ts := clk.Now().SRTTimestamp()
+	peerSocketID := uint32(42)
+
+	tests := []struct {
+		name string
+		make func() packet.Packet
+	}{
+		{
+			name: "Keepalive",
+			make: func() packet.Packet {
+				p := packet.NewControl(addr, packet.CtrlTypeKeepalive, peerSocketID, ts)
+				p.SetData([]byte{0, 0, 0, 0})
+				return p
+			},
+		},
+		{
+			name: "Shutdown",
+			make: func() packet.Packet {
+				p := packet.NewControl(addr, packet.CtrlTypeShutdown, peerSocketID, ts)
+				p.SetData([]byte{0, 0, 0, 0})
+				return p
+			},
+		},
+		{
+			name: "ACKACK",
+			make: func() packet.Packet {
+				p := packet.NewControl(addr, packet.CtrlTypeACKACK, peerSocketID, ts)
+				p.Header.TypeSpecific = 1
+				p.SetData([]byte{0, 0, 0, 0})
+				return p
+			},
+		},
+	}
+
+	buf := make([]byte, 128)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := tt.make()
+			defer p.Release()
+
+			n, err := p.Marshal(buf)
+			if err != nil {
+				t.Fatalf("Marshal failed: %v", err)
+			}
+			minSize := packet.HeaderSize + 4 // 16-byte header + 4-byte CIF minimum
+			if n < minSize {
+				t.Errorf("%s packet wire size = %d, want >= %d (HeaderSize=%d + 4-byte CIF)",
+					tt.name, n, minSize, packet.HeaderSize)
+			}
+		})
+	}
+}
+
 func TestConnHandleDropReq_TLPktDropDisabled(t *testing.T) {
 	c, _ := testSingleConn(t)
 
