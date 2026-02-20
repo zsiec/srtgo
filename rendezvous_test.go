@@ -3,6 +3,7 @@ package srt
 import (
 	"bytes"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,17 +11,24 @@ import (
 	"github.com/zsiec/srtgo/internal/packet"
 )
 
-// requireUDP sends a single UDP packet to localhost and skips the test if the
-// OS blocks it (EPERM). This happens in CI environments where the macOS
-// Application Firewall blocks UDP sends from race-instrumented test binaries.
+// requireUDP sends a UDP packet between two different sockets on localhost and
+// skips the test if the OS blocks it (EPERM). This happens in CI environments
+// where the macOS Application Firewall blocks UDP sends from race-instrumented
+// test binaries. We probe with two sockets (not a self-send) because the
+// firewall may allow self-sends but block cross-socket traffic.
 func requireUDP(t *testing.T) {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	connA, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("skipping: cannot bind UDP: %v", err)
 	}
-	defer conn.Close()
-	_, err = conn.WriteTo([]byte("probe"), conn.LocalAddr())
+	defer connA.Close()
+	connB, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping: cannot bind second UDP socket: %v", err)
+	}
+	defer connB.Close()
+	_, err = connA.WriteTo([]byte("probe"), connB.LocalAddr())
 	if err != nil {
 		t.Skipf("skipping: UDP send blocked (CI firewall): %v", err)
 	}
@@ -72,6 +80,15 @@ func rdvDial(t *testing.T, cfg Config) (connA, connB *Conn) {
 		}
 		if connB != nil {
 			connB.Close()
+		}
+
+		// Skip immediately if the OS firewall is blocking UDP sends
+		// (macOS CI). The probe in requireUDP can pass while later
+		// sockets get blocked, so detect it here too.
+		for _, e := range []error{errA, errB} {
+			if e != nil && strings.Contains(e.Error(), "operation not permitted") {
+				t.Skipf("skipping: UDP blocked by OS firewall: %v", e)
+			}
 		}
 
 		if attempt < maxAttempts {

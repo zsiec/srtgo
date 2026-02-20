@@ -927,6 +927,38 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return len(b), nil
 	}
 
+	// Stream mode (messageAPI=false, e.g. file transfer): send each chunk as an
+	// independent PositionSingle packet through individual flow control. This
+	// avoids the atomic PushBatch requirement that can deadlock when the message
+	// size exceeds the initial congestion window.
+	if !c.messageAPI {
+		totalSent := 0
+		for i := range numPkts {
+			start := i * c.payloadSize
+			end := start + c.payloadSize
+			if end > len(b) {
+				end = len(b)
+			}
+			chunk := b[start:end]
+
+			seqNo := c.sendBuf.NextSeq()
+			ts := c.groupSrcTime.Load()
+			if ts == 0 {
+				ts = c.clk.Now().SRTTimestamp()
+			}
+			p := packet.NewData(c.remoteAddr, seqNo.Value(), ts, c.peerSocketID, chunk)
+			p.Header.MessageNumber = c.nextMessageNumber()
+			p.Header.PacketPosition = packet.PositionSingle
+			p.Header.Order = c.msgInOrder.Load()
+
+			if err := c.sendPacket(p, len(chunk)); err != nil {
+				return totalSent, err
+			}
+			totalSent += len(chunk)
+		}
+		return totalSent, nil
+	}
+
 	// Multi-packet message path: pre-fragment all packets, push atomically to
 	// send buffer, then send on wire. All fragments are inserted under a single lock.
 	pkts := make([]packet.Packet, numPkts)
