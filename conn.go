@@ -2137,8 +2137,6 @@ func (c *Conn) sendNAKForSeqs(seqs []uint32) {
 
 func (c *Conn) handleACK(p packet.Packet) {
 	c.recvACKs.Add(1)
-	c.lastACKRecv.Store(time.Now().UnixNano())
-	c.rexmitCount.Store(1)
 	var ack packet.CIFACK
 	if err := p.UnmarshalCIF(&ack); err != nil {
 		return
@@ -2169,6 +2167,14 @@ func (c *Conn) handleACK(p packet.Packet) {
 			c.sndLossCount.Store(0)
 		}
 		c.signalWriteReady()
+
+		// Only reset the retransmission timeout when the ACK actually
+		// advances the acknowledged sequence. Duplicate ACKs (ackd == 0)
+		// indicate the receiver is stuck on a gap — resetting the RTO
+		// would prevent LATEREXMIT from firing and retransmitting the
+		// lost packets that are blocking forward progress.
+		c.lastACKRecv.Store(time.Now().UnixNano())
+		c.rexmitCount.Store(1)
 	}
 
 	if isLiteACK {
