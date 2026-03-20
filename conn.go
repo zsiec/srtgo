@@ -68,7 +68,8 @@ type Conn struct {
 	ownsMux     bool // true if this connection owns the mux (client-side) and should close it
 	recvC       <-chan packet.Packet
 	clk         clock.Clock
-	payloadSize int // max data payload per packet (MSS - IP/UDP/SRT headers)
+	sndTSBase   uint32 // clock timestamp at connection creation — subtracted from outgoing timestamps
+	payloadSize int    // max data payload per packet (MSS - IP/UDP/SRT headers)
 
 	// Encryption
 	cryptoCtx  *crypto.Context
@@ -529,6 +530,7 @@ func newConn(cfg ConnConfig) *Conn {
 		m:             cfg.Mux,
 		recvC:         cfg.RecvChan,
 		clk:           cfg.Clock,
+		sndTSBase:     cfg.Clock.Now().SRTTimestamp(), // per-connection epoch for sender timestamps
 		payloadSize:   payloadSize,
 		cryptoCtx:     cfg.CryptoCtx,
 		activeKey:     cfg.ActiveKey,
@@ -914,9 +916,13 @@ func (c *Conn) Write(b []byte) (int, error) {
 	if numPkts == 1 {
 		seqNo := c.sendBuf.NextSeq()
 		// Use group-coordinated source timestamp when set, otherwise use current time.
+		// Subtract sndTSBase so timestamps start near 0 for each connection.
+		// Without this, listener connections that share a clock accumulate
+		// timestamps from listener start, causing late-connecting receivers
+		// to buffer for minutes via TSBPD.
 		ts := c.groupSrcTime.Load()
 		if ts == 0 {
-			ts = c.clk.Now().SRTTimestamp()
+			ts = c.clk.Now().SRTTimestamp() - c.sndTSBase
 		}
 		p := packet.NewData(c.remoteAddr, seqNo.Value(), ts, c.peerSocketID, b)
 		p.Header.MessageNumber = msgNo
@@ -946,7 +952,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 			seqNo := c.sendBuf.NextSeq()
 			ts := c.groupSrcTime.Load()
 			if ts == 0 {
-				ts = c.clk.Now().SRTTimestamp()
+				ts = c.clk.Now().SRTTimestamp() - c.sndTSBase
 			}
 			p := packet.NewData(c.remoteAddr, seqNo.Value(), ts, c.peerSocketID, chunk)
 			p.Header.MessageNumber = c.nextMessageNumber()
@@ -981,7 +987,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 		// Use group-coordinated source timestamp when set.
 		ts := c.groupSrcTime.Load()
 		if ts == 0 {
-			ts = c.clk.Now().SRTTimestamp()
+			ts = c.clk.Now().SRTTimestamp() - c.sndTSBase
 		}
 		p := packet.NewData(c.remoteAddr, 0, ts, c.peerSocketID, chunk)
 		p.Header.MessageNumber = msgNo
