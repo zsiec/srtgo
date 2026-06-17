@@ -85,12 +85,12 @@ func TestSimBroadcastBonding(t *testing.T) {
 	sndB, rcvB := newBondCore(mkSnd(4)), newBondCore(mkRcv(3))
 
 	sndGroup := core.NewGroup(core.GroupBroadcast)
-	sndGroup.AddMember(sndA.c)
-	sndGroup.AddMember(sndB.c)
+	sndGroup.AddMember(sndA.c, 0)
+	sndGroup.AddMember(sndB.c, 0)
 
 	rcvGroup := core.NewGroup(core.GroupBroadcast)
-	rcvGroup.AddMember(rcvA.c)
-	rcvGroup.AddMember(rcvB.c)
+	rcvGroup.AddMember(rcvA.c, 0)
+	rcvGroup.AddMember(rcvB.c, 0)
 
 	// Permanent, disjoint per-link loss: every sequence survives on at least one
 	// link, so redundancy must deliver all of them.
@@ -195,6 +195,170 @@ func TestSimBroadcastBonding(t *testing.T) {
 
 	if len(delivered) != numPayloads {
 		t.Fatalf("group delivered %d/%d payloads (redundancy failed)", len(delivered), numPayloads)
+	}
+	for i, d := range delivered {
+		if got := binary.BigEndian.Uint32(d); got != uint32(i) {
+			t.Fatalf("delivery %d out of order: got index %d", i, got)
+		}
+	}
+}
+
+// TestSimBackupFailover streams over a weighted backup group, kills the active
+// link mid-stream, and confirms the group fails over to the standby (replaying
+// its sender buffer) so every payload is still delivered in order. The high
+// TSBPD latency gives the failover window time to complete before playout.
+func TestSimBackupFailover(t *testing.T) {
+	const (
+		sharedISN    = 100
+		rcvSendISN   = 9000
+		numPayloads  = 200
+		writeEvery   = 5 * clock.Millisecond
+		tsbpd        = 2 * clock.Second        // generous buffer to cover failover
+		stab         = 150 * clock.Millisecond // quick instability detection
+		killAt       = 500 * clock.Millisecond // kill the active link partway in
+		monitorEvery = 50 * clock.Millisecond
+	)
+	base := clock.Timestamp(1_000_000)
+
+	mkSnd := func(peerID uint32) *core.Conn {
+		return core.NewEstablished(core.Config{
+			PeerSocketID: peerID, PayloadSize: simPayload,
+			SendISN: sharedISN, RecvISN: rcvSendISN, MaxBW: 1 << 34,
+		}, base)
+	}
+	mkRcv := func(peerID uint32) *core.Conn {
+		return core.NewEstablished(core.Config{
+			PeerSocketID: peerID, PayloadSize: simPayload,
+			SendISN: rcvSendISN, RecvISN: sharedISN, MaxBW: 1 << 34,
+			Live: true, TsbpdDelay: tsbpd,
+		}, base)
+	}
+	sndA, rcvA := newBondCore(mkSnd(2)), newBondCore(mkRcv(1)) // weight 10 (preferred)
+	sndB, rcvB := newBondCore(mkSnd(4)), newBondCore(mkRcv(3)) // weight 5 (standby)
+
+	sndGroup := core.NewGroup(core.GroupBackup)
+	sndGroup.SetStabilityTimeout(stab)
+	sndGroup.AddMember(sndA.c, 10)
+	sndGroup.AddMember(sndB.c, 5)
+
+	rcvGroup := core.NewGroup(core.GroupBackup)
+	rcvGroup.AddMember(rcvA.c, 10)
+	rcvGroup.AddMember(rcvB.c, 5)
+
+	var fwdA, bwdA, fwdB, bwdB []inflight
+	now := base
+	killTime := base.Add(killAt)
+
+	schedule := func(out []outDatagram, q *[]inflight, dead bool) {
+		for _, dg := range out {
+			if dead {
+				continue // link is down — drop everything
+			}
+			*q = append(*q, inflight{arrival: now.Add(linkDelay), data: dg.data})
+		}
+	}
+	drainAll := func() {
+		// Link A is killed (both directions) once now >= killTime.
+		deadA := !now.Before(killTime)
+		schedule(sndA.drainOut(), &fwdA, deadA)
+		schedule(rcvA.drainOut(), &bwdA, deadA)
+		schedule(sndB.drainOut(), &fwdB, false)
+		schedule(rcvB.drainOut(), &bwdB, false)
+	}
+
+	var delivered [][]byte
+	collect := func() {
+		rcvGroup.RouteMember(rcvA.c)
+		rcvGroup.RouteMember(rcvB.c)
+		for {
+			d, ok := rcvGroup.PollDelivery()
+			if !ok {
+				break
+			}
+			delivered = append(delivered, d)
+		}
+	}
+
+	deliverDue := func(q *[]inflight, dst *bondCore) bool {
+		pr := false
+		for len(*q) > 0 && (*q)[0].arrival <= now {
+			dg := (*q)[0]
+			*q = (*q)[1:]
+			if p, err := packet.Parse(dg.data, nil); err == nil {
+				dst.c.HandlePacket(now, p)
+			}
+			pr = true
+		}
+		return pr
+	}
+	fireTimers := func(b *bondCore) bool {
+		pr := false
+		for id, dl := range b.timers {
+			if dl <= now {
+				delete(b.timers, id)
+				b.c.HandleTimer(now, id)
+				pr = true
+			}
+		}
+		return pr
+	}
+
+	nextWrite := 0
+	nextMonitor := base.Add(monitorEvery)
+
+	const maxIter = 20_000_000
+	for iter := 0; iter < maxIter; iter++ {
+		if len(delivered) >= numPayloads {
+			break
+		}
+		// Due application writes.
+		for nextWrite < numPayloads && !base.Add(writeEvery*clock.Microseconds(nextWrite)).After(now) {
+			p := make([]byte, simPayload)
+			binary.BigEndian.PutUint32(p, uint32(nextWrite))
+			sndGroup.Write(now, p)
+			nextWrite++
+		}
+		// Due monitor tick.
+		if !nextMonitor.After(now) {
+			sndGroup.Monitor(now)
+			nextMonitor = nextMonitor.Add(monitorEvery)
+		}
+		// Settle everything due at this instant.
+		for {
+			pr := false
+			pr = deliverDue(&fwdA, rcvA) || pr
+			pr = deliverDue(&bwdA, sndA) || pr
+			pr = deliverDue(&fwdB, rcvB) || pr
+			pr = deliverDue(&bwdB, sndB) || pr
+			pr = fireTimers(sndA) || pr
+			pr = fireTimers(rcvA) || pr
+			pr = fireTimers(sndB) || pr
+			pr = fireTimers(rcvB) || pr
+			drainAll()
+			collect()
+			if !pr {
+				break
+			}
+		}
+		// Advance to the next event.
+		next, ok := earliestN(now, []*bondCore{sndA, rcvA, sndB, rcvB}, [][]inflight{fwdA, bwdA, fwdB, bwdB})
+		if nextWrite < numPayloads {
+			wt := base.Add(writeEvery * clock.Microseconds(nextWrite))
+			if !ok || wt.Before(next) {
+				next, ok = wt, true
+			}
+		}
+		if !ok || nextMonitor.Before(next) {
+			next, ok = nextMonitor, true
+		}
+		if !ok {
+			break
+		}
+		now = next
+	}
+
+	if len(delivered) != numPayloads {
+		t.Fatalf("group delivered %d/%d payloads (failover lost data)", len(delivered), numPayloads)
 	}
 	for i, d := range delivered {
 		if got := binary.BigEndian.Uint32(d); got != uint32(i) {

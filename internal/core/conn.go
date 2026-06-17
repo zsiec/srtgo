@@ -441,6 +441,16 @@ func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payloa
 	}
 }
 
+// resetRecvTo advances this connection's receive state so the next expected
+// sequence number is nextSeq, dropping any buffered data. Used by backup-mode
+// bonding to keep a standby link's receiver aligned with the active link, so it
+// is ready to accept packets on failover without a huge spurious gap.
+func (c *Conn) resetRecvTo(nextSeq seq.Number) {
+	c.recvBuf.SetInitialRcvSeq(nextSeq)
+	c.rcvLastAckAck = nextSeq
+	c.tsbpdBaseSet = false // re-anchor TSBPD from the next received packet
+}
+
 // WriteCoordinated sends one data packet with a group-assigned sequence number
 // and source timestamp (connection bonding): every member of a broadcast group
 // sends the same payload with the same sequence and timestamp so the receiver

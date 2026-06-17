@@ -241,9 +241,19 @@ Each phase keeps the public API and `make test` green.
   - ✅ `TestSimBroadcastBonding`: two links each *permanently* dropping a disjoint packet set; the
     receiver group still delivers all 300 payloads once, in order — seamless redundancy, no shared
     loss. Deterministic, no sockets.
-  - ⬜ TODO: the session host (own N member sockets, one loop) + real-UDP test; backup mode
-    (active/standby failover, stability tracking, sender-buffer replay, idle-link sync); group
-    handshake extension / member discovery; balancing.
+  - ✅ Backup mode: weighted active/standby with failover. Per-member health is tracked from ACK
+    progress (the send buffer advancing) against a dynamic stability timeout (`max(min, 2*RTT+4*RTTVar)`);
+    when no healthy active member remains, the highest-weight standby is activated and the sender
+    buffer is replayed onto it. The receiver side advances standby links to the active link's
+    *receive* progress (ACK sequence, not playout waterline) so they accept failover packets without
+    a spurious gap. `Conn.resetRecvTo` re-anchors a standby receiver. `Group.Monitor` re-qualifies
+    health on a timer so failover fires during send pauses too.
+  - ✅ `TestSimBackupFailover`: streams 200 payloads over a weighted backup group, kills the active
+    link mid-stream (100 payloads written *after* the kill — deliverable only via failover), and the
+    group delivers all 200 in order. Seamless failover, no data loss, deterministic.
+  - ⬜ TODO: the session host (own N member sockets, one loop) + real-UDP test; the group handshake
+    extension / member discovery (needed for cutover & interop); balancing; sender-buffer prune by
+    cross-member ACK refinement; idle/keepalive stability handling.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 
