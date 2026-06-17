@@ -390,14 +390,26 @@ func (c *Conn) pump(now clock.Timestamp) {
 	}
 }
 
-// sendOne builds, buffers, and emits one data packet. It returns the pacing
-// interval the caller should apply before the next send (0 for a probe pair's
-// first packet, which is sent back-to-back with the next).
+// sendOne builds, buffers, and emits one data packet with the next sequence
+// number and the live wire timestamp. It returns the pacing interval the caller
+// should apply before the next send (0 for a probe pair's first packet, which
+// is sent back-to-back with the next).
 func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
-	seqNo := c.sendBuf.NextSeq()
+	c.sendData(now, c.sendBuf.NextSeq(), c.wireTS(now), payload)
+	if c.sendCC.IsProbePacket() {
+		return 0 // probe pair: next packet back-to-back
+	}
+	return c.sendCC.PacketInterval()
+}
+
+// sendData builds, encrypts, buffers, and emits one data packet with an explicit
+// sequence number and wire timestamp, then feeds FEC. seqNo must equal the send
+// buffer's next sequence. Shared by the normal send path and the group-
+// coordinated send path (WriteCoordinated).
+func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payload []byte) {
 	c.msgNumber = nextMsgNo(c.msgNumber)
 
-	p := packet.NewData(nil, seqNo.Value(), c.wireTS(now), c.peerSocketID, payload)
+	p := packet.NewData(nil, seqNo.Value(), ts, c.peerSocketID, payload)
 	p.Header.MessageNumber = c.msgNumber
 	p.Header.PacketPosition = packet.PositionSingle
 	p.Header.Order = true
@@ -411,7 +423,7 @@ func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
 	if !c.sendBuf.Push(p, now) {
 		// Window check above should prevent this; drop defensively.
 		p.Release()
-		return 0
+		return
 	}
 	// The buffer retains p for retransmission; emit it by reference (Owned=false).
 	c.outputs.push(SendPacket{Packet: p, Owned: false})
@@ -427,11 +439,23 @@ func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
 		c.fecSender.FeedSource(seqNo.Value(), p.Header.Timestamp, uint8(p.Header.Encryption), p.Data)
 		c.drainFECSender()
 	}
+}
 
-	if c.sendCC.IsProbePacket() {
-		return 0 // probe pair: next packet back-to-back
+// WriteCoordinated sends one data packet with a group-assigned sequence number
+// and source timestamp (connection bonding): every member of a broadcast group
+// sends the same payload with the same sequence and timestamp so the receiver
+// can deduplicate across links. Pacing and flow control are the group's concern,
+// so the packet is emitted immediately. Used by Group.
+func (c *Conn) WriteCoordinated(now clock.Timestamp, payload []byte, seqNo seq.Number, srcTime uint32) {
+	if c.closed || c.state != stateConnected {
+		return
 	}
-	return c.sendCC.PacketInterval()
+	// The send buffer stores packets at its own next sequence, so align it to the
+	// group sequence (usually already aligned in lockstep broadcast).
+	if c.sendBuf.NextSeq() != seqNo {
+		c.sendBuf.OverrideNextSeq(seqNo)
+	}
+	c.sendData(now, seqNo, srcTime, payload)
 }
 
 // drainFECSender emits every pending FEC repair packet as an SRT data packet
@@ -646,12 +670,14 @@ func (c *Conn) deliverTSBPD(now clock.Timestamp) {
 }
 
 // emitData copies a delivered packet's payload into an owned slice and queues
-// it as a DataReceived event, releasing the pooled packet buffer.
+// it as a DataReceived event (with its sequence number for bonding dedup),
+// releasing the pooled packet buffer.
 func (c *Conn) emitData(p packet.Packet) {
 	data := make([]byte, len(p.Data))
 	copy(data, p.Data)
+	seqNo := p.Header.SequenceNumber
 	p.Release()
-	c.events.push(DataReceived{Data: data})
+	c.events.push(DataReceived{Data: data, Seq: seqNo})
 }
 
 // ---- ACK ----

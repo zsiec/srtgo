@@ -16,9 +16,11 @@ type Connected struct {
 }
 
 // DataReceived hands one in-order, fully reassembled payload to the host for
-// delivery to Read. The host takes ownership of Data.
+// delivery to Read. The host takes ownership of Data. Seq is the packet's SRT
+// sequence number, used by connection bonding to deduplicate across links.
 type DataReceived struct {
 	Data []byte
+	Seq  uint32
 }
 
 // Failed reports a fatal connection error (handshake timeout, crypto mismatch,

@@ -229,8 +229,21 @@ Each phase keeps the public API and `make test` green.
     AES-CTR) and `TestInteropLegacyEncryptedCallerToNewListener` (legacy encrypted caller → new
     listener). Encryption matrix now green in all directions.
   - ⬜ TODO: rejection codes; rendezvous handshake; deferred-accept / stream-ID gating.
-- **Phase 6 — groups/bonding.** `group.go` (43KB, multi-socket). Highest risk; the references model
-  this differently — design separately once the single-conn core is proven.
+- **Phase 6 — groups/bonding. 🚧 broadcast done.** SRT bonding is N full, independent connections
+  (each its own handshake/ARQ/ACK/TSBPD/crypto) coordinated to share a sequence space and source
+  timestamps, with dedup-by-sequence at delivery — an orchestration layer over multiple `core.Conn`s
+  (matching how ristgo puts bonding in the host, not the pure flow). Unlike RIST 2022-7 (one flow,
+  shared ring, dedup by `(seq,sourceTime)`).
+  - ✅ `core.Group` (broadcast, `internal/core/group.go`): assigns a shared send sequence + source
+    timestamp per payload and writes it on every member (`Conn.WriteCoordinated`); on receive,
+    forwards each member's deliveries through a wrap-aware dedup waterline so each packet is
+    delivered once from whichever link supplies it first. `DataReceived` now carries `Seq` for dedup.
+  - ✅ `TestSimBroadcastBonding`: two links each *permanently* dropping a disjoint packet set; the
+    receiver group still delivers all 300 payloads once, in order — seamless redundancy, no shared
+    loss. Deterministic, no sockets.
+  - ⬜ TODO: the session host (own N member sockets, one loop) + real-UDP test; backup mode
+    (active/standby failover, stability tracking, sender-buffer replay, idle-link sync); group
+    handshake extension / member discovery; balancing.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 
