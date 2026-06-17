@@ -287,6 +287,76 @@ func streamEncrypted(t *testing.T, write func([]byte) error, read func([]byte) (
 
 const encPass = "0123456789abcdef" // 16 bytes, within SRT's 10-80 range
 
+// TestStats streams new-to-new and checks both ends' Stats() snapshots.
+func TestStats(t *testing.T) {
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan *session.Session, 1)
+	go func() {
+		if s, err := ln.Accept(); err == nil {
+			accepted <- s
+		}
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+	}, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer caller.Close()
+
+	var recv *session.Session
+	select {
+	case recv = <-accepted:
+		defer recv.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	streamEncrypted(t, caller.Write, recv.Read) // 300 payloads
+	time.Sleep(150 * time.Millisecond)          // let the last ACKs/ACKACKs flow
+
+	cs, err := caller.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.SentPackets < 300 {
+		t.Errorf("caller SentPackets = %d, want >= 300", cs.SentPackets)
+	}
+	if cs.RecvACKs == 0 {
+		t.Errorf("caller RecvACKs = 0, expected ACKs from the receiver")
+	}
+	if cs.RTTMicros <= 0 {
+		t.Errorf("caller RTTMicros = %d, expected a measured RTT", cs.RTTMicros)
+	}
+
+	rs, err := recv.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.RecvPackets < 300 {
+		t.Errorf("receiver RecvPackets = %d, want >= 300", rs.RecvPackets)
+	}
+	if rs.SentACKs == 0 {
+		t.Errorf("receiver SentACKs = 0, expected periodic ACKs")
+	}
+}
+
 // TestNewStackEncryptedEndToEnd runs the full new stack with AES-CTR: the new
 // listener unwraps the new caller's KMREQ and decrypts its data.
 func TestNewStackEncryptedEndToEnd(t *testing.T) {

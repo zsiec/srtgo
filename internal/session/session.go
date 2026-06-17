@@ -43,9 +43,10 @@ type Session struct {
 	writeC chan []byte
 	readC  chan []byte
 
-	connected chan error    // receives nil on Connected, err on Failed (dial)
-	quit      chan struct{} // closed by Close to ask the loop to stop
-	loopDone  chan struct{} // closed by the loop on exit
+	connected chan error           // receives nil on Connected, err on Failed (dial)
+	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
+	quit      chan struct{}        // closed by Close to ask the loop to stop
+	loopDone  chan struct{}        // closed by the loop on exit
 
 	timers    map[core.TimerID]clock.Timestamp
 	closeOnce sync.Once
@@ -64,12 +65,25 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		writeC:     make(chan []byte, 256),
 		readC:      make(chan []byte, 2048),
 		connected:  make(chan error, 1),
+		statsReq:   make(chan chan core.Stats),
 		quit:       make(chan struct{}),
 		loopDone:   make(chan struct{}),
 		timers:     make(map[core.TimerID]clock.Timestamp),
 	}
 	go s.loop()
 	return s
+}
+
+// Stats returns a snapshot of the connection's counters. It is answered on the
+// loop goroutine, so it is safe to call concurrently.
+func (s *Session) Stats() (core.Stats, error) {
+	resp := make(chan core.Stats, 1)
+	select {
+	case s.statsReq <- resp:
+		return <-resp, nil
+	case <-s.loopDone:
+		return core.Stats{}, ErrClosed
+	}
 }
 
 // NewEstablished builds a session for an already-connected core and starts its
@@ -233,6 +247,9 @@ func (s *Session) loop() {
 			now := s.clk.Now()
 			s.fireTimers(now)
 			backlog = s.drain(now, timer, backlog)
+
+		case resp := <-s.statsReq:
+			resp <- s.core.Stats()
 		}
 	}
 }

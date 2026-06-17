@@ -96,12 +96,72 @@ type Conn struct {
 	rtt             clock.Microseconds
 	rttVar          clock.Microseconds
 
+	// Statistics — plain counters (single-threaded); snapshotted via Stats.
+	sentPackets    uint64
+	sentBytes      uint64
+	retransPackets uint64
+	retransBytes   uint64
+	recvPackets    uint64
+	recvBytes      uint64
+	recvLoss       uint64
+	sentACKs       uint64
+	sentNAKs       uint64
+	recvACKs       uint64
+	recvNAKs       uint64
+
 	state  connState  // handshake progress / connected / failed
 	dial   *dialState // caller handshake parameters (nil once established or for NewEstablished)
 	closed bool
 
 	outputs fifo[Output]
 	events  fifo[Event]
+}
+
+// Stats is a snapshot of a connection's counters.
+type Stats struct {
+	SentPackets    uint64
+	SentBytes      uint64
+	RetransPackets uint64
+	RetransBytes   uint64
+	RecvPackets    uint64
+	RecvBytes      uint64
+	RecvLoss       uint64 // gaps detected at the receiver
+	RecvDropped    uint64 // dropped too-late (TSBPD)
+	RecvUndecrypt  uint64 // failed decryption
+	SentACKs       uint64
+	SentNAKs       uint64
+	RecvACKs       uint64
+	RecvNAKs       uint64
+	RTTMicros      int64
+	RTTVarMicros   int64
+	FlightSize     int // packets in flight (unacked)
+}
+
+// Stats returns a snapshot of the connection's counters. Call it from the host's
+// loop goroutine (the core is single-threaded).
+func (c *Conn) Stats() Stats {
+	flight := 0
+	if c.sendBuf != nil {
+		flight = c.sendBuf.Size()
+	}
+	return Stats{
+		SentPackets:    c.sentPackets,
+		SentBytes:      c.sentBytes,
+		RetransPackets: c.retransPackets,
+		RetransBytes:   c.retransBytes,
+		RecvPackets:    c.recvPackets,
+		RecvBytes:      c.recvBytes,
+		RecvLoss:       c.recvLoss,
+		RecvDropped:    c.recvDropped,
+		RecvUndecrypt:  c.recvUndecrypt,
+		SentACKs:       c.sentACKs,
+		SentNAKs:       c.sentNAKs,
+		RecvACKs:       c.recvACKs,
+		RecvNAKs:       c.recvNAKs,
+		RTTMicros:      int64(c.rtt),
+		RTTVarMicros:   int64(c.rttVar),
+		FlightSize:     flight,
+	}
 }
 
 // ackSlot records when a Full ACK was sent so the matching ACKACK can measure RTT.
@@ -180,10 +240,10 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		if delay <= 0 {
 			delay = defaultTsbpdDelay
 		}
-		// Time base is set from the first received packet; drift correction is
-		// deferred to a later phase, so disable it for now.
+		// Time base is set from the first received packet. Drift correction is
+		// enabled (the SRT default): OnACK accumulates samples and nudges the
+		// time base once per 1000 packets.
 		c.tsbpdTimer = tsbpd.New(delay, 0)
-		c.tsbpdTimer.SetDriftEnabled(false)
 		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
 		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
 	}
@@ -330,6 +390,8 @@ func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
 	}
 	// The buffer retains p for retransmission; emit it by reference (Owned=false).
 	c.outputs.push(SendPacket{Packet: p, Owned: false})
+	c.sentPackets++
+	c.sentBytes += uint64(len(payload))
 
 	c.sendCC.OnPacketSent(seqNo.Value(), len(payload))
 	if c.sendCC.IsProbePacket() {
@@ -405,6 +467,8 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		return // duplicate or belated
 	}
 	c.rcvPktCount++
+	c.recvPackets++
+	c.recvBytes += uint64(len(p.Data))
 
 	c.sendCC.OnPktArrival(len(p.Data), now)
 	if !p.Header.Retransmitted {
@@ -419,9 +483,17 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 			c.tsbpdBaseSet = true
 		}
 		c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
+		// Feed a drift sample (data arrival vs expected), using the current RTT
+		// estimate for one-way-delay compensation.
+		rttSample := int64(-1)
+		if c.rtt > 0 {
+			rttSample = int64(c.rtt)
+		}
+		c.tsbpdTimer.OnACK(p.Header.Timestamp, now, rttSample)
 	}
 
 	if res.HasGap() {
+		c.recvLoss += uint64(seq.Number(res.GapStart).Distance(seq.Number(res.GapEnd))) + 1
 		c.sendImmediateNAK(now, res.GapStart, res.GapEnd)
 	}
 
@@ -519,6 +591,7 @@ func (c *Conn) sendFullACK(now clock.Timestamp) {
 	c.ackSlots[slot] = ackSlot{ackNo: c.ackSeqNo, sendTime: now, dataSeq: ackSeq.Value(), valid: true}
 
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
+	c.sentACKs++
 	c.lastFullACKTime = now
 	c.rcvPktCount = 0
 	c.lightACKCount = 1
@@ -531,6 +604,7 @@ func (c *Conn) sendLiteACK(now clock.Timestamp) {
 	binary.BigEndian.PutUint32(b[:], ackSeq.Value())
 	p.SetData(b[:])
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
+	c.sentACKs++
 }
 
 func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
@@ -538,6 +612,7 @@ func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
 	if err := p.UnmarshalCIF(&ack); err != nil {
 		return
 	}
+	c.recvACKs++
 	isLite := len(p.Data) == 4
 	ackd := c.sendBuf.ACK(seq.Number(ack.LastACKPacketSequenceNumber))
 
@@ -625,6 +700,7 @@ func (c *Conn) emitNAK(now clock.Timestamp, losses []uint32) {
 		return
 	}
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
+	c.sentNAKs++
 }
 
 func (c *Conn) handleNAK(now clock.Timestamp, p packet.Packet) {
@@ -632,6 +708,7 @@ func (c *Conn) handleNAK(now clock.Timestamp, p packet.Packet) {
 	if err := p.UnmarshalCIF(&nak); err != nil {
 		return
 	}
+	c.recvNAKs++
 	c.sendCC.OnNAK(nak.LossList)
 
 	var rexmit []packet.Packet
@@ -641,6 +718,8 @@ func (c *Conn) handleNAK(now clock.Timestamp, p packet.Packet) {
 		rexmit = c.sendBuf.NAK(nak.LossList)
 	}
 	for _, rp := range rexmit {
+		c.retransPackets++
+		c.retransBytes += uint64(len(rp.Data))
 		c.outputs.push(SendPacket{Packet: rp, Owned: true})
 	}
 }

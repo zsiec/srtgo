@@ -194,8 +194,14 @@ Each phase keeps the public API and `make test` green.
     in virtual time).
   - ⬜ TODO: mid-stream key rotation (KMREQ pre-announce/refresh/decommission, `sndKmState`),
     `KeyRefreshNeeded` event, GCM interop test, listener-side KM (Phase 5).
-- **Phase 4 — TSBPD drift, FEC, stats.** Drift correction, `internal/filter` integration, and the
-  `Stats()` snapshot path through the loop.
+- **Phase 4 — TSBPD drift, FEC, stats. 🚧 drift + stats done.**
+  - ✅ TSBPD drift correction enabled (the SRT default): `handleData` feeds `tsbpdTimer.OnACK` a
+    drift sample per data arrival with the current RTT for one-way-delay compensation; the time base
+    nudges ±5ms per 1000 samples. Exact-timing TSBPD tests still pass (no jitter → ~0 drift).
+  - ✅ `core.Stats` snapshot (sent/recv packets+bytes, retrans, loss, drops, undecrypt, ACK/NAK
+    counts, RTT/var, in-flight) surfaced through the loop via `Session.Stats()` (answered on the
+    loop goroutine — no atomics). `TestStats` checks both ends.
+  - ⬜ TODO: FEC (`internal/filter` integration); delivery-rate / bandwidth stats fields.
 - **Phase 5 — listener & rendezvous. 🚧 listener done (unencrypted).**
   - ✅ `core.Listener` (`internal/core/listener.go`): stateless SYN-cookie induction (cookie =
     keyed hash of an opaque `PeerID`, keeping the core net-free — the host maps PeerID↔addr),
