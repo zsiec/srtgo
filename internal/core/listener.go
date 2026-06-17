@@ -26,6 +26,7 @@ type ListenerConfig struct {
 	PayloadSize    int
 	BufferCapacity int
 	Passphrase     string // if set, accept encrypted callers (unwrap their KMREQ)
+	FilterConfig   string // FEC packet filter to offer ("" = off)
 }
 
 // ListenerOutput is a datagram the listener asks the host to send to a peer.
@@ -65,6 +66,7 @@ type acceptedConn struct {
 	fc        uint32
 	recvLat   uint16
 	sendLat   uint16
+	filterCfg string                  // negotiated FEC filter, echoed in the response
 	cryptoCtx *crypto.Context         // non-nil for encrypted callers
 	kmKey     packet.PacketEncryption // key slot to echo in the KMRSP
 }
@@ -193,6 +195,13 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		}
 	}
 
+	// FEC: adopt the caller's filter config when offered (the host validated a
+	// match against l.cfg.FilterConfig before this point if it cares).
+	filterCfg := l.cfg.FilterConfig
+	if hs.HasFilter && hs.FilterConfig != "" {
+		filterCfg = hs.FilterConfig
+	}
+
 	a := acceptedConn{
 		socketID:  l.randUint32() | 1, // nonzero
 		isn:       seq.Number(l.randUint32() & uint32(seq.Max)),
@@ -200,6 +209,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		fc:        hs.MaxFlowWindowSize,
 		recvLat:   recvLat,
 		sendLat:   sendLat,
+		filterCfg: filterCfg,
 		cryptoCtx: cryptoCtx,
 		kmKey:     kmKey,
 	}
@@ -220,6 +230,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		CryptoCtx:      cryptoCtx,
 		ActiveKey:      packet.EncryptionEven,
 		Passphrase:     l.cfg.Passphrase,
+		FilterConfig:   filterCfg,
 	})
 	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID})
 }
@@ -239,8 +250,8 @@ func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32
 		a.recvLat, a.sendLat,
 		0, // srtFlags 0 -> handshake defaults
 		l.cfg.Congestion,
-		"",      // no FEC filter
-		0, 0, 0, // no group
+		a.filterCfg, // echo negotiated FEC filter
+		0, 0, 0,     // no group
 		nil, // addr (host fills); PeerIP 0.0.0.0
 		km,  // key material echo (nil = unencrypted)
 	)

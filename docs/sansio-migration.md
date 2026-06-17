@@ -201,7 +201,17 @@ Each phase keeps the public API and `make test` green.
   - ✅ `core.Stats` snapshot (sent/recv packets+bytes, retrans, loss, drops, undecrypt, ACK/NAK
     counts, RTT/var, in-flight) surfaced through the loop via `Session.Stats()` (answered on the
     loop goroutine — no atomics). `TestStats` checks both ends.
-  - ⬜ TODO: FEC (`internal/filter` integration); delivery-rate / bandwidth stats fields.
+  - ✅ FEC (`internal/filter`) integrated: the core feeds source packets to `FECSender` and emits
+    repair packets (msgNo 0), routes incoming repair packets to `FECReceiver`, inserts recovered
+    packets, and gates its own NAK by the ARQ level. Negotiated via the handshake filter extension
+    (caller/listener `FilterConfig`). 1D (row) and 2D (row+column, staircase + even) all work
+    end-to-end. Tests: `TestSimFECRecovery`, `TestSimFEC2DNoLoss`, `TestSimFEC2DRecovery`,
+    `TestNewStackFEC`. Encrypted FEC (encrypt/FEC ordering) is the one deferred edge.
+  - ✅ **Fixed a pre-existing latent bug in `internal/filter`** (shared by the legacy code): staircase
+    column (2D) FEC mis-mapped a column's series, poisoning the wrong column group and producing
+    corrupt/spurious recoveries in no-loss 2D streams. The receiver now measures a column's series
+    from its own staircase base offset. Regression-guarded by `fec_staircase_test.go`.
+  - ⬜ TODO: delivery-rate / bandwidth stats fields.
 - **Phase 5 — listener & rendezvous. 🚧 listener done (unencrypted).**
   - ✅ `core.Listener` (`internal/core/listener.go`): stateless SYN-cookie induction (cookie =
     keyed hash of an opaque `PeerID`, keeping the core net-free — the host maps PeerID↔addr),

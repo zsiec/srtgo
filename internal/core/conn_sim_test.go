@@ -21,11 +21,13 @@ const (
 )
 
 // outDatagram is one marshaled packet leaving a host, tagged so the link's loss
-// model can target data packets by sequence number.
+// model can target data packets by sequence number. msgNo 0 marks an FEC repair
+// packet (never dropped by the loss model).
 type outDatagram struct {
 	data   []byte
 	isData bool
 	seqNo  uint32
+	msgNo  uint32
 }
 
 // inflight is a datagram in transit on the link.
@@ -65,6 +67,7 @@ func (h *simHost) drain() []outDatagram {
 					data:   buf[:n],
 					isData: !v.Packet.Header.IsControl,
 					seqNo:  v.Packet.Header.SequenceNumber,
+					msgNo:  v.Packet.Header.MessageNumber,
 				})
 			}
 			if v.Owned {
@@ -145,8 +148,10 @@ func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, nu
 
 	schedule := func(out []outDatagram, q *[]inflight, drop map[uint32]bool) {
 		for _, dg := range out {
-			if dg.isData && drop != nil && drop[dg.seqNo] {
-				delete(drop, dg.seqNo) // drop once, let the retransmit through
+			// Drop targeted source data packets once (never FEC repair packets,
+			// which carry msgNo 0); a retransmission or FEC repair recovers them.
+			if dg.isData && dg.msgNo != 0 && drop != nil && drop[dg.seqNo] {
+				delete(drop, dg.seqNo)
 				continue
 			}
 			*q = append(*q, inflight{arrival: now.Add(linkDelay), data: dg.data})
@@ -214,6 +219,99 @@ func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, nu
 		if got := binary.BigEndian.Uint32(p); got != uint32(i) {
 			t.Fatalf("payload %d out of order: got index %d", i, got)
 		}
+	}
+}
+
+// TestSimFECRecovery drops one data packet per FEC row with ARQ=never (so no
+// NAK/retransmission is possible) and confirms the receiver reconstructs every
+// dropped packet from the FEC repair packets alone.
+func TestSimFECRecovery(t *testing.T) {
+	const (
+		sndSocketID = 1
+		rcvSocketID = 2
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 200
+		fecCfg      = "fec,cols:10,rows:1,arq:never" // row-only FEC, no ARQ
+	)
+	base := clock.Timestamp(1_000_000)
+
+	sender := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: rcvSocketID, PayloadSize: simPayload,
+		SendISN: sndISN, RecvISN: rcvISN, MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+	receiver := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: sndSocketID, PayloadSize: simPayload,
+		SendISN: rcvISN, RecvISN: sndISN, MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+
+	// One drop per row of 10 (recoverable by row FEC): seq 105, 115, 125, ...
+	drop := map[uint32]bool{}
+	wantRecovered := 0
+	for s := uint32(sndISN + 5); s < sndISN+numPayloads; s += 10 {
+		drop[s] = true
+		wantRecovered++
+	}
+
+	runStream(t, sender, receiver, base, numPayloads, drop)
+
+	st := receiver.c.Stats()
+	if st.RecvFECRecov < uint64(wantRecovered) {
+		t.Fatalf("FEC recovered %d packets, want >= %d", st.RecvFECRecov, wantRecovered)
+	}
+	if st.SentNAKs != 0 {
+		t.Fatalf("receiver sent %d NAKs with arq:never (FEC should suppress all NAK)", st.SentNAKs)
+	}
+}
+
+// TestSimFEC2DNoLoss exercises 2D (row+column, staircase) FEC with no loss. It
+// regression-guards the staircase column FEC fix: before it, the receiver
+// spuriously recovered packets and corrupted delivery.
+func TestSimFEC2DNoLoss(t *testing.T) {
+	const (
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 300
+		fecCfg      = "fec,cols:8,rows:4,arq:onreq" // 2D, default staircase layout
+	)
+	base := clock.Timestamp(1_000_000)
+	sender := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 2, PayloadSize: simPayload, SendISN: sndISN, RecvISN: rcvISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+	receiver := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: simPayload, SendISN: rcvISN, RecvISN: sndISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+	runStream(t, sender, receiver, base, numPayloads, nil)
+}
+
+// TestSimFEC2DRecovery drops one packet per row (recoverable by the row
+// dimension) with ARQ=never and confirms 2D staircase FEC reconstructs them all.
+func TestSimFEC2DRecovery(t *testing.T) {
+	const (
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 240
+		fecCfg      = "fec,cols:8,rows:4,arq:never"
+	)
+	base := clock.Timestamp(1_000_000)
+	sender := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 2, PayloadSize: simPayload, SendISN: sndISN, RecvISN: rcvISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+	receiver := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: simPayload, SendISN: rcvISN, RecvISN: sndISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg,
+	}, base))
+	// One drop per row of 8 (row FEC recovers each): seq 103, 111, 119, ...
+	drop := map[uint32]bool{}
+	for s := uint32(sndISN + 3); s < sndISN+numPayloads; s += 8 {
+		drop[s] = true
+	}
+	runStream(t, sender, receiver, base, numPayloads, drop)
+	if st := receiver.c.Stats(); st.SentNAKs != 0 {
+		t.Fatalf("receiver sent %d NAKs with arq:never (FEC should suppress NAK)", st.SentNAKs)
 	}
 }
 

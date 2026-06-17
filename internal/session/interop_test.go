@@ -287,6 +287,64 @@ func streamEncrypted(t *testing.T, write func([]byte) error, read func([]byte) (
 
 const encPass = "0123456789abcdef" // 16 bytes, within SRT's 10-80 range
 
+// TestNewStackFEC verifies the new stack negotiates a FEC packet filter through
+// the handshake and the sender emits repair packets the driver carries through
+// to the receiver without breaking delivery.
+func TestNewStackFEC(t *testing.T) {
+	const fecCfg = "fec,cols:8,rows:4,arq:onreq" // 2D staircase FEC end-to-end
+
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		FilterConfig: fecCfg,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan *session.Session, 1)
+	go func() {
+		if s, err := ln.Accept(); err == nil {
+			accepted <- s
+		}
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		FilterConfig: fecCfg,
+	}, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer caller.Close()
+
+	var recv *session.Session
+	select {
+	case recv = <-accepted:
+		defer recv.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	streamEncrypted(t, caller.Write, recv.Read) // 300 payloads
+
+	cs, err := caller.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.SentFEC == 0 {
+		t.Errorf("caller SentFEC = 0, expected FEC repair packets (filter not negotiated?)")
+	}
+}
+
 // TestStats streams new-to-new and checks both ends' Stats() snapshots.
 func TestStats(t *testing.T) {
 	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

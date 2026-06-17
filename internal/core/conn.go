@@ -7,6 +7,7 @@ import (
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/congestion"
 	"github.com/zsiec/srtgo/internal/crypto"
+	"github.com/zsiec/srtgo/internal/filter"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
 	"github.com/zsiec/srtgo/internal/tsbpd"
@@ -45,6 +46,8 @@ type Config struct {
 	CryptoCtx  *crypto.Context
 	ActiveKey  packet.PacketEncryption // outgoing key slot (0/None -> Even)
 	Passphrase string
+
+	FilterConfig string // FEC packet filter, e.g. "fec,cols:10,rows:5,arq:onreq" ("" = off)
 }
 
 // Conn is the pure, single-threaded SRT state machine for one connection. It
@@ -84,6 +87,11 @@ type Conn struct {
 	passphrase    string                  // for wrapping key material (KMREQ)
 	recvUndecrypt uint64                  // packets that failed decryption
 
+	// FEC (nil when no packet filter is negotiated). Unencrypted only for now.
+	fecSender   *filter.FECSender
+	fecReceiver *filter.FECReceiver
+	fecARQLevel filter.ARQLevel
+
 	// ACK / NAK / RTT state.
 	ackSeqNo        uint32
 	rcvLastAckAck   seq.Number
@@ -108,6 +116,8 @@ type Conn struct {
 	sentNAKs       uint64
 	recvACKs       uint64
 	recvNAKs       uint64
+	sentFEC        uint64 // FEC repair packets sent
+	recvFECRecov   uint64 // packets reconstructed by FEC
 
 	state  connState  // handshake progress / connected / failed
 	dial   *dialState // caller handshake parameters (nil once established or for NewEstablished)
@@ -132,6 +142,8 @@ type Stats struct {
 	SentNAKs       uint64
 	RecvACKs       uint64
 	RecvNAKs       uint64
+	SentFEC        uint64 // FEC repair packets sent
+	RecvFECRecov   uint64 // packets reconstructed by FEC
 	RTTMicros      int64
 	RTTVarMicros   int64
 	FlightSize     int // packets in flight (unacked)
@@ -158,6 +170,8 @@ func (c *Conn) Stats() Stats {
 		SentNAKs:       c.sentNAKs,
 		RecvACKs:       c.recvACKs,
 		RecvNAKs:       c.recvNAKs,
+		SentFEC:        c.sentFEC,
+		RecvFECRecov:   c.recvFECRecov,
 		RTTMicros:      int64(c.rtt),
 		RTTVarMicros:   int64(c.rttVar),
 		FlightSize:     flight,
@@ -188,6 +202,7 @@ type establishParams struct {
 	CryptoCtx      *crypto.Context
 	ActiveKey      packet.PacketEncryption
 	Passphrase     string
+	FilterConfig   string
 }
 
 // NewEstablished builds a connection already in the connected state and arms
@@ -207,6 +222,7 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		CryptoCtx:      cfg.CryptoCtx,
 		ActiveKey:      cfg.ActiveKey,
 		Passphrase:     cfg.Passphrase,
+		FilterConfig:   cfg.FilterConfig,
 	})
 	return c
 }
@@ -253,6 +269,13 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		c.activeKey = ep.ActiveKey
 		if c.activeKey == packet.EncryptionNone {
 			c.activeKey = packet.EncryptionEven
+		}
+	}
+	if ep.FilterConfig != "" {
+		if fcfg, err := filter.ParseConfig(ep.FilterConfig); err == nil {
+			c.fecSender = filter.NewFECSender(fcfg, ep.PayloadSize, ep.SendISN.Value())
+			c.fecReceiver = filter.NewFECReceiver(fcfg, ep.PayloadSize, ep.RecvISN.Value())
+			c.fecARQLevel = fcfg.ARQ
 		}
 	}
 	c.state = stateConnected
@@ -319,7 +342,9 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 		c.sendFullACK(now)
 		c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	case TimerNAK:
-		c.sendPeriodicNAK(now)
+		if c.fecReceiver == nil || c.fecARQLevel == filter.ARQAlways {
+			c.sendPeriodicNAK(now)
+		}
 		c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
 	case TimerSndPacing:
 		c.pump(now)
@@ -394,10 +419,36 @@ func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
 	c.sentBytes += uint64(len(payload))
 
 	c.sendCC.OnPacketSent(seqNo.Value(), len(payload))
+
+	// FEC: clip the (post-encryption) payload into groups and emit any completed
+	// repair packets. Repair packets share the group's last sequence number and
+	// are not buffered for retransmission.
+	if c.fecSender != nil {
+		c.fecSender.FeedSource(seqNo.Value(), p.Header.Timestamp, uint8(p.Header.Encryption), p.Data)
+		c.drainFECSender()
+	}
+
 	if c.sendCC.IsProbePacket() {
 		return 0 // probe pair: next packet back-to-back
 	}
 	return c.sendCC.PacketInterval()
+}
+
+// drainFECSender emits every pending FEC repair packet as an SRT data packet
+// with MessageNumber 0 (the FEC marker) and no encryption.
+func (c *Conn) drainFECSender() {
+	for {
+		data, _, fecSeqNo, fecTS, ok := c.fecSender.PackControlPacket()
+		if !ok {
+			break
+		}
+		fp := packet.NewData(nil, fecSeqNo, fecTS, c.peerSocketID, data)
+		fp.Header.MessageNumber = 0 // FEC repair marker
+		fp.Header.PacketPosition = packet.PositionSingle
+		fp.Header.Encryption = packet.EncryptionNone
+		c.outputs.push(SendPacket{Packet: fp, Owned: true})
+		c.sentFEC++
+	}
 }
 
 // window returns the current maximum number of in-flight packets allowed.
@@ -458,6 +509,19 @@ func (c *Conn) decrypt(p *packet.Packet) bool {
 // ---- receive path ----
 
 func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
+	// FEC repair packet (MessageNumber == 0): feed the FEC engine, never deliver.
+	if c.fecReceiver != nil && p.Header.MessageNumber == 0 {
+		rec, lossReport, _ := c.fecReceiver.Receive(p.Header.SequenceNumber, p.Header.Timestamp,
+			uint8(p.Header.Encryption), p.Header.MessageNumber, p.Data)
+		p.Release()
+		c.insertRecovered(now, rec)
+		if len(lossReport) > 0 { // ARQ=onreq: FEC asks for these via NAK
+			c.emitNAK(now, lossReport)
+		}
+		c.deliverNow(now)
+		return
+	}
+
 	if !c.decrypt(&p) {
 		p.Release()
 		return // undecryptable: drop
@@ -492,9 +556,21 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		c.tsbpdTimer.OnACK(p.Header.Timestamp, now, rttSample)
 	}
 
+	// Feed the data packet into the FEC engine for group accumulation; it may
+	// reconstruct earlier losses.
+	if c.fecReceiver != nil {
+		rec, _, _ := c.fecReceiver.Receive(p.Header.SequenceNumber, p.Header.Timestamp,
+			uint8(p.Header.Encryption), p.Header.MessageNumber, p.Data)
+		c.insertRecovered(now, rec)
+	}
+
 	if res.HasGap() {
 		c.recvLoss += uint64(seq.Number(res.GapStart).Distance(seq.Number(res.GapEnd))) + 1
-		c.sendImmediateNAK(now, res.GapStart, res.GapEnd)
+		// Suppress SRT's own NAK when FEC is expected to recover the loss; FEC
+		// reports irrecoverable losses itself (lossReport) when ARQ=onreq.
+		if c.fecReceiver == nil || c.fecARQLevel == filter.ARQAlways {
+			c.sendImmediateNAK(now, res.GapStart, res.GapEnd)
+		}
 	}
 
 	// Lite ACK escalation: every liteACKPeriod*lightACKCount packets.
@@ -503,10 +579,37 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		c.lightACKCount++
 	}
 
+	c.deliverNow(now)
+}
+
+// deliverNow dispatches to TSBPD playout (live) or immediate in-order delivery.
+func (c *Conn) deliverNow(now clock.Timestamp) {
 	if c.tsbpdTimer != nil {
 		c.deliverTSBPD(now)
 	} else {
 		c.deliver()
+	}
+}
+
+// insertRecovered inserts FEC-reconstructed packets into the receive buffer.
+func (c *Conn) insertRecovered(now clock.Timestamp, rec []filter.RecoveredPacket) {
+	for _, rp := range rec {
+		p := packet.NewData(nil, rp.SeqNo, rp.Timestamp, c.peerSocketID, rp.Payload)
+		p.Header.MessageNumber = 1
+		p.Header.PacketPosition = packet.PositionSingle
+		p.Header.Encryption = packet.PacketEncryption(rp.EncFlag)
+		p.Header.Retransmitted = true
+		if !c.decrypt(&p) { // no-op for unencrypted; recovered ciphertext otherwise
+			p.Release()
+			continue
+		}
+		if c.recvBuf.Insert(p, now).Inserted {
+			c.recvPackets++
+			c.recvBytes += uint64(len(p.Data))
+			c.recvFECRecov++
+		} else {
+			p.Release()
+		}
 	}
 }
 

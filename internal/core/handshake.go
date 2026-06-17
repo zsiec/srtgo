@@ -37,6 +37,7 @@ type DialConfig struct {
 	SendLatencyMS  uint16     // send TSBPD latency, ms (0 -> 120)
 	Congestion     string     // "live" or "file" (empty -> "live")
 	StreamID       string     // optional stream ID
+	FilterConfig   string     // FEC packet filter, e.g. "fec,cols:10,rows:5" ("" = off)
 
 	// Encryption. The host supplies a crypto context (it owns the entropy used
 	// to generate the salt and keys); Passphrase wraps the key material in the
@@ -65,6 +66,7 @@ type dialState struct {
 	sendLatMS uint16
 	cong      string
 	streamID  string
+	filterCfg string
 
 	cookie uint32 // learned from the induction response
 
@@ -112,6 +114,7 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			sendLatMS:      dc.SendLatencyMS,
 			cong:           dc.Congestion,
 			streamID:       dc.StreamID,
+			filterCfg:      dc.FilterConfig,
 			cryptoCtx:      dc.CryptoCtx,
 			passphrase:     dc.Passphrase,
 			payloadSize:    payloadSize,
@@ -150,8 +153,8 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 		d.streamID, d.recvLatMS, d.sendLatMS,
 		0, // srtFlags 0 -> handshake defaults (live, rexmit, periodic NAK, ...)
 		d.cong,
-		"",      // no FEC filter
-		0, 0, 0, // no group
+		d.filterCfg, // FEC filter ("" = off)
+		0, 0, 0,     // no group
 		nil, // addr (host fills); PeerIP 0.0.0.0
 		km,  // key material (nil = unencrypted)
 	)
@@ -224,6 +227,11 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
 	if int(hs.MaxFlowWindowSize) < fc {
 		fc = int(hs.MaxFlowWindowSize)
 	}
+	// FEC: the listener's echoed filter config is authoritative when present.
+	filterCfg := d.filterCfg
+	if hs.HasFilter && hs.FilterConfig != "" {
+		filterCfg = hs.FilterConfig
+	}
 
 	// We requested encryption but the listener returned no key material.
 	if d.cryptoCtx != nil && !hs.HasKM {
@@ -245,6 +253,7 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
 		CryptoCtx:      d.cryptoCtx,
 		ActiveKey:      packet.EncryptionEven,
 		Passphrase:     d.passphrase,
+		FilterConfig:   filterCfg,
 	})
 	c.dial = nil
 	c.events.push(Connected{PeerSocketID: hs.SRTSocketID})
