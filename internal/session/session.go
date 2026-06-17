@@ -12,6 +12,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -19,15 +20,17 @@ import (
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/core"
+	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/mux"
 	"github.com/zsiec/srtgo/internal/packet"
+	"github.com/zsiec/srtgo/internal/seq"
 )
 
 // ErrClosed is returned by Read/Write after the session is closed.
 var ErrClosed = errors.New("session: closed")
 
-// Session drives one established core.Conn over a mux. Construct it with
-// NewEstablished; Write/Read/Close are safe to call from other goroutines.
+// Session drives one core.Conn over a mux. Construct it with NewEstablished or
+// Dial; Write/Read/Close are safe to call from other goroutines.
 type Session struct {
 	mux        *mux.Mux
 	ownsMux    bool
@@ -39,15 +42,37 @@ type Session struct {
 	writeC chan []byte
 	readC  chan []byte
 
-	quit     chan struct{} // closed by Close to ask the loop to stop
-	loopDone chan struct{} // closed by the loop on exit
+	connected chan error    // receives nil on Connected, err on Failed (dial)
+	quit      chan struct{} // closed by Close to ask the loop to stop
+	loopDone  chan struct{} // closed by the loop on exit
 
 	timers    map[core.TimerID]clock.Timestamp
 	closeOnce sync.Once
 }
 
-// NewEstablished builds a session for an already-connected core (handshake is
-// out of scope for this phase) and starts its event loop.
+// newSession wires a session around a (possibly still-connecting) core and
+// starts its event loop.
+func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr net.Addr, clk clock.Clock, cc *core.Conn) *Session {
+	s := &Session{
+		mux:        m,
+		ownsMux:    ownsMux,
+		remoteAddr: remoteAddr,
+		clk:        clk,
+		core:       cc,
+		recvC:      recvC,
+		writeC:     make(chan []byte, 256),
+		readC:      make(chan []byte, 2048),
+		connected:  make(chan error, 1),
+		quit:       make(chan struct{}),
+		loopDone:   make(chan struct{}),
+		timers:     make(map[core.TimerID]clock.Timestamp),
+	}
+	go s.loop()
+	return s
+}
+
+// NewEstablished builds a session for an already-connected core and starts its
+// event loop.
 //
 //   - m / recvC: the multiplexer and this connection's inbound packet channel.
 //   - ownsMux: if true, Close also closes the mux (client owns its socket).
@@ -58,21 +83,53 @@ func NewEstablished(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remote
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
-	s := &Session{
-		mux:        m,
-		ownsMux:    ownsMux,
-		remoteAddr: remoteAddr,
-		clk:        clk,
-		core:       core.NewEstablished(cfg, clk.Now()),
-		recvC:      recvC,
-		writeC:     make(chan []byte, 256),
-		readC:      make(chan []byte, 2048),
-		quit:       make(chan struct{}),
-		loopDone:   make(chan struct{}),
-		timers:     make(map[core.TimerID]clock.Timestamp),
+	return newSession(m, recvC, ownsMux, remoteAddr, clk, core.NewEstablished(cfg, clk.Now()))
+}
+
+// Dial performs a caller-side HSv5 handshake over conn to remoteAddr and
+// returns a connected Session. It owns conn (Close closes it). The handshake
+// retransmits until it completes or timeout elapses.
+func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk clock.Clock, timeout time.Duration) (*Session, error) {
+	if clk == nil {
+		clk = clock.NewRealClock()
 	}
-	go s.loop()
-	return s
+	if dc.CallerSocketID == 0 {
+		id, err := handshake.GenerateSocketID()
+		if err != nil {
+			return nil, err
+		}
+		dc.CallerSocketID = id
+	}
+	if dc.CallerISN == 0 {
+		isn, err := handshake.GenerateISN()
+		if err != nil {
+			return nil, err
+		}
+		dc.CallerISN = seq.Number(isn)
+	}
+	mss := int(dc.MSS)
+	if mss == 0 {
+		mss = mux.DefaultMSS
+	}
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+
+	m := mux.New(conn, mss)
+	recvC := m.Register(dc.CallerSocketID)
+	s := newSession(m, recvC, true, remoteAddr, clk, core.Dial(dc, clk.Now()))
+
+	select {
+	case err := <-s.connected:
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		return s, nil
+	case <-time.After(timeout):
+		s.Close()
+		return nil, fmt.Errorf("session: handshake timeout after %s", timeout)
+	}
 }
 
 // Write queues a payload for transmission. It blocks if the internal queue is
@@ -206,8 +263,18 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog [][]byte
 			default:
 				backlog = append(backlog, e.Data)
 			}
-		case core.Closed, core.Failed:
-			// Connection ended; the loop will exit on the next quit or EOF.
+		case core.Connected:
+			select {
+			case s.connected <- nil:
+			default:
+			}
+		case core.Failed:
+			select {
+			case s.connected <- e.Err:
+			default:
+			}
+		case core.Closed:
+			// Peer closed; the loop exits on the next quit or EOF.
 		}
 	}
 	s.rearm(timer, now)

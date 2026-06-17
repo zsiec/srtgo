@@ -25,8 +25,9 @@ const (
 	defaultTsbpdDelay = 120 * clock.Millisecond // default playout latency
 )
 
-// Config parameters an established connection. Handshake negotiation (Phase 2)
-// will produce one of these; for Phase 1 the test/host fills it directly.
+// Config parameters an already-established connection (NewEstablished). The
+// caller handshake (Dial, see handshake.go) produces the equivalent parameters
+// itself; this is used when the connection is set up out of band.
 type Config struct {
 	PeerSocketID   uint32     // destination socket ID on outgoing packets
 	PayloadSize    int        // max data payload per packet (0 -> MaxPayloadSize)
@@ -40,17 +41,16 @@ type Config struct {
 	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
 }
 
-// Conn is the pure, single-threaded SRT data-path state machine for one
-// established connection. It performs no I/O, reads no clock, and spawns no
-// goroutines: the host feeds it packets/timers (each call carries `now`) and
-// drains its outputs and events.
+// Conn is the pure, single-threaded SRT state machine for one connection. It
+// performs no I/O, reads no clock, and spawns no goroutines: the host feeds it
+// packets/timers (each call carries `now`) and drains its outputs and events.
 //
-// Scope (Phase 1 vertical slice): steady-state live data transfer with ACK,
-// NAK (immediate + periodic), retransmission, flow control, pacing, and
-// ACKACK-based RTT. Handshake, encryption, FEC, TSBPD playout scheduling,
-// reorder tolerance, sender-drop, and groups are deferred to later phases. In
-// this slice received data is delivered in sequence order as soon as it is
-// contiguous (no TSBPD hold).
+// Scope so far: the caller-side HSv5 handshake (see handshake.go) and
+// steady-state live data transfer — ACK, NAK (immediate + periodic),
+// retransmission, flow control, token-bucket pacing, ACKACK-based RTT, and
+// TSBPD playout with too-late drop. Encryption, FEC, the listener/rendezvous
+// handshakes, reorder tolerance, sender-drop, and groups are deferred to later
+// phases.
 type Conn struct {
 	peerSocketID uint32
 	payloadSize  int
@@ -83,6 +83,8 @@ type Conn struct {
 	rtt             clock.Microseconds
 	rttVar          clock.Microseconds
 
+	state  connState  // handshake progress / connected / failed
+	dial   *dialState // caller handshake parameters (nil once established or for NewEstablished)
 	closed bool
 
 	outputs fifo[Output]
@@ -97,33 +99,65 @@ type ackSlot struct {
 	valid    bool
 }
 
+// establishParams carries the data-path parameters needed to bring a connection
+// into the connected state, whether built directly (NewEstablished) or produced
+// by a completed handshake (see handshake.go).
+type establishParams struct {
+	PeerSocketID   uint32
+	PayloadSize    int
+	SendISN        seq.Number
+	RecvISN        seq.Number
+	FlowWindow     int
+	BufferCapacity int
+	MaxBW          int64
+	Live           bool
+	TsbpdDelay     clock.Microseconds
+}
+
 // NewEstablished builds a connection already in the connected state and arms
-// the periodic ACK and NAK timers. Handshake is out of scope for Phase 1.
+// the periodic ACK and NAK timers (no handshake).
 func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
-	if cfg.PayloadSize <= 0 {
-		cfg.PayloadSize = packet.MaxPayloadSize
+	c := &Conn{}
+	c.establish(now, establishParams{
+		PeerSocketID:   cfg.PeerSocketID,
+		PayloadSize:    cfg.PayloadSize,
+		SendISN:        cfg.SendISN,
+		RecvISN:        cfg.RecvISN,
+		FlowWindow:     cfg.FlowWindow,
+		BufferCapacity: cfg.BufferCapacity,
+		MaxBW:          cfg.MaxBW,
+		Live:           cfg.Live,
+		TsbpdDelay:     cfg.TsbpdDelay,
+	})
+	return c
+}
+
+// establish initializes the data-path state (buffers, congestion control, TSBPD)
+// and arms the periodic ACK/NAK timers, moving the connection to the connected
+// state. Shared by NewEstablished and the handshake completion path.
+func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
+	if ep.PayloadSize <= 0 {
+		ep.PayloadSize = packet.MaxPayloadSize
 	}
-	if cfg.BufferCapacity <= 0 {
-		cfg.BufferCapacity = 8192
+	if ep.BufferCapacity <= 0 {
+		ep.BufferCapacity = 8192
 	}
-	if cfg.FlowWindow <= 0 {
-		cfg.FlowWindow = 25600
+	if ep.FlowWindow <= 0 {
+		ep.FlowWindow = 25600
 	}
-	c := &Conn{
-		peerSocketID:  cfg.PeerSocketID,
-		payloadSize:   cfg.PayloadSize,
-		sndTSBase:     now.SRTTimestamp(),
-		sendBuf:       buffer.NewSendBuffer(cfg.BufferCapacity, cfg.SendISN),
-		sendCC:        congestion.NewLiveCC(cfg.MaxBW, cfg.PayloadSize),
-		recvBuf:       buffer.NewRecvBuffer(cfg.BufferCapacity, cfg.RecvISN),
-		flowWindow:    cfg.FlowWindow,
-		rcvLastAckAck: cfg.RecvISN,
-		rtt:           initialRTT,
-		rttVar:        initialRTT / 2,
-		lightACKCount: 1,
-	}
-	if cfg.Live {
-		delay := cfg.TsbpdDelay
+	c.peerSocketID = ep.PeerSocketID
+	c.payloadSize = ep.PayloadSize
+	c.sndTSBase = now.SRTTimestamp()
+	c.sendBuf = buffer.NewSendBuffer(ep.BufferCapacity, ep.SendISN)
+	c.sendCC = congestion.NewLiveCC(ep.MaxBW, ep.PayloadSize)
+	c.recvBuf = buffer.NewRecvBuffer(ep.BufferCapacity, ep.RecvISN)
+	c.flowWindow = ep.FlowWindow
+	c.rcvLastAckAck = ep.RecvISN
+	c.rtt = initialRTT
+	c.rttVar = initialRTT / 2
+	c.lightACKCount = 1
+	if ep.Live {
+		delay := ep.TsbpdDelay
 		if delay <= 0 {
 			delay = defaultTsbpdDelay
 		}
@@ -134,9 +168,9 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
 		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
 	}
+	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
-	return c
 }
 
 // PollOutput drains the next wire/timer effect; ok is false when none remain.
@@ -152,7 +186,7 @@ func (c *Conn) PollEvent() (Event, bool) { return c.events.pop() }
 // ownership of payload (it is not copied here; packet construction copies into
 // a pooled buffer at send time).
 func (c *Conn) Write(now clock.Timestamp, payload []byte) {
-	if c.closed {
+	if c.closed || c.state != stateConnected {
 		return
 	}
 	c.sendQueue.push(payload)
@@ -163,6 +197,13 @@ func (c *Conn) Write(now clock.Timestamp, payload []byte) {
 func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 	if c.closed {
 		return
+	}
+	if p.Header.IsControl && p.Header.ControlType == packet.CtrlTypeHandshake {
+		c.handleHandshake(now, p)
+		return
+	}
+	if c.state != stateConnected {
+		return // ignore data/ACK/NAK until the handshake completes
 	}
 	if p.Header.IsControl {
 		switch p.Header.ControlType {
@@ -199,6 +240,8 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 		if c.tsbpdTimer != nil {
 			c.deliverTSBPD(now)
 		}
+	case TimerHandshake:
+		c.handleHandshakeTimer(now)
 	}
 }
 

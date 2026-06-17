@@ -170,8 +170,18 @@ Each phase keeps the public API and `make test` green.
     (exact arrival+delay timing) and `TestTSBPDTooLateDrop`.
   - ⬜ TODO: wire the public `Conn` to delegate to a session driving a `core.Conn`; prove against
     `e2e_test.go` / `conn_test.go`; head-to-head `make bench` vs the current implementation.
-- **Phase 2 — handshake & dialer.** Move induction/conclusion (HSv5, then HSv4) into the core;
-  `Dial` becomes "construct core, let the driver pump it." Retains retransmission via `TimerHandshake`.
+- **Phase 2 — handshake & dialer. 🚧 caller HSv5 done.**
+  - ✅ `core.Dial` (`internal/core/handshake.go`): caller-side HSv5 state machine — INDUCTION →
+    CONCLUSION → `Connected`, retransmitting via `TimerHandshake`, surfacing `Failed` on error.
+    Reuses the pure `handshake.Build*` builders (passing `addr=nil` keeps the core net-free; PeerIP
+    is 0.0.0.0 and the host fills the destination). Shared `establish()` brings the connection into
+    the data path from negotiated params.
+  - ✅ `session.Dial`: generates the socket ID/ISN, drives the handshake, blocks until `Connected`
+    (or timeout), returns a ready Session.
+  - ✅ **Interop proven**: `TestInteropCallerToLegacyListener` — the new caller completes a real
+    HSv5 handshake against the existing `srt.Listen` listener over UDP and streams 300 payloads it
+    receives in order. Confirms wire compatibility of both handshake and data path.
+  - ⬜ TODO: HSv4 fallback; rejection-code handling; populate `Connected` with full negotiated params.
 - **Phase 3 — crypto & key rotation.** Fold `conn_crypto.go` + KM state machine into the core;
   surface `KeyRefreshNeeded`.
 - **Phase 4 — TSBPD drift, FEC, stats.** Drift correction, `internal/filter` integration, and the
