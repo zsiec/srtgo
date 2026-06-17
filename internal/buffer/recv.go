@@ -924,6 +924,24 @@ func (rb *RecvBuffer) IsEmpty() bool {
 	return rb.size == 0
 }
 
+// PeekNextAvailableTimestamp returns the 32-bit SRT timestamp of the earliest
+// available (received, unread) packet at or after the head, scanning past empty
+// or dropped slots. Returns false if no available packet is buffered. Used by
+// TSBPD scheduling to compute the next playout wake-up time.
+func (rb *RecvBuffer) PeekNextAvailableTimestamp() (uint32, bool) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	s := rb.startSeq
+	for s.LessThan(rb.maxSeq) {
+		idx := int(uint32(s)) & rb.mask
+		if rb.entries[idx].state == EntryAvailable {
+			return rb.entries[idx].pkt.Header.Timestamp, true
+		}
+		s = s.Inc()
+	}
+	return 0, false
+}
+
 // SetInitialRcvSeq resets the receive buffer to a new initial sequence number,
 // dropping all data. Used by group idle link synchronization.
 func (rb *RecvBuffer) SetInitialRcvSeq(newISN seq.Number) {

@@ -162,7 +162,12 @@ Each phase keeps the public API and `make test` green.
   - ✅ `session_test.go`: `TestSessionUDPLoopback` (500 payloads over real loopback UDP, in order)
     and `TestSessionUDPLossRecovery` (drops data packets on the socket; NAK/retransmit recovers all
     600). Both pass under `-race`.
-  - ⬜ TODO: TSBPD playout scheduling (`TimerTSBPD`) instead of immediate in-order delivery.
+  - ✅ TSBPD playout (`TimerTSBPD`): live-mode delivery holds each packet until its
+    `timeBase + timestamp + delay` instant and drops empty head slots that become too late
+    (relative to the next available packet across a gap). Time base is anchored from the first
+    received packet; drift correction stays disabled until Phase 4. Added one additive helper
+    `RecvBuffer.PeekNextAvailableTimestamp` for precise wake-up scheduling. Tests `TestTSBPDPlayout`
+    (exact arrival+delay timing) and `TestTSBPDTooLateDrop`.
   - ⬜ TODO: wire the public `Conn` to delegate to a session driving a `core.Conn`; prove against
     `e2e_test.go` / `conn_test.go`; head-to-head `make bench` vs the current implementation.
 - **Phase 2 — handshake & dialer.** Move induction/conclusion (HSv5, then HSv4) into the core;

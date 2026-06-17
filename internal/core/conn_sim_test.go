@@ -210,6 +210,177 @@ func TestSimLossRecovery(t *testing.T) {
 	}
 }
 
+// --- TSBPD playout ---
+
+type tsbpdDelivery struct {
+	at  clock.Timestamp
+	idx uint32
+}
+
+type tsbpdArrival struct {
+	at  clock.Timestamp
+	pkt packet.Packet
+}
+
+// runTSBPD feeds a single live receiver core a stream of packets spaced by
+// intervalUs (packet i carries wire timestamp i*intervalUs and arrives at
+// base+i*intervalUs), optionally skipping dropIdx entirely (never delivered),
+// and returns when each surviving packet was delivered.
+func runTSBPD(t *testing.T, n int, intervalUs, delay clock.Microseconds, dropIdx int) []tsbpdDelivery {
+	t.Helper()
+	const rcvISN = 100
+	base := clock.Timestamp(1_000_000)
+
+	rcv := core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: simPayload, SendISN: 9000, RecvISN: rcvISN,
+		MaxBW: 1 << 34, Live: true, TsbpdDelay: delay,
+	}, base)
+
+	timers := make(map[core.TimerID]clock.Timestamp)
+	var got []tsbpdDelivery
+	drain := func(now clock.Timestamp) {
+		for {
+			o, ok := rcv.PollOutput()
+			if !ok {
+				break
+			}
+			switch v := o.(type) {
+			case core.SetTimer:
+				timers[v.ID] = v.Deadline
+			case core.ClearTimer:
+				delete(timers, v.ID)
+			case core.SendPacket:
+				if v.Owned {
+					v.Packet.Release()
+				}
+			}
+		}
+		for {
+			e, ok := rcv.PollEvent()
+			if !ok {
+				break
+			}
+			if d, ok := e.(core.DataReceived); ok {
+				got = append(got, tsbpdDelivery{at: now, idx: binary.BigEndian.Uint32(d.Data)})
+			}
+		}
+	}
+	drain(base)
+
+	var pending []tsbpdArrival
+	for i := 0; i < n; i++ {
+		if i == dropIdx {
+			continue
+		}
+		ts := uint32(int64(intervalUs) * int64(i))
+		payload := make([]byte, simPayload)
+		binary.BigEndian.PutUint32(payload, uint32(i))
+		p := packet.NewData(nil, uint32(rcvISN+i), ts, 1, payload)
+		pending = append(pending, tsbpdArrival{
+			at:  base.Add(intervalUs * clock.Microseconds(i)),
+			pkt: p,
+		})
+	}
+
+	expected := n
+	if dropIdx >= 0 && dropIdx < n {
+		expected = n - 1
+	}
+
+	now := base
+	pi := 0
+	const maxIter = 1_000_000
+	for iter := 0; iter < maxIter; iter++ {
+		if len(got) >= expected {
+			break
+		}
+		for {
+			progressed := false
+			for pi < len(pending) && !pending[pi].at.After(now) {
+				rcv.HandlePacket(now, pending[pi].pkt)
+				pi++
+				progressed = true
+			}
+			for id, dl := range timers {
+				if !dl.After(now) {
+					delete(timers, id)
+					rcv.HandleTimer(now, id)
+					progressed = true
+				}
+			}
+			drain(now)
+			if !progressed {
+				break
+			}
+		}
+		// Advance to the next event (earliest timer or next arrival).
+		var next clock.Timestamp
+		have := false
+		for _, dl := range timers {
+			if !have || dl.Before(next) {
+				next, have = dl, true
+			}
+		}
+		if pi < len(pending) && (!have || pending[pi].at.Before(next)) {
+			next, have = pending[pi].at, true
+		}
+		if !have {
+			break
+		}
+		now = next
+	}
+	return got
+}
+
+func TestTSBPDPlayout(t *testing.T) {
+	const (
+		n          = 30
+		intervalUs = 10 * clock.Millisecond
+		delay      = 100 * clock.Millisecond
+	)
+	base := clock.Timestamp(1_000_000)
+	got := runTSBPD(t, n, intervalUs, delay, -1)
+
+	if len(got) != n {
+		t.Fatalf("delivered %d/%d", len(got), n)
+	}
+	for i, r := range got {
+		if r.idx != uint32(i) {
+			t.Fatalf("delivery %d out of order: got idx %d", i, r.idx)
+		}
+		// Each packet must be held until exactly arrival+delay.
+		want := base.Add(intervalUs * clock.Microseconds(i)).Add(delay)
+		if r.at != want {
+			t.Fatalf("packet %d delivered at %d, want %d (TSBPD delay not honored)", i, r.at, want)
+		}
+	}
+}
+
+func TestTSBPDTooLateDrop(t *testing.T) {
+	const (
+		n          = 30
+		intervalUs = 10 * clock.Millisecond
+		delay      = 100 * clock.Millisecond
+		dropIdx    = 12
+	)
+	base := clock.Timestamp(1_000_000)
+	got := runTSBPD(t, n, intervalUs, delay, dropIdx)
+
+	if len(got) != n-1 {
+		t.Fatalf("delivered %d, want %d (dropped pkt should be skipped)", len(got), n-1)
+	}
+	for _, r := range got {
+		if r.idx == dropIdx {
+			t.Fatalf("dropped packet %d was delivered", dropIdx)
+		}
+		// Surviving packets still play out at their own arrival+delay.
+		want := base.Add(intervalUs * clock.Microseconds(int(r.idx))).Add(delay)
+		if r.at != want {
+			t.Fatalf("packet %d delivered at %d, want %d", r.idx, r.at, want)
+		}
+	}
+}
+
 // earliest returns the soonest pending event time across both timer wheels and
 // both in-flight queues.
 func earliest(a, b *simHost, fwd, bwd []inflight) (clock.Timestamp, bool) {

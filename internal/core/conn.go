@@ -8,6 +8,7 @@ import (
 	"github.com/zsiec/srtgo/internal/congestion"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
+	"github.com/zsiec/srtgo/internal/tsbpd"
 )
 
 // Data-path timing constants (microseconds), ported from the root conn.go.
@@ -20,6 +21,8 @@ const (
 	minNAKInterval = 20 * clock.Millisecond  // live-CC NAK floor
 	rttSanityCap   = 10 * clock.Second       // reject RTT samples >= this
 	maxPacingBurst = 10 * clock.Millisecond  // cap on accumulated pacing credit
+
+	defaultTsbpdDelay = 120 * clock.Millisecond // default playout latency
 )
 
 // Config parameters an established connection. Handshake negotiation (Phase 2)
@@ -32,6 +35,9 @@ type Config struct {
 	FlowWindow     int        // negotiated max packets in flight (0 -> default)
 	BufferCapacity int        // send/recv ring capacity in packets (0 -> default)
 	MaxBW          int64      // max send bandwidth bytes/sec (0 -> LiveCC default)
+
+	Live       bool               // true -> TSBPD playout + too-late drop (live mode)
+	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
 }
 
 // Conn is the pure, single-threaded SRT data-path state machine for one
@@ -60,7 +66,10 @@ type Conn struct {
 	rcvFlowWin   int             // dynamic window from peer ACK (0 = unknown)
 
 	// Receive side.
-	recvBuf *buffer.RecvBuffer
+	recvBuf      *buffer.RecvBuffer
+	tsbpdTimer   *tsbpd.Timer // non-nil in live mode; schedules playout
+	tsbpdBaseSet bool         // time base initialized from the first data packet
+	recvDropped  uint64       // packets dropped too-late (TSBPD)
 
 	// ACK / NAK / RTT state.
 	ackSeqNo        uint32
@@ -112,6 +121,18 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		rtt:           initialRTT,
 		rttVar:        initialRTT / 2,
 		lightACKCount: 1,
+	}
+	if cfg.Live {
+		delay := cfg.TsbpdDelay
+		if delay <= 0 {
+			delay = defaultTsbpdDelay
+		}
+		// Time base is set from the first received packet; drift correction is
+		// deferred to a later phase, so disable it for now.
+		c.tsbpdTimer = tsbpd.New(delay, 0)
+		c.tsbpdTimer.SetDriftEnabled(false)
+		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
+		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
 	}
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
@@ -174,6 +195,10 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 		c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
 	case TimerSndPacing:
 		c.pump(now)
+	case TimerTSBPD:
+		if c.tsbpdTimer != nil {
+			c.deliverTSBPD(now)
+		}
 	}
 }
 
@@ -263,6 +288,16 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		c.sendCC.OnPacketReceived(p.Header.SequenceNumber, len(p.Data), now)
 	}
 
+	if c.tsbpdTimer != nil {
+		if !c.tsbpdBaseSet {
+			// Anchor the time base so this first packet plays out at now+delay:
+			// DeliveryTime(ts) = timeBase + ts + delay, so timeBase = now - ts.
+			c.tsbpdTimer.SetTimeBase(now.Add(-clock.Microseconds(p.Header.Timestamp)))
+			c.tsbpdBaseSet = true
+		}
+		c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
+	}
+
 	if res.HasGap() {
 		c.sendImmediateNAK(now, res.GapStart, res.GapEnd)
 	}
@@ -273,22 +308,52 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		c.lightACKCount++
 	}
 
-	c.deliver()
+	if c.tsbpdTimer != nil {
+		c.deliverTSBPD(now)
+	} else {
+		c.deliver()
+	}
 }
 
 // deliver drains all now-contiguous packets to the application as DataReceived
-// events. (TSBPD playout scheduling is a later phase.)
+// events. Used in file mode (no TSBPD playout hold).
 func (c *Conn) deliver() {
 	for {
 		p, ok := c.recvBuf.ReadNext()
 		if !ok {
 			return
 		}
-		data := make([]byte, len(p.Data))
-		copy(data, p.Data)
-		p.Release()
-		c.events.push(DataReceived{Data: data})
+		c.emitData(p)
 	}
+}
+
+// deliverTSBPD delivers every packet whose TSBPD playout time has arrived,
+// drops empty head slots that are now too late, and arms TimerTSBPD for the
+// next packet's playout instant.
+func (c *Conn) deliverTSBPD(now clock.Timestamp) {
+	dt := c.tsbpdTimer.DeliveryTime
+	if dropped := c.recvBuf.DropTooLate(now, dt); dropped > 0 {
+		c.recvDropped += uint64(dropped)
+	}
+	for {
+		p, ok := c.recvBuf.ReadTSBPD(now, dt)
+		if !ok {
+			break
+		}
+		c.emitData(p)
+	}
+	if ts, ok := c.recvBuf.PeekNextAvailableTimestamp(); ok {
+		c.outputs.push(SetTimer{ID: TimerTSBPD, Deadline: dt(ts)})
+	}
+}
+
+// emitData copies a delivered packet's payload into an owned slice and queues
+// it as a DataReceived event, releasing the pooled packet buffer.
+func (c *Conn) emitData(p packet.Packet) {
+	data := make([]byte, len(p.Data))
+	copy(data, p.Data)
+	p.Release()
+	c.events.push(DataReceived{Data: data})
 }
 
 // ---- ACK ----
