@@ -8,6 +8,7 @@ import (
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/core"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/mux"
 )
 
@@ -43,7 +44,7 @@ func Listen(conn net.PacketConn, cfg core.ListenerConfig, clk clock.Clock) (*Lis
 	l := &Listener{
 		mux:      m,
 		clk:      clk,
-		core:     core.NewListener(cfg, secret, randFill),
+		core:     core.NewListener(cfg, secret, randFill, newCryptoCtx),
 		addrs:    make(map[core.PeerID]net.Addr),
 		accept:   make(chan *Session, 64),
 		quit:     make(chan struct{}),
@@ -131,4 +132,11 @@ func (l *Listener) drain(now clock.Timestamp) {
 // socket-ID and ISN generation.
 func randFill(b []byte) {
 	_, _ = rand.Read(b)
+}
+
+// newCryptoCtx builds a fresh AES-CTR crypto context for the listener core to
+// unwrap a caller's key material into (UnmarshalKM overwrites the random keys,
+// and adopts GCM from the KMREQ if the caller chose it).
+func newCryptoCtx(keyLen int) (*crypto.Context, error) {
+	return crypto.New(keyLen)
 }

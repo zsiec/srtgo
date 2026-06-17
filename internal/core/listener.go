@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
@@ -24,6 +25,7 @@ type ListenerConfig struct {
 	MaxBW          int64
 	PayloadSize    int
 	BufferCapacity int
+	Passphrase     string // if set, accept encrypted callers (unwrap their KMREQ)
 }
 
 // ListenerOutput is a datagram the listener asks the host to send to a peer.
@@ -57,12 +59,14 @@ func (Accepted) isListenerEvent() {}
 // acceptedConn remembers the parameters of an accepted peer so a duplicate
 // CONCLUSION (its response was lost) can be answered without re-accepting.
 type acceptedConn struct {
-	socketID uint32
-	isn      seq.Number
-	mss      uint32
-	fc       uint32
-	recvLat  uint16
-	sendLat  uint16
+	socketID  uint32
+	isn       seq.Number
+	mss       uint32
+	fc        uint32
+	recvLat   uint16
+	sendLat   uint16
+	cryptoCtx *crypto.Context         // non-nil for encrypted callers
+	kmKey     packet.PacketEncryption // key slot to echo in the KMRSP
 }
 
 // Listener is the pure, Sans-I/O SRT listener state machine. Induction is
@@ -72,7 +76,8 @@ type acceptedConn struct {
 type Listener struct {
 	cfg          ListenerConfig
 	cookieSecret uint64
-	rng          func([]byte) // host-provided entropy for socket IDs / ISNs
+	rng          func([]byte)                              // host entropy for socket IDs / ISNs
+	newCtx       func(keyLen int) (*crypto.Context, error) // host crypto-context factory (may be nil)
 	accepted     map[PeerID]acceptedConn
 
 	outputs fifo[ListenerOutput]
@@ -81,7 +86,11 @@ type Listener struct {
 
 // NewListener builds a listener. cookieSecret keys the SYN cookie (the host
 // generates it randomly); rng supplies entropy for accepted socket IDs and ISNs.
-func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte)) *Listener {
+// newCtx builds a fresh crypto context (the host owns this entropy); it may be
+// nil when no passphrase is configured. The context's random keys are
+// immediately overwritten by the caller's unwrapped key material, so the result
+// is a deterministic function of the KMREQ and passphrase.
+func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte), newCtx func(keyLen int) (*crypto.Context, error)) *Listener {
 	if cfg.RecvLatencyMS == 0 {
 		cfg.RecvLatencyMS = 120
 	}
@@ -95,6 +104,7 @@ func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte)) *Lis
 		cfg:          cfg,
 		cookieSecret: cookieSecret,
 		rng:          rng,
+		newCtx:       newCtx,
 		accepted:     make(map[PeerID]acceptedConn),
 	}
 }
@@ -164,13 +174,34 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 			sendLat = hs.SRTHS.SendTSBPDDelay
 		}
 	}
+
+	// Unwrap the caller's key material if encryption is configured.
+	var cryptoCtx *crypto.Context
+	var kmKey packet.PacketEncryption
+	if l.cfg.Passphrase != "" && hs.HasKM && hs.SRTKM != nil && l.newCtx != nil {
+		keyLen := int(hs.SRTKM.KLen)
+		if keyLen == 0 {
+			keyLen = 16
+		}
+		ctx, err := l.newCtx(keyLen)
+		if err == nil && ctx.UnmarshalKM(hs.SRTKM, l.cfg.Passphrase) == nil {
+			cryptoCtx = ctx
+			kmKey = hs.SRTKM.KeyBasedEncryption
+		}
+		if cryptoCtx == nil {
+			return // bad passphrase / key material: drop (rejection codes are a later step)
+		}
+	}
+
 	a := acceptedConn{
-		socketID: l.randUint32() | 1, // nonzero
-		isn:      seq.Number(l.randUint32() & uint32(seq.Max)),
-		mss:      hs.MaxTransmissionUnitSize,
-		fc:       hs.MaxFlowWindowSize,
-		recvLat:  recvLat,
-		sendLat:  sendLat,
+		socketID:  l.randUint32() | 1, // nonzero
+		isn:       seq.Number(l.randUint32() & uint32(seq.Max)),
+		mss:       hs.MaxTransmissionUnitSize,
+		fc:        hs.MaxFlowWindowSize,
+		recvLat:   recvLat,
+		sendLat:   sendLat,
+		cryptoCtx: cryptoCtx,
+		kmKey:     kmKey,
 	}
 	l.accepted[peer] = a
 	l.outputs.push(SendTo{Peer: peer, Packet: l.buildConclusionResponse(a, hs.SRTSocketID)})
@@ -186,11 +217,21 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		MaxBW:          l.cfg.MaxBW,
 		Live:           l.cfg.Live,
 		TsbpdDelay:     clock.Microseconds(recvLat) * 1000,
+		CryptoCtx:      cryptoCtx,
+		ActiveKey:      packet.EncryptionEven,
+		Passphrase:     l.cfg.Passphrase,
 	})
 	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID})
 }
 
 func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32) packet.Packet {
+	var km *packet.CIFKeyMaterial
+	if a.cryptoCtx != nil {
+		km = &packet.CIFKeyMaterial{}
+		if err := a.cryptoCtx.MarshalKM(km, l.cfg.Passphrase, a.kmKey); err != nil {
+			km = nil
+		}
+	}
 	return handshake.BuildConclusionResponse(
 		a.socketID, a.isn.Value(),
 		a.mss, a.fc,
@@ -201,7 +242,7 @@ func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32
 		"",      // no FEC filter
 		0, 0, 0, // no group
 		nil, // addr (host fills); PeerIP 0.0.0.0
-		nil, // no key material (unencrypted)
+		km,  // key material echo (nil = unencrypted)
 	)
 }
 

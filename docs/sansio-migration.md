@@ -207,8 +207,12 @@ Each phase keeps the public API and `make test` green.
   - ✅ **Compatibility loop closed**: `TestInteropLegacyCallerToNewListener` (legacy `srt.Dial` →
     new listener) plus `TestNewStackEndToEnd` (new caller → new listener — the entire rebuilt stack,
     no legacy code in the path). All under `-race`.
-  - ⬜ TODO: listener-side KM (accept encrypted callers); rejection codes; rendezvous handshake;
-    deferred-accept / stream-ID gating.
+  - ✅ Listener-side key material: the listener unwraps an encrypted caller's KMREQ (host injects a
+    crypto-context factory; `UnmarshalKM` overwrites the random keys, so it's deterministic from the
+    KMREQ + passphrase) and echoes a KMRSP. Proven by `TestNewStackEncryptedEndToEnd` (new↔new,
+    AES-CTR) and `TestInteropLegacyEncryptedCallerToNewListener` (legacy encrypted caller → new
+    listener). Encryption matrix now green in all directions.
+  - ⬜ TODO: rejection codes; rendezvous handshake; deferred-accept / stream-ID gating.
 - **Phase 6 — groups/bonding.** `group.go` (43KB, multi-socket). Highest risk; the references model
   this differently — design separately once the single-conn core is proven.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay

@@ -242,6 +242,142 @@ func TestNewStackEndToEnd(t *testing.T) {
 	}
 }
 
+// streamEncrypted runs a 300-payload AES-CTR stream from caller (a Session) to
+// a reader goroutine, used by the encrypted listener tests below.
+func streamEncrypted(t *testing.T, write func([]byte) error, read func([]byte) (int, error)) {
+	t.Helper()
+	const (
+		n          = 300
+		payloadLen = 1200
+	)
+	recvd := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2000)
+		for i := 0; i < n; i++ {
+			got, err := read(buf)
+			if err != nil {
+				recvd <- fmt.Errorf("read %d: %w", i, err)
+				return
+			}
+			if got != payloadLen || binary.BigEndian.Uint32(buf) != uint32(i) {
+				recvd <- fmt.Errorf("payload mismatch at %d (n=%d)", i, got)
+				return
+			}
+		}
+		recvd <- nil
+	}()
+	go func() {
+		for i := 0; i < n; i++ {
+			p := make([]byte, payloadLen)
+			binary.BigEndian.PutUint32(p, uint32(i))
+			if err := write(p); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-recvd:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout: not all encrypted payloads received")
+	}
+}
+
+const encPass = "0123456789abcdef" // 16 bytes, within SRT's 10-80 range
+
+// TestNewStackEncryptedEndToEnd runs the full new stack with AES-CTR: the new
+// listener unwraps the new caller's KMREQ and decrypts its data.
+func TestNewStackEncryptedEndToEnd(t *testing.T) {
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		Passphrase: encPass,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan *session.Session, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		Passphrase: encPass, KeyLength: 16,
+	}, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer caller.Close()
+
+	var recv *session.Session
+	select {
+	case recv = <-accepted:
+		defer recv.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	streamEncrypted(t, caller.Write, recv.Read)
+}
+
+// TestInteropLegacyEncryptedCallerToNewListener: the legacy encrypted caller
+// connects to the new listener, which unwraps the key material and decrypts.
+func TestInteropLegacyEncryptedCallerToNewListener(t *testing.T) {
+	uconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(uconn, core.ListenerConfig{
+		Live: true, MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		Passphrase: encPass,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan *session.Session, 1)
+	go func() {
+		if s, err := ln.Accept(); err == nil {
+			accepted <- s
+		}
+	}()
+
+	cfg := srt.DefaultConfig()
+	cfg.Latency = 120 * time.Millisecond
+	cfg.Passphrase = encPass
+	caller, err := srt.Dial(ln.Addr().String(), cfg)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer caller.Close()
+
+	var recv *session.Session
+	select {
+	case recv = <-accepted:
+		defer recv.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	streamEncrypted(t, func(b []byte) error { _, err := caller.Write(b); return err }, recv.Read)
+}
+
 // TestInteropEncryptedCallerToLegacyListener does the same as the plaintext
 // interop test but with AES-CTR encryption: the new caller wraps its session
 // key into the CONCLUSION KMREQ and encrypts every data packet; the legacy
