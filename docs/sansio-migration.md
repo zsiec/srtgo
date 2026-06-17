@@ -196,8 +196,19 @@ Each phase keeps the public API and `make test` green.
     `KeyRefreshNeeded` event, GCM interop test, listener-side KM (Phase 5).
 - **Phase 4 — TSBPD drift, FEC, stats.** Drift correction, `internal/filter` integration, and the
   `Stats()` snapshot path through the loop.
-- **Phase 5 — listener & rendezvous.** `core.Listener` with stateless SYN-cookie induction
-  (template: `srtrust/crates/srt-protocol/src/listener.rs`); rendezvous handshake variant.
+- **Phase 5 — listener & rendezvous. 🚧 listener done (unencrypted).**
+  - ✅ `core.Listener` (`internal/core/listener.go`): stateless SYN-cookie induction (cookie =
+    keyed hash of an opaque `PeerID`, keeping the core net-free — the host maps PeerID↔addr),
+    CONCLUSION verify + accept, duplicate-CONCLUSION resend, `Accepted` event carrying a ready
+    `*Conn`. Entropy (cookie secret, socket IDs, ISNs) is injected by the host. Outputs are
+    `SendTo{Peer, Packet}` so responses target specific peers.
+  - ✅ `session.Listen` / `Listener.Accept`: owns the mux, routes handshakes from `mux.Handshake`,
+    registers each accepted socket ID, and returns a driven per-connection Session.
+  - ✅ **Compatibility loop closed**: `TestInteropLegacyCallerToNewListener` (legacy `srt.Dial` →
+    new listener) plus `TestNewStackEndToEnd` (new caller → new listener — the entire rebuilt stack,
+    no legacy code in the path). All under `-race`.
+  - ⬜ TODO: listener-side KM (accept encrypted callers); rejection codes; rendezvous handshake;
+    deferred-accept / stream-ID gating.
 - **Phase 6 — groups/bonding.** `group.go` (43KB, multi-socket). Highest risk; the references model
   this differently — design separately once the single-conn core is proven.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
