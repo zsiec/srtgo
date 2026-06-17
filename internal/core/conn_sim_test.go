@@ -6,6 +6,7 @@ import (
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/core"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/packet"
 )
 
@@ -125,6 +126,15 @@ func TestSimLossRecovery(t *testing.T) {
 	// retransmissions get through), exercising immediate-NAK recovery.
 	dropOnce := map[uint32]bool{150: true, 151: true, 152: true, 207: true, 333: true}
 
+	runStream(t, sender, receiver, base, numPayloads, dropOnce)
+}
+
+// runStream drives the two cores over the lossy in-memory link until the
+// receiver has delivered numPayloads payloads, then asserts they arrived intact
+// and in order. dropFwd drops the listed forward data sequence numbers once.
+func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, numPayloads int, dropFwd map[uint32]bool) {
+	t.Helper()
+
 	// Hand the whole stream to the sender up front; pacing spreads it out.
 	for i := 0; i < numPayloads; i++ {
 		sender.c.Write(base, makePayload(i))
@@ -143,8 +153,7 @@ func TestSimLossRecovery(t *testing.T) {
 		}
 	}
 
-	// Initial drain (the up-front Writes produced data + the constructors armed timers).
-	schedule(sender.drain(), &fwd, dropOnce)
+	schedule(sender.drain(), &fwd, dropFwd)
 	schedule(receiver.drain(), &bwd, nil)
 
 	deliverDue := func(q *[]inflight, dst *simHost) bool {
@@ -176,20 +185,18 @@ func TestSimLossRecovery(t *testing.T) {
 		if len(receiver.delivered) >= numPayloads {
 			break
 		}
-		// Settle everything due at the current instant.
 		for {
 			p := false
 			p = deliverDue(&fwd, receiver) || p
 			p = deliverDue(&bwd, sender) || p
 			p = fireTimers(sender) || p
 			p = fireTimers(receiver) || p
-			schedule(sender.drain(), &fwd, dropOnce)
+			schedule(sender.drain(), &fwd, dropFwd)
 			schedule(receiver.drain(), &bwd, nil)
 			if !p {
 				break
 			}
 		}
-		// Advance virtual time to the next scheduled event.
 		next, ok := earliest(sender, receiver, fwd, bwd)
 		if !ok {
 			break
@@ -208,6 +215,41 @@ func TestSimLossRecovery(t *testing.T) {
 			t.Fatalf("payload %d out of order: got index %d", i, got)
 		}
 	}
+}
+
+// TestSimEncryptedLossRecovery runs the same lossy stream with AES-CTR
+// encryption: the two cores share one crypto context, so the sender encrypts
+// each data packet and the receiver decrypts it — exercising the core's encrypt
+// AND decrypt paths (the interop test only covers encrypt). Recovered
+// retransmissions must decrypt identically.
+func TestSimEncryptedLossRecovery(t *testing.T) {
+	const (
+		sndSocketID = 1
+		rcvSocketID = 2
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 400
+	)
+	base := clock.Timestamp(1_000_000)
+
+	ctx, err := crypto.New(16) // shared AES-CTR context (same salt + SEKs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: rcvSocketID, PayloadSize: simPayload,
+		SendISN: sndISN, RecvISN: rcvISN, MaxBW: 1 << 34,
+		CryptoCtx: ctx, ActiveKey: packet.EncryptionEven,
+	}, base))
+	receiver := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: sndSocketID, PayloadSize: simPayload,
+		SendISN: rcvISN, RecvISN: sndISN, MaxBW: 1 << 34,
+		CryptoCtx: ctx, ActiveKey: packet.EncryptionEven,
+	}, base))
+
+	dropOnce := map[uint32]bool{150: true, 151: true, 152: true, 280: true, 333: true}
+	runStream(t, sender, receiver, base, numPayloads, dropOnce)
 }
 
 // --- TSBPD playout ---

@@ -182,8 +182,18 @@ Each phase keeps the public API and `make test` green.
     HSv5 handshake against the existing `srt.Listen` listener over UDP and streams 300 payloads it
     receives in order. Confirms wire compatibility of both handshake and data path.
   - ⬜ TODO: HSv4 fallback; rejection-code handling; populate `Connected` with full negotiated params.
-- **Phase 3 — crypto & key rotation.** Fold `conn_crypto.go` + KM state machine into the core;
-  surface `KeyRefreshNeeded`.
+- **Phase 3 — crypto & key rotation. 🚧 encrypted data path done.**
+  - ✅ Encrypted data path in the core: `encrypt`/`decrypt` helpers (AES-CTR + AES-GCM code paths),
+    encrypting *before* the send buffer so retransmissions resend identical ciphertext. The caller
+    wraps its session key into the CONCLUSION KMREQ (`MarshalKM`); `Config`/`DialConfig` carry the
+    crypto context (the host owns the entropy — `session.Dial` builds it — keeping the core
+    deterministic). Conclusion fails on encryption mismatch (requested KM, none returned).
+  - ✅ Proven both directions: `TestInteropEncryptedCallerToLegacyListener` (new caller's encrypt
+    interops with the legacy listener over UDP, 300 AES-CTR payloads) and
+    `TestSimEncryptedLossRecovery` (two cores share a context; encrypt+decrypt+retransmit recovery
+    in virtual time).
+  - ⬜ TODO: mid-stream key rotation (KMREQ pre-announce/refresh/decommission, `sndKmState`),
+    `KeyRefreshNeeded` event, GCM interop test, listener-side KM (Phase 5).
 - **Phase 4 — TSBPD drift, FEC, stats.** Drift correction, `internal/filter` integration, and the
   `Stats()` snapshot path through the loop.
 - **Phase 5 — listener & rendezvous.** `core.Listener` with stateless SYN-cookie induction

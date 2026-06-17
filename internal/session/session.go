@@ -20,6 +20,7 @@ import (
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/core"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/mux"
 	"github.com/zsiec/srtgo/internal/packet"
@@ -106,6 +107,23 @@ func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk cloc
 			return nil, err
 		}
 		dc.CallerISN = seq.Number(isn)
+	}
+	// Build the crypto context here (the I/O layer owns the entropy used for the
+	// salt and session keys), keeping the core deterministic.
+	if dc.Passphrase != "" && dc.CryptoCtx == nil {
+		keyLen := dc.KeyLength
+		if keyLen == 0 {
+			keyLen = 16
+		}
+		mode := crypto.CipherCTR
+		if dc.CryptoMode == 2 {
+			mode = crypto.CipherGCM
+		}
+		ctx, err := crypto.NewWithMode(keyLen, mode)
+		if err != nil {
+			return nil, err
+		}
+		dc.CryptoCtx = ctx
 	}
 	mss := int(dc.MSS)
 	if mss == 0 {

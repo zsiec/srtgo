@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
@@ -37,6 +38,15 @@ type DialConfig struct {
 	Congestion     string     // "live" or "file" (empty -> "live")
 	StreamID       string     // optional stream ID
 
+	// Encryption. The host supplies a crypto context (it owns the entropy used
+	// to generate the salt and keys); Passphrase wraps the key material in the
+	// KMREQ. CryptoCtx nil means an unencrypted connection. KeyLength and
+	// CryptoMode are hints the host uses to build CryptoCtx (see session.Dial).
+	CryptoCtx  *crypto.Context
+	Passphrase string
+	KeyLength  int // AES key bytes: 16/24/32 (0 -> 16); used by the host
+	CryptoMode int // 0/1 -> AES-CTR, 2 -> AES-GCM; used by the host
+
 	// Applied once the handshake completes.
 	PayloadSize    int   // data payload per packet (0 -> MSS-44)
 	BufferCapacity int   // send/recv ring capacity (0 -> default)
@@ -57,6 +67,9 @@ type dialState struct {
 	streamID  string
 
 	cookie uint32 // learned from the induction response
+
+	cryptoCtx  *crypto.Context
+	passphrase string
 
 	payloadSize    int
 	bufferCapacity int
@@ -99,6 +112,8 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			sendLatMS:      dc.SendLatencyMS,
 			cong:           dc.Congestion,
 			streamID:       dc.StreamID,
+			cryptoCtx:      dc.CryptoCtx,
+			passphrase:     dc.Passphrase,
 			payloadSize:    payloadSize,
 			bufferCapacity: dc.BufferCapacity,
 			maxBW:          dc.MaxBW,
@@ -123,6 +138,13 @@ func (c *Conn) sendInduction(now clock.Timestamp) {
 // carrying the HSREQ extension) and re-arms the retransmit timer.
 func (c *Conn) sendConclusion(now clock.Timestamp) {
 	d := c.dial
+	var km *packet.CIFKeyMaterial
+	if d.cryptoCtx != nil {
+		km = &packet.CIFKeyMaterial{}
+		if err := d.cryptoCtx.MarshalKM(km, d.passphrase, packet.EncryptionEven); err != nil {
+			km = nil // fall through unencrypted; handleConclusionResponse will fail if KM was required
+		}
+	}
 	p := handshake.BuildConclusion(
 		d.socketID, d.isn.Value(), d.mss, d.fc, d.cookie,
 		d.streamID, d.recvLatMS, d.sendLatMS,
@@ -131,7 +153,7 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 		"",      // no FEC filter
 		0, 0, 0, // no group
 		nil, // addr (host fills); PeerIP 0.0.0.0
-		nil, // no key material (unencrypted)
+		km,  // key material (nil = unencrypted)
 	)
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
 	c.outputs.push(SetTimer{ID: TimerHandshake, Deadline: now.Add(handshakeRetryInterval)})
@@ -203,6 +225,12 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
 		fc = int(hs.MaxFlowWindowSize)
 	}
 
+	// We requested encryption but the listener returned no key material.
+	if d.cryptoCtx != nil && !hs.HasKM {
+		c.fail(fmt.Errorf("core: listener returned no key material (encryption mismatch)"))
+		return
+	}
+
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
 		PeerSocketID:   hs.SRTSocketID,
@@ -214,6 +242,9 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
 		MaxBW:          d.maxBW,
 		Live:           d.live,
 		TsbpdDelay:     clock.Microseconds(recvLatMS) * 1000, // ms -> us
+		CryptoCtx:      d.cryptoCtx,
+		ActiveKey:      packet.EncryptionEven,
+		Passphrase:     d.passphrase,
 	})
 	c.dial = nil
 	c.events.push(Connected{PeerSocketID: hs.SRTSocketID})

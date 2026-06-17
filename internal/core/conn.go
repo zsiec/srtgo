@@ -6,6 +6,7 @@ import (
 	"github.com/zsiec/srtgo/internal/buffer"
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/congestion"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
 	"github.com/zsiec/srtgo/internal/tsbpd"
@@ -39,6 +40,11 @@ type Config struct {
 
 	Live       bool               // true -> TSBPD playout + too-late drop (live mode)
 	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
+
+	// Encryption (nil = unencrypted). The host owns the context's entropy.
+	CryptoCtx  *crypto.Context
+	ActiveKey  packet.PacketEncryption // outgoing key slot (0/None -> Even)
+	Passphrase string
 }
 
 // Conn is the pure, single-threaded SRT state machine for one connection. It
@@ -70,6 +76,13 @@ type Conn struct {
 	tsbpdTimer   *tsbpd.Timer // non-nil in live mode; schedules playout
 	tsbpdBaseSet bool         // time base initialized from the first data packet
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
+
+	// Encryption (nil when unencrypted). The context (salt + even/odd SEKs) is
+	// created by the host; the core only wraps it for KMREQ and en/decrypts.
+	cryptoCtx     *crypto.Context
+	activeKey     packet.PacketEncryption // even/odd key slot for outgoing data
+	passphrase    string                  // for wrapping key material (KMREQ)
+	recvUndecrypt uint64                  // packets that failed decryption
 
 	// ACK / NAK / RTT state.
 	ackSeqNo        uint32
@@ -112,6 +125,9 @@ type establishParams struct {
 	MaxBW          int64
 	Live           bool
 	TsbpdDelay     clock.Microseconds
+	CryptoCtx      *crypto.Context
+	ActiveKey      packet.PacketEncryption
+	Passphrase     string
 }
 
 // NewEstablished builds a connection already in the connected state and arms
@@ -128,6 +144,9 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		MaxBW:          cfg.MaxBW,
 		Live:           cfg.Live,
 		TsbpdDelay:     cfg.TsbpdDelay,
+		CryptoCtx:      cfg.CryptoCtx,
+		ActiveKey:      cfg.ActiveKey,
+		Passphrase:     cfg.Passphrase,
 	})
 	return c
 }
@@ -167,6 +186,14 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		c.tsbpdTimer.SetDriftEnabled(false)
 		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
 		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
+	}
+	if ep.CryptoCtx != nil {
+		c.cryptoCtx = ep.CryptoCtx
+		c.passphrase = ep.Passphrase
+		c.activeKey = ep.ActiveKey
+		if c.activeKey == packet.EncryptionNone {
+			c.activeKey = packet.EncryptionEven
+		}
 	}
 	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
@@ -290,6 +317,12 @@ func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
 	p.Header.PacketPosition = packet.PositionSingle
 	p.Header.Order = true
 
+	// Encrypt before buffering so retransmissions resend identical ciphertext
+	// (same sequence number -> same keystream) with no re-encryption.
+	if c.cryptoCtx != nil {
+		c.encrypt(&p, seqNo.Value())
+	}
+
 	if !c.sendBuf.Push(p, now) {
 		// Window check above should prevent this; drop defensively.
 		p.Release()
@@ -317,9 +350,56 @@ func (c *Conn) window() int {
 	return w
 }
 
+// ---- crypto ----
+
+// encrypt sets the encryption flag and encrypts the packet payload in place
+// (CTR) or replaces it with ciphertext+tag (GCM). seqNo drives the per-packet
+// IV. For GCM the marshaled header is the AAD.
+func (c *Conn) encrypt(p *packet.Packet, seqNo uint32) {
+	p.Header.Encryption = c.activeKey
+	var aad []byte
+	if c.cryptoCtx.Mode() == crypto.CipherGCM {
+		var hb [16]byte
+		p.Header.Marshal(hb[:])
+		aad = hb[:]
+	}
+	if enc, err := c.cryptoCtx.EncryptPayload(p.Data, aad, c.activeKey, seqNo); err == nil {
+		p.Data = enc
+	}
+}
+
+// decrypt reverses encrypt. It returns false (drop the packet) on auth/decrypt
+// failure. Unencrypted packets pass through. For GCM the AAD must match the
+// sender's original header, so the retransmit (R) bit is zeroed before marshal.
+func (c *Conn) decrypt(p *packet.Packet) bool {
+	if p.Header.Encryption == packet.EncryptionNone || c.cryptoCtx == nil {
+		return true
+	}
+	var aad []byte
+	if c.cryptoCtx.Mode() == crypto.CipherGCM {
+		savedR := p.Header.Retransmitted
+		p.Header.Retransmitted = false
+		var hb [16]byte
+		p.Header.Marshal(hb[:])
+		aad = hb[:]
+		p.Header.Retransmitted = savedR
+	}
+	dec, err := c.cryptoCtx.DecryptPayload(p.Data, aad, p.Header.Encryption, p.Header.SequenceNumber)
+	if err != nil {
+		c.recvUndecrypt++
+		return false
+	}
+	p.Data = dec
+	return true
+}
+
 // ---- receive path ----
 
 func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
+	if !c.decrypt(&p) {
+		p.Release()
+		return // undecryptable: drop
+	}
 	res := c.recvBuf.Insert(p, now)
 	if !res.Inserted {
 		return // duplicate or belated
