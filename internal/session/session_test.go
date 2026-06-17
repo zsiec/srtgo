@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,16 +21,21 @@ import (
 // distinguishes data from control packets on the wire.
 type lossyConn struct {
 	net.PacketConn
-	mu      sync.Mutex
-	dropSeq map[uint32]bool
+	mu        sync.Mutex
+	dropSeq   map[uint32]bool
+	permanent bool        // if false, drop each sequence only once (its retransmit passes)
+	kill      atomic.Bool // when set, drop all outgoing data (link is "down")
 }
 
 func (c *lossyConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if len(b) >= 4 && b[0]&0x80 == 0 { // data packet
+		if c.kill.Load() {
+			return len(b), nil // link down: packet vanishes
+		}
 		seqNo := binary.BigEndian.Uint32(b[0:4]) & 0x7FFFFFFF
 		c.mu.Lock()
 		drop := c.dropSeq[seqNo]
-		if drop {
+		if drop && !c.permanent {
 			delete(c.dropSeq, seqNo)
 		}
 		c.mu.Unlock()

@@ -444,11 +444,13 @@ func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payloa
 // resetRecvTo advances this connection's receive state so the next expected
 // sequence number is nextSeq, dropping any buffered data. Used by backup-mode
 // bonding to keep a standby link's receiver aligned with the active link, so it
-// is ready to accept packets on failover without a huge spurious gap.
+// is ready to accept packets on failover without a huge spurious gap. The TSBPD
+// time base is left intact — the group keeps all members' time bases in lockstep
+// (see Group.syncTimebases), so the standby plays out in step with the active
+// link rather than re-anchoring to its own (skewed) reference.
 func (c *Conn) resetRecvTo(nextSeq seq.Number) {
 	c.recvBuf.SetInitialRcvSeq(nextSeq)
 	c.rcvLastAckAck = nextSeq
-	c.tsbpdBaseSet = false // re-anchor TSBPD from the next received packet
 }
 
 // WriteCoordinated sends one data packet with a group-assigned sequence number

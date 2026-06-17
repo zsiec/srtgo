@@ -251,9 +251,21 @@ Each phase keeps the public API and `make test` green.
   - ✅ `TestSimBackupFailover`: streams 200 payloads over a weighted backup group, kills the active
     link mid-stream (100 payloads written *after* the kill — deliverable only via failover), and the
     group delivers all 200 in order. Seamless failover, no data loss, deterministic.
-  - ⬜ TODO: the session host (own N member sockets, one loop) + real-UDP test; the group handshake
-    extension / member discovery (needed for cutover & interop); balancing; sender-buffer prune by
-    cross-member ACK refinement; idle/keepalive stability handling.
+  - ✅ Bonding session host (`internal/session/group.go`): owns one socket per member and drives a
+    `core.Group` + all member `core.Conn`s from a single event loop (per-member reader goroutines
+    fan into the loop; a unified timer wheel keyed by member+TimerID plus a group monitor).
+    `NewEstablishedGroup`/`Write`/`Read`/`Close`. Real-UDP tests: `TestGroupBroadcastUDP` (one link
+    permanently lossy → redundancy delivers all 400) and `TestGroupBackupUDP` (active link killed
+    mid-stream → failover delivers all 300). Both green under `-race`, repeatably.
+  - ✅ Two robustness fixes the session host surfaced: (1) **group TSBPD time-base sync** — all
+    receiver members adopt one reference (`Group.syncTimebases` via `tsbpd.ApplyGroupTime`) so they
+    play out each sequence in lockstep; (2) **group reorder buffer** — members deliver their own
+    streams in order and the group merges them in sequence order, buffering out-of-merge-order
+    deliveries and skipping a gap only once it is lost on every link (a bare waterline dropped a
+    slower link's copy of a packet the faster link skipped when playout deadlines coalesced).
+  - ⬜ TODO: group handshake extension / member discovery (needed for cutover & interop, and for
+    handshake-based group dialing); balancing; sender-buffer prune refinement; idle/keepalive
+    stability handling.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 

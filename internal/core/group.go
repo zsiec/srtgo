@@ -3,6 +3,7 @@ package core
 import (
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/seq"
+	"github.com/zsiec/srtgo/internal/tsbpd"
 )
 
 // GroupMode selects bonding behavior.
@@ -43,6 +44,8 @@ type groupMember struct {
 	lastProgress clock.Timestamp // last time the send buffer advanced (an ACK arrived)
 	lastAckSeq   seq.Number
 	ackSeqSet    bool
+
+	tbSynced bool // TSBPD time base aligned to the group reference
 }
 
 // bufferedMsg is a sent payload retained for failover replay.
@@ -78,13 +81,31 @@ type Group struct {
 	senderBuf    []bufferedMsg
 	senderBufCap int
 
-	// Receive-side dedup waterline: the highest sequence delivered so far.
-	rcvWater seq.Number
-	rcvInit  bool
+	// Receive-side merge: members deliver their own streams in sequence order;
+	// the group merges them in order via a small reorder buffer, delivering each
+	// sequence once. deliverNext is the next sequence to deliver; pending holds
+	// buffered out-of-merge-order deliveries; maxSeen is the highest sequence
+	// seen. A gap at deliverNext is skipped only once the stream has advanced
+	// past it by groupReorderWindow (i.e. every link has moved on — the packet
+	// was lost on all of them).
+	pending     map[uint32][]byte
+	deliverNext seq.Number
+	dnInit      bool
+	maxSeen     seq.Number
+	maxSeenSet  bool
+
+	// Group TSBPD reference, captured from the first member to anchor and
+	// applied to all members so they play out each sequence in lockstep.
+	groupTB tsbpd.GroupTimeBase
+	tbSet   bool
 
 	delivered fifo[[]byte]
 	dedups    uint64
 }
+
+// groupReorderWindow bounds how far past a gap the merge advances before
+// declaring the gap lost on every link and skipping it.
+const groupReorderWindow = 256
 
 // NewGroup creates a bonding group in the given mode.
 func NewGroup(mode GroupMode) *Group {
@@ -92,6 +113,7 @@ func NewGroup(mode GroupMode) *Group {
 		mode:         mode,
 		stabTimeout:  defaultStabTimeout,
 		senderBufCap: defaultSenderBufCap,
+		pending:      make(map[uint32][]byte),
 	}
 }
 
@@ -299,6 +321,12 @@ func (g *Group) RouteMember(c *Conn) {
 		}
 	}
 
+	// Keep all members' TSBPD time bases in lockstep before any delivery is due,
+	// so the dedup waterline merges links without dropping a slower link's copy
+	// of a packet the faster link skipped. (Members deliver only delay (>=tens of
+	// ms) after their first packet, so the override always lands first.)
+	g.syncTimebases()
+
 	if g.mode == GroupBackup && source != nil {
 		ackSeq := source.conn.recvBuf.ACKSequence() // highest contiguous received
 		for _, mc := range g.members {
@@ -322,17 +350,73 @@ func (g *Group) RouteMember(c *Conn) {
 	}
 }
 
+// syncTimebases captures the group's TSBPD reference from the first member to
+// anchor one, then applies it to every member that has not yet adopted it (new
+// members, or a standby that was just reset for failover). All members then map
+// a sequence to the same playout instant.
+func (g *Group) syncTimebases() {
+	if !g.tbSet {
+		for _, mc := range g.members {
+			if mc.conn.tsbpdTimer != nil && mc.conn.tsbpdBaseSet {
+				g.groupTB = mc.conn.tsbpdTimer.GetInternalTimeBase()
+				g.tbSet = true
+				mc.tbSynced = true
+				break
+			}
+		}
+		if !g.tbSet {
+			return
+		}
+	}
+	for _, mc := range g.members {
+		if mc.tbSynced || mc.conn.tsbpdTimer == nil {
+			continue
+		}
+		mc.conn.tsbpdTimer.ApplyGroupTime(g.groupTB, mc.conn.tsbpdTimer.Delay())
+		mc.conn.tsbpdBaseSet = true
+		mc.tbSynced = true
+	}
+}
+
 // PollDelivery drains the next deduplicated payload for the application.
 func (g *Group) PollDelivery() ([]byte, bool) { return g.delivered.pop() }
 
 func (g *Group) filterDelivery(s seq.Number, payload []byte) {
-	if g.rcvInit && !s.GreaterThan(g.rcvWater) {
-		g.dedups++ // already delivered from another link (or stale)
+	if !g.dnInit {
+		g.deliverNext = s
+		g.dnInit = true
+	}
+	if s.LessThan(g.deliverNext) {
+		g.dedups++ // already delivered (from this or another link)
 		return
 	}
-	g.rcvWater = s
-	g.rcvInit = true
+	if _, ok := g.pending[s.Value()]; ok {
+		g.dedups++ // duplicate copy from another link
+		return
+	}
 	data := make([]byte, len(payload))
 	copy(data, payload)
-	g.delivered.push(data)
+	g.pending[s.Value()] = data
+	if !g.maxSeenSet || s.GreaterThan(g.maxSeen) {
+		g.maxSeen, g.maxSeenSet = s, true
+	}
+	g.drainPending()
+}
+
+// drainPending delivers buffered packets in sequence order, skipping a gap only
+// once the stream has advanced past it by groupReorderWindow (lost on all links).
+func (g *Group) drainPending() {
+	for {
+		if d, ok := g.pending[g.deliverNext.Value()]; ok {
+			delete(g.pending, g.deliverNext.Value())
+			g.delivered.push(d)
+			g.deliverNext = g.deliverNext.Inc()
+			continue
+		}
+		if g.maxSeenSet && g.maxSeen.GreaterThan(g.deliverNext.Add(groupReorderWindow)) {
+			g.deliverNext = g.deliverNext.Inc() // gap lost on every link; skip it
+			continue
+		}
+		return
+	}
 }
