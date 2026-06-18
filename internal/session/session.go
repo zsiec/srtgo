@@ -45,6 +45,28 @@ func (timeoutErr) Temporary() bool { return true }
 // net.Error with Timeout() == true.
 var ErrTimeout net.Error = timeoutErr{}
 
+// MsgMetadata reports per-message metadata for a received message — the read
+// half of the public MsgCtrl. Boundary is the packet position of the message's
+// first packet (packet.PositionSingle for a single-packet message), MsgNo is
+// the SRT message number, and Seq is the message's first packet sequence number.
+type MsgMetadata struct {
+	Boundary int
+	MsgNo    uint32
+	Seq      uint32
+}
+
+// writeReq is a queued application write plus its per-message send options.
+type writeReq struct {
+	payload []byte
+	opts    core.MsgOptions
+}
+
+// delivery is one received message handed from the loop to Read/ReadMsg.
+type delivery struct {
+	data []byte
+	meta MsgMetadata
+}
+
 // Session drives one core.Conn over a mux. Construct it with NewEstablished or
 // Dial; Write/Read/Close are safe to call from other goroutines.
 type Session struct {
@@ -55,8 +77,8 @@ type Session struct {
 	core       *core.Conn
 
 	recvC  <-chan packet.Packet
-	writeC chan []byte
-	readC  chan []byte
+	writeC chan writeReq
+	readC  chan delivery
 
 	connected chan error           // receives nil on Connected, err on Failed (dial)
 	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
@@ -72,6 +94,7 @@ type Session struct {
 
 	timers    map[core.TimerID]clock.Timestamp
 	closeOnce sync.Once
+	dead      bool // set on the loop goroutine when the core fails mid-stream
 }
 
 // newSession wires a session around a (possibly still-connecting) core and
@@ -84,8 +107,8 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		clk:        clk,
 		core:       cc,
 		recvC:      recvC,
-		writeC:     make(chan []byte, 256),
-		readC:      make(chan []byte, 2048),
+		writeC:     make(chan writeReq, 256),
+		readC:      make(chan delivery, 2048),
 		connected:  make(chan error, 1),
 		statsReq:   make(chan chan core.Stats),
 		quit:       make(chan struct{}),
@@ -188,17 +211,112 @@ func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk cloc
 	}
 }
 
+// DialRendezvous performs a rendezvous (simultaneous-open) handshake: both peers
+// call it with each other's address. The host supplies the entropy (socket ID,
+// ISN, cookie) if rc leaves them zero. It blocks until the connection is
+// established or the timeout elapses.
+//
+// Rendezvous needs both the initial peer WAVEHAND (which arrives with
+// DestinationSocketID 0, so the mux routes it to its Handshake channel) and the
+// later CONCLUSION/AGREEMENT/data (addressed to our socket ID). A small
+// forwarder merges both into the session's input for the duration of the loop.
+func DialRendezvous(conn net.PacketConn, remoteAddr net.Addr, rc core.RendezvousConfig, clk clock.Clock, timeout time.Duration) (*Session, error) {
+	if clk == nil {
+		clk = clock.NewRealClock()
+	}
+	if rc.SocketID == 0 {
+		id, err := handshake.GenerateSocketID()
+		if err != nil {
+			return nil, err
+		}
+		rc.SocketID = id
+	}
+	if rc.ISN == 0 {
+		isn, err := handshake.GenerateISN()
+		if err != nil {
+			return nil, err
+		}
+		rc.ISN = seq.Number(isn)
+	}
+	if rc.Cookie == 0 {
+		ck, err := handshake.GenerateRandomCookie()
+		if err != nil {
+			return nil, err
+		}
+		rc.Cookie = ck
+	}
+	mss := int(rc.MSS)
+	if mss == 0 {
+		mss = mux.DefaultMSS
+	}
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+
+	m := mux.New(conn, mss)
+	recvC := m.Register(rc.SocketID)
+	merged := make(chan packet.Packet, 256)
+	stop := make(chan struct{})
+
+	s := newSession(m, merged, true, remoteAddr, clk, core.DialRendezvous(rc, clk.Now()))
+
+	// Merge the mux's handshake channel (peer WAVEHANDs, dest 0) and our socket's
+	// channel (everything addressed to us) into the session input until the loop
+	// exits.
+	go func() {
+		for {
+			select {
+			case p := <-recvC:
+				select {
+				case merged <- p:
+				case <-stop:
+					return
+				}
+			case p := <-m.Handshake:
+				select {
+				case merged <- p:
+				case <-stop:
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	go func() { <-s.loopDone; close(stop) }()
+
+	select {
+	case err := <-s.connected:
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		return s, nil
+	case <-time.After(timeout):
+		s.Close()
+		return nil, fmt.Errorf("session: rendezvous timeout after %s", timeout)
+	}
+}
+
 // Write queues a payload for transmission. In blocking mode it waits for queue
 // space (natural backpressure), honoring the write deadline; in non-blocking
 // mode it returns ErrWouldBlock if the queue is full. It returns ErrClosed once
 // the session is closed.
 func (s *Session) Write(p []byte) error {
+	return s.WriteMsg(p, core.MsgOptions{InOrder: true})
+}
+
+// WriteMsg writes one message with per-message options (source timestamp
+// override, in-order bit) — the send half of the public WriteMsgCtrl. Blocking
+// and deadline behavior matches Write.
+func (s *Session) WriteMsg(p []byte, opts core.MsgOptions) error {
 	cp := make([]byte, len(p))
 	copy(cp, p)
+	req := writeReq{payload: cp, opts: opts}
 
 	if !s.sndSyn.Load() {
 		select {
-		case s.writeC <- cp:
+		case s.writeC <- req:
 			return nil
 		case <-s.loopDone:
 			return ErrClosed
@@ -215,7 +333,7 @@ func (s *Session) Write(p []byte) error {
 		defer stop()
 	}
 	select {
-	case s.writeC <- cp:
+	case s.writeC <- req:
 		return nil
 	case <-timeout:
 		return ErrTimeout
@@ -229,41 +347,48 @@ func (s *Session) Write(p []byte) error {
 // ErrWouldBlock if none is ready. It returns io.EOF once the session is closed
 // and drained.
 func (s *Session) Read(b []byte) (int, error) {
+	n, _, err := s.ReadMsg(b)
+	return n, err
+}
+
+// ReadMsg reads the next message into b and returns its metadata — the read half
+// of the public ReadMsgCtrl. Blocking, deadline, and EOF behavior match Read.
+func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
 	if !s.rcvSyn.Load() {
 		select {
-		case data := <-s.readC:
-			return copy(b, data), nil
+		case d := <-s.readC:
+			return copy(b, d.data), d.meta, nil
 		case <-s.loopDone:
 			return s.drainRead(b)
 		default:
-			return 0, ErrWouldBlock
+			return 0, MsgMetadata{}, ErrWouldBlock
 		}
 	}
 
 	timeout, stop, expired := s.deadlineChan(&s.readDeadline)
 	if expired {
-		return 0, ErrTimeout
+		return 0, MsgMetadata{}, ErrTimeout
 	}
 	if stop != nil {
 		defer stop()
 	}
 	select {
-	case data := <-s.readC:
-		return copy(b, data), nil
+	case d := <-s.readC:
+		return copy(b, d.data), d.meta, nil
 	case <-timeout:
-		return 0, ErrTimeout
+		return 0, MsgMetadata{}, ErrTimeout
 	case <-s.loopDone:
 		return s.drainRead(b)
 	}
 }
 
-// drainRead returns any payload delivered before the loop exited, else io.EOF.
-func (s *Session) drainRead(b []byte) (int, error) {
+// drainRead returns any message delivered before the loop exited, else io.EOF.
+func (s *Session) drainRead(b []byte) (int, MsgMetadata, error) {
 	select {
-	case data := <-s.readC:
-		return copy(b, data), nil
+	case d := <-s.readC:
+		return copy(b, d.data), d.meta, nil
 	default:
-		return 0, io.EOF
+		return 0, MsgMetadata{}, io.EOF
 	}
 }
 
@@ -336,13 +461,16 @@ func (s *Session) loop() {
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 
-	var backlog [][]byte
+	var backlog []delivery
 
 	// Drain the effects the constructor queued (initial ACK/NAK timers).
 	backlog = s.drain(s.clk.Now(), timer, backlog)
 
 	for {
 		backlog = s.flushBacklog(backlog)
+		if s.dead {
+			return // core failed mid-stream (e.g. peer idle timeout)
+		}
 
 		select {
 		case <-s.quit:
@@ -356,9 +484,9 @@ func (s *Session) loop() {
 			s.core.HandlePacket(now, p)
 			backlog = s.drain(now, timer, backlog)
 
-		case payload := <-s.writeC:
+		case req := <-s.writeC:
 			now := s.clk.Now()
-			s.core.Write(now, payload)
+			s.core.WriteMsg(now, req.payload, req.opts)
 			backlog = s.drain(now, timer, backlog)
 
 		case <-timer.C:
@@ -383,9 +511,9 @@ func (s *Session) fireTimers(now clock.Timestamp) {
 	}
 }
 
-// drain executes all pending core effects and queues delivered payloads, then
+// drain executes all pending core effects and queues delivered messages, then
 // re-arms the OS timer to the earliest pending deadline.
-func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog [][]byte) [][]byte {
+func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delivery) []delivery {
 	for {
 		out, ok := s.core.PollOutput()
 		if !ok {
@@ -411,10 +539,14 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog [][]byte
 		}
 		switch e := ev.(type) {
 		case core.DataReceived:
+			d := delivery{
+				data: e.Data,
+				meta: MsgMetadata{Boundary: e.Boundary, MsgNo: e.MsgNo, Seq: e.Seq},
+			}
 			select {
-			case s.readC <- e.Data:
+			case s.readC <- d:
 			default:
-				backlog = append(backlog, e.Data)
+				backlog = append(backlog, d)
 			}
 		case core.Connected:
 			select {
@@ -422,10 +554,13 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog [][]byte
 			default:
 			}
 		case core.Failed:
+			// Surface to a dial waiter (handshake failure) and tear down the loop
+			// so a mid-stream failure (e.g. peer idle timeout) unblocks Read/Write.
 			select {
 			case s.connected <- e.Err:
 			default:
 			}
+			s.dead = true
 		case core.Closed:
 			// Peer closed; the loop exits on the next quit or EOF.
 		}
@@ -436,7 +571,7 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog [][]byte
 
 // flushBacklog pushes as many backlogged deliveries into readC as fit without
 // blocking, so a slow Reader never stalls the protocol loop.
-func (s *Session) flushBacklog(backlog [][]byte) [][]byte {
+func (s *Session) flushBacklog(backlog []delivery) []delivery {
 	i := 0
 	for i < len(backlog) {
 		select {

@@ -15,12 +15,17 @@ type Connected struct {
 	PeerSocketID uint32
 }
 
-// DataReceived hands one in-order, fully reassembled payload to the host for
-// delivery to Read. The host takes ownership of Data. Seq is the packet's SRT
-// sequence number, used by connection bonding to deduplicate across links.
+// DataReceived hands one fully reassembled payload to the host for delivery to
+// Read. The host takes ownership of Data. Seq is the (first) packet's SRT
+// sequence number, used by connection bonding to deduplicate across links and
+// surfaced to the application as the message's PktSeq. MsgNo is the SRT message
+// number and Boundary is the packet position (packet.PositionSingle/First/...)
+// — both surfaced through the message-mode read API (ReadMsg/MsgCtrl).
 type DataReceived struct {
-	Data []byte
-	Seq  uint32
+	Data     []byte
+	Seq      uint32
+	MsgNo    uint32
+	Boundary int
 }
 
 // Failed reports a fatal connection error (handshake timeout, crypto mismatch,

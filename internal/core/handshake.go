@@ -60,16 +60,22 @@ type DialConfig struct {
 	// to generate the salt and keys); Passphrase wraps the key material in the
 	// KMREQ. CryptoCtx nil means an unencrypted connection. KeyLength and
 	// CryptoMode are hints the host uses to build CryptoCtx (see session.Dial).
-	CryptoCtx  *crypto.Context
-	Passphrase string
-	KeyLength  int // AES key bytes: 16/24/32 (0 -> 16); used by the host
-	CryptoMode int // 0/1 -> AES-CTR, 2 -> AES-GCM; used by the host
+	CryptoCtx     *crypto.Context
+	Passphrase    string
+	KeyLength     int    // AES key bytes: 16/24/32 (0 -> 16); used by the host
+	CryptoMode    int    // 0/1 -> AES-CTR, 2 -> AES-GCM; used by the host
+	KMRefreshRate uint64 // encrypted packets between key rotations (0 = disabled)
+	KMPreAnnounce uint64 // packets before a switch to announce the next key
 
 	// Applied once the handshake completes.
-	PayloadSize    int   // data payload per packet (0 -> MSS-44)
-	BufferCapacity int   // send/recv ring capacity (0 -> default)
-	MaxBW          int64 // max send bandwidth bytes/sec (0 -> LiveCC default)
-	Live           bool  // TSBPD playout (live mode)
+	PayloadSize     int                // data payload per packet (0 -> MSS-44)
+	BufferCapacity  int                // send/recv ring capacity (0 -> default)
+	MaxBW           int64              // max send bandwidth bytes/sec (0 -> LiveCC default)
+	Live            bool               // TSBPD playout (live mode)
+	Message         bool               // message-mode framing (file API; ignored when Live)
+	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
+	SndDropDelay    int                // extra ms added to the sender drop threshold
+	PeerIdleTimeout clock.Microseconds // dead-peer timeout (0 = disabled)
 }
 
 // dialState holds the caller handshake parameters until the connection is
@@ -87,13 +93,19 @@ type dialState struct {
 
 	cookie uint32 // learned from the induction response
 
-	cryptoCtx  *crypto.Context
-	passphrase string
+	cryptoCtx     *crypto.Context
+	passphrase    string
+	kmRefreshRate uint64
+	kmPreAnnounce uint64
 
-	payloadSize    int
-	bufferCapacity int
-	maxBW          int64
-	live           bool
+	payloadSize     int
+	bufferCapacity  int
+	maxBW           int64
+	live            bool
+	message         bool
+	tlPktDrop       bool
+	sndDropDelay    int
+	peerIdleTimeout clock.Microseconds
 }
 
 // Dial creates a caller-side connection, emits the INDUCTION request, and arms
@@ -123,21 +135,27 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 	c := &Conn{
 		state: stateInduction,
 		dial: &dialState{
-			socketID:       dc.CallerSocketID,
-			isn:            dc.CallerISN,
-			mss:            dc.MSS,
-			fc:             dc.FC,
-			recvLatMS:      dc.RecvLatencyMS,
-			sendLatMS:      dc.SendLatencyMS,
-			cong:           dc.Congestion,
-			streamID:       dc.StreamID,
-			filterCfg:      dc.FilterConfig,
-			cryptoCtx:      dc.CryptoCtx,
-			passphrase:     dc.Passphrase,
-			payloadSize:    payloadSize,
-			bufferCapacity: dc.BufferCapacity,
-			maxBW:          dc.MaxBW,
-			live:           dc.Live,
+			socketID:        dc.CallerSocketID,
+			isn:             dc.CallerISN,
+			mss:             dc.MSS,
+			fc:              dc.FC,
+			recvLatMS:       dc.RecvLatencyMS,
+			sendLatMS:       dc.SendLatencyMS,
+			cong:            dc.Congestion,
+			streamID:        dc.StreamID,
+			filterCfg:       dc.FilterConfig,
+			cryptoCtx:       dc.CryptoCtx,
+			passphrase:      dc.Passphrase,
+			kmRefreshRate:   dc.KMRefreshRate,
+			kmPreAnnounce:   dc.KMPreAnnounce,
+			payloadSize:     payloadSize,
+			bufferCapacity:  dc.BufferCapacity,
+			maxBW:           dc.MaxBW,
+			live:            dc.Live,
+			message:         dc.Message,
+			tlPktDrop:       dc.TLPktDrop,
+			sndDropDelay:    dc.SndDropDelay,
+			peerIdleTimeout: dc.PeerIdleTimeout,
 		},
 	}
 	c.sendInduction(now)
@@ -189,6 +207,10 @@ func (c *Conn) handleHandshake(now clock.Timestamp, p packet.Packet) {
 		c.fail(RejectError{Code: uint32(hs.HandshakeType)})
 		return
 	}
+	if c.rdv != nil {
+		c.handleRendezvous(now, &hs, p.Header.Timestamp)
+		return
+	}
 	switch c.state {
 	case stateInduction:
 		c.handleInductionResponse(now, &hs)
@@ -200,6 +222,10 @@ func (c *Conn) handleHandshake(now clock.Timestamp, p packet.Packet) {
 
 // handleHandshakeTimer retransmits the current handshake step.
 func (c *Conn) handleHandshakeTimer(now clock.Timestamp) {
+	if c.rdv != nil {
+		c.rendezvousRetransmit(now)
+		return
+	}
 	switch c.state {
 	case stateInduction:
 		c.sendInduction(now)
@@ -258,19 +284,25 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
-		PeerSocketID:   hs.SRTSocketID,
-		PayloadSize:    d.payloadSize,
-		SendISN:        d.isn,
-		RecvISN:        seq.Number(hs.InitialPacketSequenceNumber),
-		FlowWindow:     fc,
-		BufferCapacity: d.bufferCapacity,
-		MaxBW:          d.maxBW,
-		Live:           d.live,
-		TsbpdDelay:     clock.Microseconds(recvLatMS) * 1000, // ms -> us
-		CryptoCtx:      d.cryptoCtx,
-		ActiveKey:      packet.EncryptionEven,
-		Passphrase:     d.passphrase,
-		FilterConfig:   filterCfg,
+		PeerSocketID:    hs.SRTSocketID,
+		PayloadSize:     d.payloadSize,
+		SendISN:         d.isn,
+		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:      fc,
+		BufferCapacity:  d.bufferCapacity,
+		MaxBW:           d.maxBW,
+		Live:            d.live,
+		TsbpdDelay:      clock.Microseconds(recvLatMS) * 1000, // ms -> us
+		Message:         d.message,
+		TLPktDrop:       d.tlPktDrop,
+		SndDropDelay:    d.sndDropDelay,
+		PeerIdleTimeout: d.peerIdleTimeout,
+		CryptoCtx:       d.cryptoCtx,
+		ActiveKey:       packet.EncryptionEven,
+		Passphrase:      d.passphrase,
+		KMRefreshRate:   d.kmRefreshRate,
+		KMPreAnnounce:   d.kmPreAnnounce,
+		FilterConfig:    filterCfg,
 	})
 	c.dial = nil
 	c.events.push(Connected{PeerSocketID: hs.SRTSocketID})

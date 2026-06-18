@@ -192,8 +192,21 @@ Each phase keeps the public API and `make test` green.
     interops with the legacy listener over UDP, 300 AES-CTR payloads) and
     `TestSimEncryptedLossRecovery` (two cores share a context; encrypt+decrypt+retransmit recovery
     in virtual time).
-  - ⬜ TODO: mid-stream key rotation (KMREQ pre-announce/refresh/decommission, `sndKmState`),
-    `KeyRefreshNeeded` event, GCM interop test, listener-side KM (Phase 5).
+  - ✅ Mid-stream key rotation (`internal/core/keyrotation.go`): driven by the encrypted-send count,
+    the sender pre-announces the next-slot SEK via KMREQ (`GenerateSEK` on the host-created context —
+    same entropy ownership as the initial keys), retries on `TimerKMRefresh` (1.5×RTT, capped) until
+    the peer echoes a KMRSP, switches the active even/odd slot at the refresh boundary, then
+    decommissions the old key (`ClearSEK`) a pre-announce window later. The receiver installs the
+    announced key (`UnmarshalKM`) and echoes the KMRSP; a bad/absent secret returns an error KMRSP.
+    KM state + sent/recv KM counts are in `core.Stats`. Encrypt-before-buffer means CTR/GCM retransmits
+    resend stored ciphertext, so clearing the old SEK is safe. Test `TestNewStackKeyRotation` (300
+    AES-CTR payloads over real UDP, ~12 rotations, every payload decrypts, 0 undecrypt).
+  - ✅ AES-GCM end-to-end through the new stack: the listener now adopts the caller's cipher mode from
+    its KMREQ (`hs.SRTKM.Cipher`) instead of hardcoding CTR — the crypto-context factory
+    (`NewListener`'s `newCtx`) takes a `crypto.CipherMode`. Tests `TestNewStackEncryptedGCM` (GCM data
+    path, 0 undecrypt) and `TestNewStackKeyRotationGCM` (GCM rotation under a low refresh rate).
+  - ⬜ TODO: `KeyRefreshNeeded` host-entropy variant (current design keeps SEK generation in the
+    crypto context, consistent with how the initial keys are made).
 - **Phase 4 — TSBPD drift, FEC, stats. 🚧 drift + stats done.**
   - ✅ TSBPD drift correction enabled (the SRT default): `handleData` feeds `tsbpdTimer.OnACK` a
     drift sample per data arrival with the current RTT for one-way-delay compensation; the time base
@@ -206,19 +219,25 @@ Each phase keeps the public API and `make test` green.
     packets, and gates its own NAK by the ARQ level. Negotiated via the handshake filter extension
     (caller/listener `FilterConfig`). 1D (row) and 2D (row+column, staircase + even) all work
     end-to-end. Tests: `TestSimFECRecovery`, `TestSimFEC2DNoLoss`, `TestSimFEC2DRecovery`,
-    `TestNewStackFEC`. Encrypted FEC (encrypt/FEC ordering) is the one deferred edge.
+    `TestNewStackFEC`.
+  - ✅ Encrypted FEC (the former deferred edge): the receiver now feeds the FEC engine the captured
+    on-wire **ciphertext** of source packets (before in-place decryption) so it combines with the
+    repair packets the sender computed over ciphertext; recovered packets carry the reconstructed
+    encryption flag and are decrypted on insert. Test `TestSimEncryptedFECRecovery` (AES-CTR + row FEC,
+    arq:never, every dropped packet recovered and decrypted, 0 undecrypt, 0 NAK).
   - ✅ **Fixed a pre-existing latent bug in `internal/filter`** (shared by the legacy code): staircase
     column (2D) FEC mis-mapped a column's series, poisoning the wrong column group and producing
     corrupt/spurious recoveries in no-loss 2D streams. The receiver now measures a column's series
     from its own staircase base offset. Regression-guarded by `fec_staircase_test.go`.
-  - ⬜ TODO: delivery-rate / bandwidth stats fields.
+  - ✅ Delivery-rate / bandwidth stats fields (`PacketRecvRate`, `EstimatedBandwidth`,
+    `PktSndPeriodMicros`) surfaced from the congestion controller (see the fuller-stats item below).
 - **Handshake rejection codes. ✅** The listener rejects bad/unauthorized CONCLUSIONs with the
   proper SRT code (missing/old HSREQ → RejRogue; wrong passphrase → RejBadSecret; encryption
   required/unexpected → RejUnsecure) via an HSv5 rejection handshake; the caller surfaces it as a
   typed `core.RejectError{Code}` (and treats a SHUTDOWN during handshake as a refusal). Tests:
   `TestRejectWrongPassphrase`, `TestRejectEncryptionRequired`, `TestRejectUnexpectedEncryption`.
 
-- **Phase 5 — listener & rendezvous. 🚧 listener done (unencrypted).**
+- **Phase 5 — listener & rendezvous. 🚧 listener + rendezvous done (unencrypted).**
   - ✅ `core.Listener` (`internal/core/listener.go`): stateless SYN-cookie induction (cookie =
     keyed hash of an opaque `PeerID`, keeping the core net-free — the host maps PeerID↔addr),
     CONCLUSION verify + accept, duplicate-CONCLUSION resend, `Accepted` event carrying a ready
@@ -234,7 +253,16 @@ Each phase keeps the public API and `make test` green.
     KMREQ + passphrase) and echoes a KMRSP. Proven by `TestNewStackEncryptedEndToEnd` (new↔new,
     AES-CTR) and `TestInteropLegacyEncryptedCallerToNewListener` (legacy encrypted caller → new
     listener). Encryption matrix now green in all directions.
-  - ⬜ TODO: rejection codes; rendezvous handshake; deferred-accept / stream-ID gating.
+  - ✅ Rendezvous (simultaneous-open) handshake, unencrypted (`internal/core/rendezvous.go`):
+    `core.DialRendezvous` emits a WAVEHAND, a cookie contest (`rdvCookieContest`) assigns
+    INITIATOR/RESPONDER, and a pure transition table (`rdvSwitchState`, ported from the legacy driver)
+    drives WAVEHAND → CONCLUSION(HSREQ/HSRSP) → AGREEMENT to the shared `establish()`. `session.DialRendezvous`
+    generates the entropy (socket ID/ISN/cookie) and merges the mux Handshake channel (peer WAVEHANDs,
+    dest 0) with the registered socket channel. Tests: `TestSimRendezvous` (two cores, both connect +
+    bidirectional data), `TestRdvCookieContestAntisymmetric`, `TestSessionRendezvousUDP` (real UDP,
+    both peers dial at once + stream).
+  - ⬜ TODO: encrypted rendezvous (KMREQ as initiator / KMRSP as responder); deferred-accept /
+    stream-ID gating; lost-AGREEMENT robustness (matches legacy: responder retransmits until timeout).
 - **Phase 6 — groups/bonding. 🚧 broadcast done.** SRT bonding is N full, independent connections
   (each its own handshake/ARQ/ACK/TSBPD/crypto) coordinated to share a sequence space and source
   timestamps, with dedup-by-sequence at delivery — an orchestration layer over multiple `core.Conn`s
@@ -286,9 +314,45 @@ net.Conn, message mode, `Stats`, 60+ socket options, group coordination), `Confi
   `SetDeadline` (zero clears), `SetReadBlocking`/`SetWriteBlocking` (SRTO_RCVSYN/SNDSYN); Read/Write
   return `ErrTimeout` (a `net.Error` with `Timeout()==true`) on deadline and `ErrWouldBlock` when
   non-blocking with nothing ready. Test `TestSessionReadDeadlineNonBlocking`.
-- ⬜ message-mode framing (`ReadMessage`/`WriteMsgCtrl`); file mode; socket options (Get/Set);
-  full `ConnStats` shape; public `Conn`/`Listener`/`Server`/`Group` wrappers; `ConnRequest`/deferred
-  accept; `Watcher`.
+- ✅ message-mode framing (`Config.Message` / SRTO_MESSAGEAPI). Send: `core.WriteMsg(now, payload,
+  MsgOptions{SrcTime, InOrder})` and `session.WriteMsg(p, opts)` — a payload larger than one packet
+  is fragmented into PB_FIRST..PB_LAST sharing one message number (all fragments share one pinned
+  source timestamp); `SrcTime` overrides the wire timestamp, `InOrder` sets the Order bit. Receive:
+  the core reassembles each complete message (via `RecvBuffer.ReadMessage`, in order or — for a clear
+  Order bit — out of order) and surfaces it as one `DataReceived{Seq, MsgNo, Boundary}`; `session.ReadMsg(b)`
+  returns `(n, MsgMetadata{Boundary, MsgNo, Seq})` — the read half of `ReadMsgCtrl`. Live mode still
+  frames one packet per Write (TSBPD playout, never fragments here); stream mode (`!Live && !Message`)
+  is unchanged. Tests: `TestSimMessageMode`, `TestWriteMsgSrcTime`, `TestWriteMsgInOrderBit` (core);
+  `TestSessionMessageModeUDP` (session, real UDP + ARQ recovery of a dropped fragment). No send-path
+  perf regression (`BenchmarkCoreSendPath` still 3 allocs/op).
+- ✅ TLPKTDROP + per-message **TTL** (completes MsgCtrl). Sender side (`core.checkSendDrop` /
+  `SendBuffer.DropTooLateSend`): abandons the contiguous run of head packets older than the drop
+  threshold (live `Config.TLPktDrop`, threshold `max(TsbpdDelay,1s)+20ms + SndDropDelay`) **or** past
+  their per-message TTL (`MsgOptions.TTL`, enforced independently of TLPktDrop), and emits a `DROPREQ`
+  (`packet.CIFDropReq`) for the abandoned range; freeing the flow-control window. Driven from `pump`
+  (Write/pacing) and a gated `TimerACK` heartbeat (so a fully-stalled sender still drops). Receiver
+  side (`core.handleDropReq`): `RecvBuffer.Drop` skips the range, advancing the ACK point, dropping it
+  from the loss list (stops spurious NAKs), and unblocking delivery behind the gap. Stats gain
+  `SentDropped`/`SentDroppedBytes`. **Note:** wiring `DropTooLateSend`/TTL is also a latent fix —
+  legacy `SendBuffer.DropExpiredTTL` was never called, so `MsgTTL` was a no-op there. Tests:
+  `TestSendBufferDropTooLateSend*` (buffer), `TestSenderDropTLPKTDrop` + `TestSimMessageTTL` (core),
+  `TestSessionMessageTTLUDP` (session, real UDP). Send path still 3 allocs/op (drop check is gated).
+- ✅ Fuller stats (`core.Stats`, surfaced unchanged through `session.Stats`). Added unique
+  packet/byte counts (sent/recv minus retransmits), received-retransmit counters, sender loss count
+  (`LostPackets`, from received NAKs), ACKACK counters (sent/recv), and a live-level snapshot:
+  flow window, effective congestion window, send/recv buffer occupancy + free slots, CC-estimated
+  packet-receive rate / link bandwidth / inter-packet send period, and negotiated TSBPD latency.
+  Test `TestStats` (extended). Still deferred (host-clock or unbuilt subsystems): wall-clock Mbps
+  rates, total-with-header byte tallies, belated-arrival counters, KM state, reorder distance, and
+  buffer time-span (MsSndBuf/MsRcvBuf).
+- ✅ Liveness: dead-peer detection + keepalive (`Config.PeerIdleTimeout`, SRTO_PEERIDLETIMEO; 0 =
+  off). Any received packet refreshes `lastRecvTime`; `TimerPeerIdle` fires a `Failed{ErrPeerIdle}`
+  when nothing arrives within the timeout, and the session loop tears down so a blocked Read/Write
+  returns instead of hanging. `TimerKeepalive` sends a KEEPALIVE when no data has been sent for 1s so
+  an idle-but-alive connection stays up. Tests `TestPeerIdleTimeout`, `TestPeerIdleResetByPacket`,
+  `TestIdleKeepalive` (core), `TestSessionPeerIdleUnblocksRead` (session, real UDP).
+- ⬜ remaining parity: socket options (Get/Set); public `Conn`/`Listener`/`Server`/`Group` wrappers;
+  `ConnRequest`/deferred accept; `Watcher`; then the public-API cutover.
 
 ## Open questions (resolve as phases land)
 

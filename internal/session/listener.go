@@ -134,9 +134,9 @@ func randFill(b []byte) {
 	_, _ = rand.Read(b)
 }
 
-// newCryptoCtx builds a fresh AES-CTR crypto context for the listener core to
-// unwrap a caller's key material into (UnmarshalKM overwrites the random keys,
-// and adopts GCM from the KMREQ if the caller chose it).
-func newCryptoCtx(keyLen int) (*crypto.Context, error) {
-	return crypto.New(keyLen)
+// newCryptoCtx builds a fresh crypto context (in the cipher mode the caller's
+// KMREQ advertised) for the listener core to unwrap the caller's key material
+// into — UnmarshalKM then overwrites the random keys.
+func newCryptoCtx(keyLen int, mode crypto.CipherMode) (*crypto.Context, error) {
+	return crypto.NewWithMode(keyLen, mode)
 }

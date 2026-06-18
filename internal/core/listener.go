@@ -18,15 +18,21 @@ type PeerID = string
 
 // ListenerConfig parameters accepted connections.
 type ListenerConfig struct {
-	RecvLatencyMS  uint16
-	SendLatencyMS  uint16
-	Congestion     string // "live" or "file" (empty -> "live")
-	Live           bool   // TSBPD playout on accepted connections
-	MaxBW          int64
-	PayloadSize    int
-	BufferCapacity int
-	Passphrase     string // if set, accept encrypted callers (unwrap their KMREQ)
-	FilterConfig   string // FEC packet filter to offer ("" = off)
+	RecvLatencyMS   uint16
+	SendLatencyMS   uint16
+	Congestion      string             // "live" or "file" (empty -> "live")
+	Live            bool               // TSBPD playout on accepted connections
+	Message         bool               // message-mode framing on accepted connections (ignored when Live)
+	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
+	SndDropDelay    int                // extra ms added to the sender drop threshold
+	PeerIdleTimeout clock.Microseconds // dead-peer timeout on accepted connections (0 = disabled)
+	MaxBW           int64
+	PayloadSize     int
+	BufferCapacity  int
+	Passphrase      string // if set, accept encrypted callers (unwrap their KMREQ)
+	KMRefreshRate   uint64 // encrypted packets between key rotations (0 = disabled)
+	KMPreAnnounce   uint64 // packets before a switch to announce the next key
+	FilterConfig    string // FEC packet filter to offer ("" = off)
 }
 
 // ListenerOutput is a datagram the listener asks the host to send to a peer.
@@ -78,8 +84,8 @@ type acceptedConn struct {
 type Listener struct {
 	cfg          ListenerConfig
 	cookieSecret uint64
-	rng          func([]byte)                              // host entropy for socket IDs / ISNs
-	newCtx       func(keyLen int) (*crypto.Context, error) // host crypto-context factory (may be nil)
+	rng          func([]byte)                                                      // host entropy for socket IDs / ISNs
+	newCtx       func(keyLen int, mode crypto.CipherMode) (*crypto.Context, error) // host crypto-context factory (may be nil)
 	accepted     map[PeerID]acceptedConn
 
 	outputs fifo[ListenerOutput]
@@ -92,7 +98,7 @@ type Listener struct {
 // nil when no passphrase is configured. The context's random keys are
 // immediately overwritten by the caller's unwrapped key material, so the result
 // is a deterministic function of the KMREQ and passphrase.
-func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte), newCtx func(keyLen int) (*crypto.Context, error)) *Listener {
+func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte), newCtx func(keyLen int, mode crypto.CipherMode) (*crypto.Context, error)) *Listener {
 	if cfg.RecvLatencyMS == 0 {
 		cfg.RecvLatencyMS = 120
 	}
@@ -203,7 +209,12 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		if keyLen == 0 {
 			keyLen = 16
 		}
-		ctx, err := l.newCtx(keyLen)
+		// Match the caller's cipher (the KMREQ advertises it); default AES-CTR.
+		mode := crypto.CipherCTR
+		if hs.SRTKM.Cipher == uint8(crypto.CipherGCM) {
+			mode = crypto.CipherGCM
+		}
+		ctx, err := l.newCtx(keyLen, mode)
 		if err != nil || ctx.UnmarshalKM(hs.SRTKM, l.cfg.Passphrase) != nil {
 			l.reject(peer, hs.SRTSocketID, rejBadSecret) // wrong passphrase
 			return
@@ -238,19 +249,25 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 
 	conn := &Conn{}
 	conn.establish(now, establishParams{
-		PeerSocketID:   hs.SRTSocketID,
-		PayloadSize:    l.cfg.PayloadSize,
-		SendISN:        a.isn,
-		RecvISN:        seq.Number(hs.InitialPacketSequenceNumber),
-		FlowWindow:     int(a.fc),
-		BufferCapacity: l.cfg.BufferCapacity,
-		MaxBW:          l.cfg.MaxBW,
-		Live:           l.cfg.Live,
-		TsbpdDelay:     clock.Microseconds(recvLat) * 1000,
-		CryptoCtx:      cryptoCtx,
-		ActiveKey:      packet.EncryptionEven,
-		Passphrase:     l.cfg.Passphrase,
-		FilterConfig:   filterCfg,
+		PeerSocketID:    hs.SRTSocketID,
+		PayloadSize:     l.cfg.PayloadSize,
+		SendISN:         a.isn,
+		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:      int(a.fc),
+		BufferCapacity:  l.cfg.BufferCapacity,
+		MaxBW:           l.cfg.MaxBW,
+		Live:            l.cfg.Live,
+		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
+		Message:         l.cfg.Message,
+		TLPktDrop:       l.cfg.TLPktDrop,
+		SndDropDelay:    l.cfg.SndDropDelay,
+		PeerIdleTimeout: l.cfg.PeerIdleTimeout,
+		CryptoCtx:       cryptoCtx,
+		ActiveKey:       packet.EncryptionEven,
+		Passphrase:      l.cfg.Passphrase,
+		KMRefreshRate:   l.cfg.KMRefreshRate,
+		KMPreAnnounce:   l.cfg.KMPreAnnounce,
+		FilterConfig:    filterCfg,
 	})
 	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID})
 }

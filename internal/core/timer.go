@@ -24,6 +24,8 @@ const (
 	TimerKeepalive
 	// TimerPeerIdle — idle/dead-peer timeout.
 	TimerPeerIdle
+	// TimerKMRefresh — sender: retransmit a mid-stream KMREQ until confirmed.
+	TimerKMRefresh
 )
 
 // String returns a human-readable timer name for logging and tests.
@@ -47,6 +49,8 @@ func (id TimerID) String() string {
 		return "Keepalive"
 	case TimerPeerIdle:
 		return "PeerIdle"
+	case TimerKMRefresh:
+		return "KMRefresh"
 	default:
 		return "TimerID(?)"
 	}

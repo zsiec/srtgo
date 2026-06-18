@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/binary"
+	"errors"
 
 	"github.com/zsiec/srtgo/internal/buffer"
 	"github.com/zsiec/srtgo/internal/clock"
@@ -25,7 +26,12 @@ const (
 	maxPacingBurst = 10 * clock.Millisecond  // cap on accumulated pacing credit
 
 	defaultTsbpdDelay = 120 * clock.Millisecond // default playout latency
+	keepaliveInterval = 1 * clock.Second        // idle keepalive cadence
 )
+
+// ErrPeerIdle is the Failed-event error when no packet arrives from the peer
+// within the configured PeerIdleTimeout (the peer is presumed dead).
+var ErrPeerIdle = errors.New("srt: peer idle timeout")
 
 // Config parameters an already-established connection (NewEstablished). The
 // caller handshake (Dial, see handshake.go) produces the equivalent parameters
@@ -42,12 +48,60 @@ type Config struct {
 	Live       bool               // true -> TSBPD playout + too-late drop (live mode)
 	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
 
+	// Message enables message-mode framing (SRTO_MESSAGEAPI): a payload larger
+	// than one packet is fragmented into PB_FIRST..PB_LAST sharing one message
+	// number, and the receiver reassembles and delivers complete messages (in
+	// order, or out of order when a message's Order bit is clear). Only honored
+	// when Live is false; live mode already frames each Write as one packet and
+	// plays out via TSBPD. When both are false the connection is a byte stream.
+	Message bool
+
+	// TLPktDrop enables sender-side too-late packet drop (SRTO_TLPKTDROP): in
+	// live mode the sender abandons head packets older than the drop threshold
+	// and tells the receiver to skip them (DROPREQ), trading completeness for
+	// latency. Off by default; only honored when Live.
+	TLPktDrop bool
+	// SndDropDelay (SRTO_SNDDROPDELAY) adds this many milliseconds to the sender
+	// drop threshold, which is otherwise max(TsbpdDelay, 1s) + 20ms. Ignored
+	// unless TLPktDrop.
+	SndDropDelay int
+
+	// PeerIdleTimeout declares the peer dead (a Failed event) if no packet at all
+	// arrives for this long (SRTO_PEERIDLETIMEO). While it is set, the connection
+	// also emits periodic keepalives so an otherwise-idle peer stays alive. 0
+	// disables dead-peer detection.
+	PeerIdleTimeout clock.Microseconds
+
 	// Encryption (nil = unencrypted). The host owns the context's entropy.
 	CryptoCtx  *crypto.Context
 	ActiveKey  packet.PacketEncryption // outgoing key slot (0/None -> Even)
 	Passphrase string
+	// KMRefreshRate is the number of encrypted packets between key rotations
+	// (SRTO_KMREFRESHRATE); 0 disables mid-stream rotation. KMPreAnnounce is how
+	// many packets before the switch the new key is announced via KMREQ
+	// (SRTO_KMPREANNOUNCE); 0 picks a default derived from the refresh rate.
+	KMRefreshRate uint64
+	KMPreAnnounce uint64
 
 	FilterConfig string // FEC packet filter, e.g. "fec,cols:10,rows:5,arq:onreq" ("" = off)
+}
+
+// MsgOptions carries per-message send metadata (the send-relevant half of the
+// public MsgCtrl). The zero value matches a plain Write.
+type MsgOptions struct {
+	// SrcTime overrides the packet's source (wire) timestamp. Zero means "use
+	// the current time"; all fragments of one message share this value.
+	SrcTime uint32
+	// InOrder sets the message's in-order delivery bit. In live and stream mode
+	// it has no effect (TSBPD/stream delivery is always in order); in message
+	// mode a clear bit lets the receiver deliver this message ahead of an
+	// earlier incomplete one.
+	InOrder bool
+	// TTL is a per-message time-to-live: the sender drops the message (and tells
+	// the receiver to skip it) if it still hasn't been acknowledged this long
+	// after first transmission. Zero means no per-message TTL. Enforced
+	// independently of TLPktDrop.
+	TTL clock.Microseconds
 }
 
 // Conn is the pure, single-threaded SRT state machine for one connection. It
@@ -57,9 +111,9 @@ type Config struct {
 // Scope so far: the caller-side HSv5 handshake (see handshake.go) and
 // steady-state live data transfer — ACK, NAK (immediate + periodic),
 // retransmission, flow control, token-bucket pacing, ACKACK-based RTT, and
-// TSBPD playout with too-late drop. Encryption, FEC, the listener/rendezvous
-// handshakes, reorder tolerance, sender-drop, and groups are deferred to later
-// phases.
+// TSBPD playout with too-late drop, message-mode framing, and sender-side
+// too-late drop (TLPKTDROP + per-message TTL). Encryption, FEC, the listener/
+// rendezvous handshakes, and groups are layered on in their own files.
 type Conn struct {
 	peerSocketID uint32
 	payloadSize  int
@@ -68,17 +122,30 @@ type Conn struct {
 	// Send side.
 	sendBuf      *buffer.SendBuffer
 	sendCC       congestion.Controller
-	sendQueue    fifo[[]byte]    // app payloads awaiting transmission
+	sendQueue    fifo[frame]     // framed packets awaiting transmission
 	msgNumber    uint32          // 26-bit wrapping message counter
 	nextSendTime clock.Timestamp // pacing deadline for the next send
 	flowWindow   int             // negotiated FC window (max in flight)
 	rcvFlowWin   int             // dynamic window from peer ACK (0 = unknown)
+
+	// Sender-side too-late drop (TLPKTDROP) + per-message TTL.
+	sendDropThresh   clock.Microseconds // age past which head packets are dropped (0 = no TSBPD-deadline drop)
+	msgTTLActive     bool               // a per-message TTL has been set on some packet (gates the drop check)
+	sentDropped      uint64             // packets abandoned from the send buffer (too late / TTL)
+	sentDroppedBytes uint64
 
 	// Receive side.
 	recvBuf      *buffer.RecvBuffer
 	tsbpdTimer   *tsbpd.Timer // non-nil in live mode; schedules playout
 	tsbpdBaseSet bool         // time base initialized from the first data packet
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
+	messageMode  bool         // message-mode framing: fragment on send, reassemble on receive
+
+	// Liveness (0 timeout = disabled). lastRecvTime feeds dead-peer detection;
+	// lastSentDataTime feeds the idle keepalive.
+	peerIdleTimeout  clock.Microseconds
+	lastRecvTime     clock.Timestamp
+	lastSentDataTime clock.Timestamp
 
 	// Encryption (nil when unencrypted). The context (salt + even/odd SEKs) is
 	// created by the host; the core only wraps it for KMREQ and en/decrypts.
@@ -87,7 +154,26 @@ type Conn struct {
 	passphrase    string                  // for wrapping key material (KMREQ)
 	recvUndecrypt uint64                  // packets that failed decryption
 
-	// FEC (nil when no packet filter is negotiated). Unencrypted only for now.
+	// Mid-stream key rotation (0 refresh rate = disabled). Driven by the encrypted
+	// send count: pre-announce the next-slot key via KMREQ, switch the active slot
+	// at the refresh boundary, then decommission the old key. See keyrotation.go.
+	kmRefreshRate  uint64
+	kmPreAnnounce  uint64
+	kmPacketCount  uint64
+	kmAnnounced    bool
+	kmConfirmed    bool
+	kmDecommission bool
+	kmSwitchCount  uint64
+	kmRetryKey     packet.PacketEncryption
+	kmRetryCount   int
+	sndKmState     int32 // 0=unsecured 1=securing 2=secured 3=nosecret 4=badsecret
+	rcvKmState     int32
+	sentKM         uint64 // KMREQ/KMRSP control packets sent
+	recvKM         uint64 // KMREQ/KMRSP control packets received
+
+	// FEC (nil when no packet filter is negotiated). Works with encryption: the
+	// engine combines packets as on-wire ciphertext and recovered packets are
+	// decrypted on insert.
 	fecSender   *filter.FECSender
 	fecReceiver *filter.FECReceiver
 	fecARQLevel filter.ARQLevel
@@ -105,77 +191,155 @@ type Conn struct {
 	rttVar          clock.Microseconds
 
 	// Statistics — plain counters (single-threaded); snapshotted via Stats.
-	sentPackets    uint64
-	sentBytes      uint64
-	retransPackets uint64
-	retransBytes   uint64
-	recvPackets    uint64
-	recvBytes      uint64
-	recvLoss       uint64
-	sentACKs       uint64
-	sentNAKs       uint64
-	recvACKs       uint64
-	recvNAKs       uint64
-	sentFEC        uint64 // FEC repair packets sent
-	recvFECRecov   uint64 // packets reconstructed by FEC
+	sentPackets      uint64
+	sentBytes        uint64
+	retransPackets   uint64
+	retransBytes     uint64
+	recvPackets      uint64
+	recvBytes        uint64
+	recvRetrans      uint64 // received packets carrying the retransmit (R) bit
+	recvRetransBytes uint64
+	recvLoss         uint64
+	lostPackets      uint64 // sequence numbers the peer reported lost (sum over received NAKs)
+	sentACKs         uint64
+	sentNAKs         uint64
+	sentACKACKs      uint64
+	recvACKs         uint64
+	recvNAKs         uint64
+	recvACKACKs      uint64
+	sentFEC          uint64 // FEC repair packets sent
+	recvFECRecov     uint64 // packets reconstructed by FEC
+
+	negotiatedLatency clock.Microseconds // TSBPD delay agreed for this connection (live)
 
 	state  connState  // handshake progress / connected / failed
 	dial   *dialState // caller handshake parameters (nil once established or for NewEstablished)
+	rdv    *rdvDial   // rendezvous handshake state (nil unless a rendezvous dial is in progress)
 	closed bool
 
 	outputs fifo[Output]
 	events  fifo[Event]
 }
 
-// Stats is a snapshot of a connection's counters.
+// Stats is a snapshot of a connection's counters and live levels. It is the
+// internal source the public ConnStats is projected from; wall-clock-rate fields
+// (Mbps, samples/sec) and not-yet-implemented subsystems (KM state, reorder,
+// belated arrivals) are filled in by the host / as those features land.
 type Stats struct {
-	SentPackets    uint64
-	SentBytes      uint64
-	RetransPackets uint64
-	RetransBytes   uint64
-	RecvPackets    uint64
-	RecvBytes      uint64
-	RecvLoss       uint64 // gaps detected at the receiver
-	RecvDropped    uint64 // dropped too-late (TSBPD)
-	RecvUndecrypt  uint64 // failed decryption
-	SentACKs       uint64
-	SentNAKs       uint64
-	RecvACKs       uint64
-	RecvNAKs       uint64
-	SentFEC        uint64 // FEC repair packets sent
-	RecvFECRecov   uint64 // packets reconstructed by FEC
-	RTTMicros      int64
-	RTTVarMicros   int64
-	FlightSize     int // packets in flight (unacked)
+	// Cumulative packet/byte counters.
+	SentPackets       uint64
+	SentBytes         uint64
+	SentUniquePackets uint64 // SentPackets minus retransmissions
+	SentUniqueBytes   uint64
+	RetransPackets    uint64
+	RetransBytes      uint64
+	RecvPackets       uint64
+	RecvBytes         uint64
+	RecvUniquePackets uint64 // RecvPackets minus received retransmissions
+	RecvUniqueBytes   uint64
+	RecvRetrans       uint64 // received packets carrying the retransmit (R) bit
+	RecvRetransBytes  uint64
+
+	// Loss / drop.
+	RecvLoss         uint64 // gaps detected at the receiver
+	LostPackets      uint64 // sequence numbers the peer reported lost (sum over received NAKs)
+	RecvDropped      uint64 // dropped too-late (TSBPD) or skipped on a peer DROPREQ
+	RecvUndecrypt    uint64 // failed decryption
+	SentDropped      uint64 // packets abandoned from the send buffer (TLPKTDROP / TTL)
+	SentDroppedBytes uint64
+
+	// Control-packet counters.
+	SentACKs    uint64
+	SentNAKs    uint64
+	SentACKACKs uint64
+	RecvACKs    uint64
+	RecvNAKs    uint64
+	RecvACKACKs uint64
+
+	// FEC.
+	SentFEC      uint64 // FEC repair packets sent
+	RecvFECRecov uint64 // packets reconstructed by FEC
+
+	// Key material / rotation.
+	SentKM     uint64 // KMREQ/KMRSP control packets sent
+	RecvKM     uint64 // KMREQ/KMRSP control packets received
+	SndKmState int32  // 0=unsecured 1=securing 2=secured 3=nosecret 4=badsecret
+	RcvKmState int32
+
+	// RTT (microseconds).
+	RTTMicros    int64
+	RTTVarMicros int64
+
+	// Live levels (sampled at snapshot time).
+	FlightSize         int                // packets in flight (unacked)
+	FlowWindow         int                // negotiated flow-control window (packets)
+	CongestionWindow   int                // effective send window (packets)
+	SendBufPackets     int                // packets currently in the send buffer
+	SendBufAvailable   int                // free send-buffer slots
+	RecvBufPackets     int                // packets currently in the receive buffer
+	RecvBufAvailable   int                // free receive-buffer slots
+	PacketRecvRate     uint32             // receiver-estimated arrival rate (packets/sec)
+	EstimatedBandwidth uint32             // probe-estimated link capacity (packets/sec)
+	PktSndPeriodMicros int64              // current inter-packet send period (microseconds)
+	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
 }
 
-// Stats returns a snapshot of the connection's counters. Call it from the host's
-// loop goroutine (the core is single-threaded).
+// Stats returns a snapshot of the connection's counters and live levels. Call it
+// from the host's loop goroutine (the core is single-threaded).
 func (c *Conn) Stats() Stats {
-	flight := 0
+	s := Stats{
+		SentPackets:       c.sentPackets,
+		SentBytes:         c.sentBytes,
+		SentUniquePackets: c.sentPackets - c.retransPackets,
+		SentUniqueBytes:   c.sentBytes - c.retransBytes,
+		RetransPackets:    c.retransPackets,
+		RetransBytes:      c.retransBytes,
+		RecvPackets:       c.recvPackets,
+		RecvBytes:         c.recvBytes,
+		RecvUniquePackets: c.recvPackets - c.recvRetrans,
+		RecvUniqueBytes:   c.recvBytes - c.recvRetransBytes,
+		RecvRetrans:       c.recvRetrans,
+		RecvRetransBytes:  c.recvRetransBytes,
+		RecvLoss:          c.recvLoss,
+		LostPackets:       c.lostPackets,
+		RecvDropped:       c.recvDropped,
+		RecvUndecrypt:     c.recvUndecrypt,
+		SentDropped:       c.sentDropped,
+		SentDroppedBytes:  c.sentDroppedBytes,
+		SentACKs:          c.sentACKs,
+		SentNAKs:          c.sentNAKs,
+		SentACKACKs:       c.sentACKACKs,
+		RecvACKs:          c.recvACKs,
+		RecvNAKs:          c.recvNAKs,
+		RecvACKACKs:       c.recvACKACKs,
+		SentFEC:           c.sentFEC,
+		RecvFECRecov:      c.recvFECRecov,
+		SentKM:            c.sentKM,
+		RecvKM:            c.recvKM,
+		SndKmState:        c.sndKmState,
+		RcvKmState:        c.rcvKmState,
+		RTTMicros:         int64(c.rtt),
+		RTTVarMicros:      int64(c.rttVar),
+		FlowWindow:        c.flowWindow,
+		NegotiatedLatency: c.negotiatedLatency,
+	}
 	if c.sendBuf != nil {
-		flight = c.sendBuf.Size()
+		s.FlightSize = c.sendBuf.Size()
+		s.SendBufPackets = c.sendBuf.Size()
+		s.SendBufAvailable = c.sendBuf.Available()
 	}
-	return Stats{
-		SentPackets:    c.sentPackets,
-		SentBytes:      c.sentBytes,
-		RetransPackets: c.retransPackets,
-		RetransBytes:   c.retransBytes,
-		RecvPackets:    c.recvPackets,
-		RecvBytes:      c.recvBytes,
-		RecvLoss:       c.recvLoss,
-		RecvDropped:    c.recvDropped,
-		RecvUndecrypt:  c.recvUndecrypt,
-		SentACKs:       c.sentACKs,
-		SentNAKs:       c.sentNAKs,
-		RecvACKs:       c.recvACKs,
-		RecvNAKs:       c.recvNAKs,
-		SentFEC:        c.sentFEC,
-		RecvFECRecov:   c.recvFECRecov,
-		RTTMicros:      int64(c.rtt),
-		RTTVarMicros:   int64(c.rttVar),
-		FlightSize:     flight,
+	if c.recvBuf != nil {
+		s.RecvBufPackets = c.recvBuf.Size()
+		s.RecvBufAvailable = c.recvBuf.AvailableSize(c.recvBuf.ACKSequence())
 	}
+	if c.sendCC != nil {
+		s.CongestionWindow = c.window()
+		pktRate, _ := c.sendCC.DeliveryRate()
+		s.PacketRecvRate = pktRate
+		s.EstimatedBandwidth = c.sendCC.EstimatedBandwidth()
+		s.PktSndPeriodMicros = int64(c.sendCC.PacketInterval())
+	}
+	return s
 }
 
 // ackSlot records when a Full ACK was sent so the matching ACKACK can measure RTT.
@@ -190,19 +354,25 @@ type ackSlot struct {
 // into the connected state, whether built directly (NewEstablished) or produced
 // by a completed handshake (see handshake.go).
 type establishParams struct {
-	PeerSocketID   uint32
-	PayloadSize    int
-	SendISN        seq.Number
-	RecvISN        seq.Number
-	FlowWindow     int
-	BufferCapacity int
-	MaxBW          int64
-	Live           bool
-	TsbpdDelay     clock.Microseconds
-	CryptoCtx      *crypto.Context
-	ActiveKey      packet.PacketEncryption
-	Passphrase     string
-	FilterConfig   string
+	PeerSocketID    uint32
+	PayloadSize     int
+	SendISN         seq.Number
+	RecvISN         seq.Number
+	FlowWindow      int
+	BufferCapacity  int
+	MaxBW           int64
+	Live            bool
+	TsbpdDelay      clock.Microseconds
+	Message         bool
+	TLPktDrop       bool
+	SndDropDelay    int
+	PeerIdleTimeout clock.Microseconds
+	CryptoCtx       *crypto.Context
+	ActiveKey       packet.PacketEncryption
+	Passphrase      string
+	KMRefreshRate   uint64
+	KMPreAnnounce   uint64
+	FilterConfig    string
 }
 
 // NewEstablished builds a connection already in the connected state and arms
@@ -210,19 +380,25 @@ type establishParams struct {
 func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 	c := &Conn{}
 	c.establish(now, establishParams{
-		PeerSocketID:   cfg.PeerSocketID,
-		PayloadSize:    cfg.PayloadSize,
-		SendISN:        cfg.SendISN,
-		RecvISN:        cfg.RecvISN,
-		FlowWindow:     cfg.FlowWindow,
-		BufferCapacity: cfg.BufferCapacity,
-		MaxBW:          cfg.MaxBW,
-		Live:           cfg.Live,
-		TsbpdDelay:     cfg.TsbpdDelay,
-		CryptoCtx:      cfg.CryptoCtx,
-		ActiveKey:      cfg.ActiveKey,
-		Passphrase:     cfg.Passphrase,
-		FilterConfig:   cfg.FilterConfig,
+		PeerSocketID:    cfg.PeerSocketID,
+		PayloadSize:     cfg.PayloadSize,
+		SendISN:         cfg.SendISN,
+		RecvISN:         cfg.RecvISN,
+		FlowWindow:      cfg.FlowWindow,
+		BufferCapacity:  cfg.BufferCapacity,
+		MaxBW:           cfg.MaxBW,
+		Live:            cfg.Live,
+		TsbpdDelay:      cfg.TsbpdDelay,
+		Message:         cfg.Message,
+		TLPktDrop:       cfg.TLPktDrop,
+		SndDropDelay:    cfg.SndDropDelay,
+		PeerIdleTimeout: cfg.PeerIdleTimeout,
+		CryptoCtx:       cfg.CryptoCtx,
+		ActiveKey:       cfg.ActiveKey,
+		Passphrase:      cfg.Passphrase,
+		KMRefreshRate:   cfg.KMRefreshRate,
+		KMPreAnnounce:   cfg.KMPreAnnounce,
+		FilterConfig:    cfg.FilterConfig,
 	})
 	return c
 }
@@ -260,8 +436,24 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		// enabled (the SRT default): OnACK accumulates samples and nudges the
 		// time base once per 1000 packets.
 		c.tsbpdTimer = tsbpd.New(delay, 0)
+		c.negotiatedLatency = delay
 		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
 		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
+		// Sender too-late drop threshold: max(peer playout delay, 1s) + 2*SYN,
+		// plus the configured extra. (The negotiated live latency is symmetric,
+		// so the local delay stands in for the peer's.)
+		if ep.TLPktDrop {
+			thr := delay + clock.Microseconds(ep.SndDropDelay)*clock.Millisecond
+			if thr < 1*clock.Second {
+				thr = 1 * clock.Second
+			}
+			c.sendDropThresh = thr + 20*clock.Millisecond
+		}
+	} else if ep.Message {
+		// Message mode (file API): reassemble multi-packet messages and honor the
+		// per-message Order bit for in-order vs out-of-order delivery.
+		c.messageMode = true
+		c.recvBuf.SetMessageAPI(true)
 	}
 	if ep.CryptoCtx != nil {
 		c.cryptoCtx = ep.CryptoCtx
@@ -269,6 +461,15 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		c.activeKey = ep.ActiveKey
 		if c.activeKey == packet.EncryptionNone {
 			c.activeKey = packet.EncryptionEven
+		}
+		c.sndKmState = kmStateSecured
+		c.rcvKmState = kmStateSecured
+		c.kmRefreshRate = ep.KMRefreshRate
+		c.kmPreAnnounce = ep.KMPreAnnounce
+		// A 0 (or oversized) pre-announce window defaults to half the refresh rate
+		// so the new key is announced with a packet of margin before the switch.
+		if c.kmRefreshRate > 0 && (c.kmPreAnnounce == 0 || c.kmPreAnnounce >= c.kmRefreshRate) {
+			c.kmPreAnnounce = c.kmRefreshRate / 2
 		}
 	}
 	if ep.FilterConfig != "" {
@@ -281,6 +482,13 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
+	if ep.PeerIdleTimeout > 0 {
+		c.peerIdleTimeout = ep.PeerIdleTimeout
+		c.lastRecvTime = now
+		c.lastSentDataTime = now
+		c.outputs.push(SetTimer{ID: TimerKeepalive, Deadline: now.Add(keepaliveInterval)})
+		c.outputs.push(SetTimer{ID: TimerPeerIdle, Deadline: now.Add(c.peerIdleTimeout)})
+	}
 }
 
 // PollOutput drains the next wire/timer effect; ok is false when none remain.
@@ -291,15 +499,68 @@ func (c *Conn) PollEvent() (Event, bool) { return c.events.pop() }
 
 // ---- inputs ----
 
-// Write enqueues an application payload for transmission and attempts to send
-// as much as the flow-control window and pacing allow. The core takes
-// ownership of payload (it is not copied here; packet construction copies into
-// a pooled buffer at send time).
+// Write enqueues an application payload for transmission with default framing
+// (a single message, in-order delivery, live wire timestamp) and attempts to
+// send as much as the flow-control window and pacing allow.
 func (c *Conn) Write(now clock.Timestamp, payload []byte) {
+	c.WriteMsg(now, payload, MsgOptions{InOrder: true})
+}
+
+// WriteMsg enqueues an application payload as one message with per-message
+// options (source timestamp override, in-order bit). In message mode a payload
+// larger than one packet is fragmented into PB_FIRST..PB_LAST sharing a single
+// message number; otherwise it is sent as one packet (live mode rejects oversize
+// payloads upstream in the host). The core takes ownership of payload; packet
+// construction copies each fragment into a pooled buffer at send time.
+func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
 	if c.closed || c.state != stateConnected {
 		return
 	}
-	c.sendQueue.push(payload)
+	c.msgNumber = nextMsgNo(c.msgNumber)
+	msgNo := c.msgNumber
+
+	var ttlNs int64
+	if opts.TTL > 0 {
+		ttlNs = int64(opts.TTL) * 1000 // microseconds -> nanoseconds (buffer's unit)
+		c.msgTTLActive = true          // start running the drop check for this conn
+	}
+
+	ps := c.payloadSize
+	if ps <= 0 || len(payload) <= ps || c.tsbpdTimer != nil {
+		// Single packet: a small payload, or live mode — which frames exactly one
+		// packet per Write and rejects oversize payloads at the public API, so it
+		// never fragments here. A zero srcTime defers to the live wire time at
+		// send, preserving the single-packet behavior of stamping at transmission.
+		c.sendQueue.push(frame{payload: payload, msgNo: msgNo, pos: packet.PositionSingle, order: opts.InOrder, srcTime: opts.SrcTime, ttlNs: ttlNs})
+		c.pump(now)
+		return
+	}
+
+	// Multi-packet message: pin one source timestamp so every fragment carries
+	// it (fragments are sent across separate pacing steps, so deferring to the
+	// send-time wire clock would give them differing timestamps).
+	srcTime := opts.SrcTime
+	if srcTime == 0 {
+		srcTime = c.wireTS(now)
+	}
+
+	// Fragment into First/Middle/Last sharing msgNo. Each fragment is queued
+	// independently and sent under its own flow-control/pacing step; the receiver
+	// only delivers the message once every fragment has arrived.
+	for off := 0; off < len(payload); off += ps {
+		end := off + ps
+		if end > len(payload) {
+			end = len(payload)
+		}
+		pos := packet.PositionMiddle
+		if off == 0 {
+			pos |= packet.PositionFirst
+		}
+		if end == len(payload) {
+			pos |= packet.PositionLast
+		}
+		c.sendQueue.push(frame{payload: payload[off:end], msgNo: msgNo, pos: pos, order: opts.InOrder, srcTime: srcTime, ttlNs: ttlNs})
+	}
 	c.pump(now)
 }
 
@@ -319,6 +580,10 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 		}
 		return // otherwise ignore data/ACK/NAK until the handshake completes
 	}
+	// Any packet from the peer is proof of life for dead-peer detection.
+	if c.peerIdleTimeout > 0 {
+		c.lastRecvTime = now
+	}
 	if p.Header.IsControl {
 		switch p.Header.ControlType {
 		case packet.CtrlTypeACK:
@@ -327,6 +592,17 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 			c.handleNAK(now, p)
 		case packet.CtrlTypeACKACK:
 			c.handleACKACK(now, p)
+		case packet.CtrlTypeDropReq:
+			c.handleDropReq(now, p)
+		case packet.CtrlTypeUser:
+			switch p.Header.SubType {
+			case packet.ExtTypeKMReq:
+				c.handleKMRequest(now, p)
+			case packet.ExtTypeKMRsp:
+				c.handleKMResponse(p)
+			}
+		case packet.CtrlTypeKeepalive:
+			// Liveness only — lastRecvTime was already refreshed above.
 		case packet.CtrlTypeShutdown:
 			c.closed = true
 			c.events.push(Closed{})
@@ -345,6 +621,13 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 	case TimerACK:
 		c.sendFullACK(now)
 		c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
+		// Heartbeat for the sender side: when the window is full and no ACKs are
+		// arriving, this periodic tick is what lets too-late head packets age out
+		// and frees the window. Only for drop-enabled connections (pump runs the
+		// drop check at its top).
+		if c.sendDropThresh > 0 || c.msgTTLActive {
+			c.pump(now)
+		}
 	case TimerNAK:
 		if c.fecReceiver == nil || c.fecARQLevel == filter.ARQAlways {
 			c.sendPeriodicNAK(now)
@@ -358,10 +641,58 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 		}
 	case TimerHandshake:
 		c.handleHandshakeTimer(now)
+	case TimerKMRefresh:
+		c.retryKMREQ(now)
+	case TimerKeepalive:
+		c.checkKeepalive(now)
+	case TimerPeerIdle:
+		c.checkPeerIdle(now)
 	}
 }
 
+// checkKeepalive sends a KEEPALIVE when no data has been sent for the keepalive
+// interval, so an otherwise-idle connection stays alive at the peer, then re-arms.
+func (c *Conn) checkKeepalive(now clock.Timestamp) {
+	if c.peerIdleTimeout <= 0 {
+		return
+	}
+	if now.Sub(c.lastSentDataTime) >= keepaliveInterval {
+		p := packet.NewControl(nil, packet.CtrlTypeKeepalive, c.peerSocketID, c.wireTS(now))
+		p.SetData([]byte{0, 0, 0, 0}) // non-empty CIF
+		c.outputs.push(SendPacket{Packet: p, Owned: true})
+	}
+	c.outputs.push(SetTimer{ID: TimerKeepalive, Deadline: now.Add(keepaliveInterval)})
+}
+
+// checkPeerIdle declares the peer dead (Failed) when nothing has arrived for the
+// idle timeout; otherwise it re-arms to fire when the timeout would next elapse.
+func (c *Conn) checkPeerIdle(now clock.Timestamp) {
+	if c.peerIdleTimeout <= 0 {
+		return
+	}
+	if now.Sub(c.lastRecvTime) >= c.peerIdleTimeout {
+		c.closed = true
+		c.events.push(Failed{Err: ErrPeerIdle})
+		return // dead: stop re-arming
+	}
+	c.outputs.push(SetTimer{ID: TimerPeerIdle, Deadline: c.lastRecvTime.Add(c.peerIdleTimeout)})
+}
+
 // ---- send path ----
+
+// frame is one queued packet's worth of payload plus the framing the send path
+// stamps onto it: the shared message number, the position within the message
+// (Single, or First/Middle/Last for a fragmented one), the in-order bit, and an
+// optional explicit source timestamp (0 -> the live wire time at send). All
+// fragments of one message carry the same msgNo and srcTime.
+type frame struct {
+	payload []byte
+	msgNo   uint32
+	pos     packet.PacketPosition
+	order   bool
+	srcTime uint32
+	ttlNs   int64 // per-message TTL in nanoseconds (0 = none); tags the send buffer entry
+}
 
 // pump sends queued payloads while the flow-control window has room and pacing
 // permits. Pacing is a token bucket: nextSendTime advances by one packet
@@ -370,6 +701,9 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 // catch-up burst — without this, throughput would be capped at the timer
 // resolution. When no packet is yet due, it arms TimerSndPacing for the next.
 func (c *Conn) pump(now clock.Timestamp) {
+	// Abandon any head packets that have aged out (TLPKTDROP / per-message TTL)
+	// before sending more — this also frees flow-control window for fresh data.
+	c.checkSendDrop(now)
 	for c.sendQueue.len() > 0 {
 		if c.sendBuf.Size() >= c.window() {
 			return // flow-control stalled; a future ACK reopens the window
@@ -379,8 +713,8 @@ func (c *Conn) pump(now clock.Timestamp) {
 			c.outputs.push(SetTimer{ID: TimerSndPacing, Deadline: c.nextSendTime})
 			return
 		}
-		payload, _ := c.sendQueue.pop()
-		interval := c.sendOne(now, payload)
+		f, _ := c.sendQueue.pop()
+		interval := c.sendOne(now, f)
 		switch {
 		case c.nextSendTime.IsZero():
 			c.nextSendTime = now.Add(interval)
@@ -394,29 +728,32 @@ func (c *Conn) pump(now clock.Timestamp) {
 	}
 }
 
-// sendOne builds, buffers, and emits one data packet with the next sequence
-// number and the live wire timestamp. It returns the pacing interval the caller
-// should apply before the next send (0 for a probe pair's first packet, which
-// is sent back-to-back with the next).
-func (c *Conn) sendOne(now clock.Timestamp, payload []byte) clock.Microseconds {
-	c.sendData(now, c.sendBuf.NextSeq(), c.wireTS(now), payload)
+// sendOne builds, buffers, and emits the frame as one data packet with the next
+// sequence number, using the frame's source timestamp (or the live wire time
+// when unset). It returns the pacing interval the caller should apply before the
+// next send (0 for a probe pair's first packet, sent back-to-back with the next).
+func (c *Conn) sendOne(now clock.Timestamp, f frame) clock.Microseconds {
+	ts := f.srcTime
+	if ts == 0 {
+		ts = c.wireTS(now)
+	}
+	c.sendData(now, c.sendBuf.NextSeq(), ts, f)
 	if c.sendCC.IsProbePacket() {
 		return 0 // probe pair: next packet back-to-back
 	}
 	return c.sendCC.PacketInterval()
 }
 
-// sendData builds, encrypts, buffers, and emits one data packet with an explicit
-// sequence number and wire timestamp, then feeds FEC. seqNo must equal the send
-// buffer's next sequence. Shared by the normal send path and the group-
-// coordinated send path (WriteCoordinated).
-func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payload []byte) {
-	c.msgNumber = nextMsgNo(c.msgNumber)
-
-	p := packet.NewData(nil, seqNo.Value(), ts, c.peerSocketID, payload)
-	p.Header.MessageNumber = c.msgNumber
-	p.Header.PacketPosition = packet.PositionSingle
-	p.Header.Order = true
+// sendData builds, encrypts, buffers, and emits one data packet from the frame
+// with an explicit sequence number and wire timestamp, then feeds FEC. seqNo
+// must equal the send buffer's next sequence. Shared by the normal send path and
+// the group-coordinated send path (WriteCoordinated). The message number is
+// assigned by the caller (WriteMsg / WriteCoordinated) and carried on the frame.
+func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, f frame) {
+	p := packet.NewData(nil, seqNo.Value(), ts, c.peerSocketID, f.payload)
+	p.Header.MessageNumber = f.msgNo
+	p.Header.PacketPosition = f.pos
+	p.Header.Order = f.order
 
 	// Encrypt before buffering so retransmissions resend identical ciphertext
 	// (same sequence number -> same keystream) with no re-encryption.
@@ -429,12 +766,16 @@ func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payloa
 		p.Release()
 		return
 	}
+	if f.ttlNs > 0 {
+		c.sendBuf.SetMsgTTL(f.ttlNs) // tag the just-pushed entry for TTL drop
+	}
 	// The buffer retains p for retransmission; emit it by reference (Owned=false).
 	c.outputs.push(SendPacket{Packet: p, Owned: false})
 	c.sentPackets++
-	c.sentBytes += uint64(len(payload))
+	c.sentBytes += uint64(len(f.payload))
+	c.lastSentDataTime = now // feeds the idle keepalive
 
-	c.sendCC.OnPacketSent(seqNo.Value(), len(payload))
+	c.sendCC.OnPacketSent(seqNo.Value(), len(f.payload))
 
 	// FEC: clip the (post-encryption) payload into groups and emit any completed
 	// repair packets. Repair packets share the group's last sequence number and
@@ -443,6 +784,43 @@ func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, payloa
 		c.fecSender.FeedSource(seqNo.Value(), p.Header.Timestamp, uint8(p.Header.Encryption), p.Data)
 		c.drainFECSender()
 	}
+
+	// Advance the key-rotation state machine on each encrypted send (this packet
+	// was encrypted with the current active key; rotation affects later packets).
+	if c.cryptoCtx != nil && c.kmRefreshRate > 0 {
+		c.checkKeyRotation(now)
+	}
+}
+
+// checkSendDrop abandons send-buffer head packets the sender has given up on —
+// those older than the TLPKTDROP threshold or past their per-message TTL — and
+// tells the receiver to skip them with a DROPREQ so it stops NAKing the gap and
+// its ACK can advance. Dropping frees flow-control window for fresh data. It is
+// a no-op (one comparison) unless sender-drop or a per-message TTL is in play.
+func (c *Conn) checkSendDrop(now clock.Timestamp) {
+	if (c.sendDropThresh <= 0 && !c.msgTTLActive) || c.sendBuf == nil {
+		return
+	}
+	dropped, first, last := c.sendBuf.DropTooLateSend(now, c.sendDropThresh)
+	if dropped == 0 {
+		return
+	}
+	c.sentDropped += uint64(dropped)
+	c.sentDroppedBytes += uint64(dropped) * uint64(c.payloadSize)
+	c.emitDropReq(now, first.Value(), last.Value())
+}
+
+// emitDropReq sends a DROPREQ control packet asking the peer to skip the
+// inclusive sequence range [firstSeq, lastSeq] (the sender has abandoned it).
+func (c *Conn) emitDropReq(now clock.Timestamp, firstSeq, lastSeq uint32) {
+	dr := &packet.CIFDropReq{FirstSeqNo: firstSeq, LastSeqNo: lastSeq}
+	data, err := dr.MarshalCIF()
+	if err != nil {
+		return
+	}
+	p := packet.NewControl(nil, packet.CtrlTypeDropReq, c.peerSocketID, c.wireTS(now))
+	p.SetData(data)
+	c.outputs.push(SendPacket{Packet: p, Owned: true})
 }
 
 // resetRecvTo advances this connection's receive state so the next expected
@@ -471,7 +849,13 @@ func (c *Conn) WriteCoordinated(now clock.Timestamp, payload []byte, seqNo seq.N
 	if c.sendBuf.NextSeq() != seqNo {
 		c.sendBuf.OverrideNextSeq(seqNo)
 	}
-	c.sendData(now, seqNo, srcTime, payload)
+	c.msgNumber = nextMsgNo(c.msgNumber)
+	c.sendData(now, seqNo, srcTime, frame{
+		payload: payload,
+		msgNo:   c.msgNumber,
+		pos:     packet.PositionSingle,
+		order:   true,
+	})
 }
 
 // drainFECSender emits every pending FEC repair packet as an SRT data packet
@@ -562,6 +946,16 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		return
 	}
 
+	// FEC protects the on-wire ciphertext, so capture it before decrypting in
+	// place (CTR decryption is in-place): the FEC engine must combine source and
+	// repair packets over the same bytes the sender computed the repair from.
+	// Recovered packets come back as ciphertext and are decrypted in
+	// insertRecovered.
+	var fecCipher []byte
+	if c.fecReceiver != nil && p.Header.Encryption != packet.EncryptionNone {
+		fecCipher = append(fecCipher, p.Data...)
+	}
+
 	if !c.decrypt(&p) {
 		p.Release()
 		return // undecryptable: drop
@@ -575,7 +969,10 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	c.recvBytes += uint64(len(p.Data))
 
 	c.sendCC.OnPktArrival(len(p.Data), now)
-	if !p.Header.Retransmitted {
+	if p.Header.Retransmitted {
+		c.recvRetrans++
+		c.recvRetransBytes += uint64(len(p.Data))
+	} else {
 		c.sendCC.OnPacketReceived(p.Header.SequenceNumber, len(p.Data), now)
 	}
 
@@ -597,10 +994,15 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	}
 
 	// Feed the data packet into the FEC engine for group accumulation; it may
-	// reconstruct earlier losses.
+	// reconstruct earlier losses. Encrypted connections feed the captured
+	// ciphertext (fecCipher); unencrypted ones feed the payload directly.
 	if c.fecReceiver != nil {
+		fecData := p.Data
+		if fecCipher != nil {
+			fecData = fecCipher
+		}
 		rec, _, _ := c.fecReceiver.Receive(p.Header.SequenceNumber, p.Header.Timestamp,
-			uint8(p.Header.Encryption), p.Header.MessageNumber, p.Data)
+			uint8(p.Header.Encryption), p.Header.MessageNumber, fecData)
 		c.insertRecovered(now, rec)
 	}
 
@@ -622,12 +1024,49 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	c.deliverNow(now)
 }
 
-// deliverNow dispatches to TSBPD playout (live) or immediate in-order delivery.
+// handleDropReq processes a peer DROPREQ: the sender abandoned the inclusive
+// sequence range [FirstSeqNo, LastSeqNo], so skip it in the receive buffer.
+// Skipping advances the ACK point and removes the range from the loss list (it
+// will never be retransmitted), stopping spurious NAKs, and may unblock delivery
+// of packets that were stuck behind the gap. Drop only moves forward (a range
+// already read/dropped past is a no-op).
+func (c *Conn) handleDropReq(now clock.Timestamp, p packet.Packet) {
+	var dr packet.CIFDropReq
+	if err := dr.UnmarshalCIF(p.Data); err != nil {
+		return
+	}
+	if dropped := c.recvBuf.Drop(seq.Number(dr.LastSeqNo).Inc()); dropped > 0 {
+		c.recvDropped += uint64(dropped)
+	}
+	c.deliverNow(now)
+}
+
+// deliverNow dispatches to TSBPD playout (live), message reassembly (message
+// mode), or immediate in-order byte delivery (stream mode).
 func (c *Conn) deliverNow(now clock.Timestamp) {
-	if c.tsbpdTimer != nil {
+	switch {
+	case c.tsbpdTimer != nil:
 		c.deliverTSBPD(now)
-	} else {
+	case c.messageMode:
+		c.deliverMessages()
+	default:
 		c.deliver()
+	}
+}
+
+// deliverMessages reassembles and delivers every complete message currently
+// available. Each message is concatenated from its PB_FIRST..PB_LAST fragments
+// (a single-packet message is one PB_SINGLE) and surfaced as one DataReceived
+// carrying the message's number, first sequence number, and boundary. Honors
+// the Order bit: an out-of-order message can be delivered ahead of an earlier
+// incomplete one.
+func (c *Conn) deliverMessages() {
+	for {
+		pkts, ok := c.recvBuf.ReadMessage()
+		if !ok {
+			return
+		}
+		c.emitMessage(pkts)
 	}
 }
 
@@ -685,15 +1124,45 @@ func (c *Conn) deliverTSBPD(now clock.Timestamp) {
 	}
 }
 
-// emitData copies a delivered packet's payload into an owned slice and queues
-// it as a DataReceived event (with its sequence number for bonding dedup),
-// releasing the pooled packet buffer.
+// emitData copies a delivered single packet's payload into an owned slice and
+// queues it as a DataReceived event (with its sequence number for bonding dedup
+// and per-message metadata), releasing the pooled packet buffer.
 func (c *Conn) emitData(p packet.Packet) {
 	data := make([]byte, len(p.Data))
 	copy(data, p.Data)
-	seqNo := p.Header.SequenceNumber
+	c.events.push(DataReceived{
+		Data:     data,
+		Seq:      p.Header.SequenceNumber,
+		MsgNo:    p.Header.MessageNumber,
+		Boundary: int(p.Header.PacketPosition),
+	})
 	p.Release()
-	c.events.push(DataReceived{Data: data, Seq: seqNo})
+}
+
+// emitMessage concatenates a reassembled message's fragments into one owned
+// payload and queues it as a single DataReceived event. The metadata is taken
+// from the first fragment: its message number, its sequence number (the
+// message's first), and the boundary it carries (PB_SINGLE for a one-packet
+// message, PB_FIRST for a fragmented one).
+func (c *Conn) emitMessage(pkts []packet.Packet) {
+	total := 0
+	for _, p := range pkts {
+		total += len(p.Data)
+	}
+	data := make([]byte, 0, total)
+	for _, p := range pkts {
+		data = append(data, p.Data...)
+	}
+	first := pkts[0].Header
+	c.events.push(DataReceived{
+		Data:     data,
+		Seq:      first.SequenceNumber,
+		MsgNo:    first.MessageNumber,
+		Boundary: int(first.PacketPosition),
+	})
+	for _, p := range pkts {
+		p.Release()
+	}
 }
 
 // ---- ACK ----
@@ -776,6 +1245,7 @@ func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
 		aa.Header.TypeSpecific = ackSubNo
 		aa.SetData([]byte{0, 0, 0, 0}) // libsrt requires a non-empty CIF
 		c.outputs.push(SendPacket{Packet: aa, Owned: true})
+		c.sentACKACKs++
 		c.lastACKACKTime = now
 		c.lastACKACKSeq = ackSubNo
 	}
@@ -791,6 +1261,7 @@ func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
 }
 
 func (c *Conn) handleACKACK(now clock.Timestamp, p packet.Packet) {
+	c.recvACKACKs++
 	ackNo := p.Header.TypeSpecific
 	slot := ackNo & (ackTimeSlots - 1)
 	e := c.ackSlots[slot]
@@ -854,6 +1325,7 @@ func (c *Conn) handleNAK(now clock.Timestamp, p packet.Packet) {
 		return
 	}
 	c.recvNAKs++
+	c.lostPackets += uint64(len(nak.LossList))
 	c.sendCC.OnNAK(nak.LossList)
 
 	var rexmit []packet.Packet

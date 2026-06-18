@@ -402,6 +402,22 @@ func TestStats(t *testing.T) {
 	if cs.RTTMicros <= 0 {
 		t.Errorf("caller RTTMicros = %d, expected a measured RTT", cs.RTTMicros)
 	}
+	// Expanded fields: unique sends, ACKACK responses, negotiated latency, window.
+	if cs.SentUniquePackets < 300 {
+		t.Errorf("caller SentUniquePackets = %d, want >= 300", cs.SentUniquePackets)
+	}
+	if cs.SentUniquePackets != cs.SentPackets-cs.RetransPackets {
+		t.Errorf("caller SentUniquePackets %d != SentPackets %d - Retrans %d", cs.SentUniquePackets, cs.SentPackets, cs.RetransPackets)
+	}
+	if cs.SentACKACKs == 0 {
+		t.Errorf("caller SentACKACKs = 0, expected ACKACKs in response to ACKs")
+	}
+	if cs.NegotiatedLatency <= 0 {
+		t.Errorf("caller NegotiatedLatency = %d, expected the negotiated TSBPD delay", cs.NegotiatedLatency)
+	}
+	if cs.FlowWindow <= 0 {
+		t.Errorf("caller FlowWindow = %d, expected a positive flow window", cs.FlowWindow)
+	}
 
 	rs, err := recv.Stats()
 	if err != nil {
@@ -412,6 +428,12 @@ func TestStats(t *testing.T) {
 	}
 	if rs.SentACKs == 0 {
 		t.Errorf("receiver SentACKs = 0, expected periodic ACKs")
+	}
+	if rs.RecvUniquePackets < 300 {
+		t.Errorf("receiver RecvUniquePackets = %d, want >= 300", rs.RecvUniquePackets)
+	}
+	if rs.RecvACKACKs == 0 {
+		t.Errorf("receiver RecvACKACKs = 0, expected ACKACKs from the sender")
 	}
 }
 

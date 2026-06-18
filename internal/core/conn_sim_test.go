@@ -42,6 +42,8 @@ type simHost struct {
 	c         *core.Conn
 	timers    map[core.TimerID]clock.Timestamp
 	delivered [][]byte
+	recvMeta  []core.DataReceived // full delivery events (payload + message metadata)
+	connected bool
 	closed    bool
 }
 
@@ -87,6 +89,9 @@ func (h *simHost) drain() []outDatagram {
 		switch ev := e.(type) {
 		case core.DataReceived:
 			h.delivered = append(h.delivered, ev.Data)
+			h.recvMeta = append(h.recvMeta, ev)
+		case core.Connected:
+			h.connected = true
 		case core.Closed:
 			h.closed = true
 		}
@@ -132,26 +137,32 @@ func TestSimLossRecovery(t *testing.T) {
 	runStream(t, sender, receiver, base, numPayloads, dropOnce)
 }
 
-// runStream drives the two cores over the lossy in-memory link until the
-// receiver has delivered numPayloads payloads, then asserts they arrived intact
-// and in order. dropFwd drops the listed forward data sequence numbers once.
-func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, numPayloads int, dropFwd map[uint32]bool) {
-	t.Helper()
-
-	// Hand the whole stream to the sender up front; pacing spreads it out.
-	for i := 0; i < numPayloads; i++ {
-		sender.c.Write(base, makePayload(i))
+// dropOnce returns a forward-loss predicate that drops each listed data sequence
+// number exactly once (so a retransmission recovers it).
+func dropOnce(seqs map[uint32]bool) func(uint32) bool {
+	return func(seqNo uint32) bool {
+		if seqs != nil && seqs[seqNo] {
+			delete(seqs, seqNo)
+			return true
+		}
+		return false
 	}
+}
+
+// drive runs the two cores over the lossy in-memory link, advancing virtual
+// time event by event until done() returns true (or both sides go idle).
+// dropFwd, when non-nil, decides which forward data packets to drop by sequence
+// number (FEC repair packets, msgNo 0, are never dropped); returning true for a
+// sequence every time models permanent loss, once models a recoverable drop.
+func drive(t *testing.T, sender, receiver *simHost, base clock.Timestamp, dropFwd func(uint32) bool, done func() bool) {
+	t.Helper()
 
 	var fwd, bwd []inflight
 	now := base
 
-	schedule := func(out []outDatagram, q *[]inflight, drop map[uint32]bool) {
+	schedule := func(out []outDatagram, q *[]inflight, drop func(uint32) bool) {
 		for _, dg := range out {
-			// Drop targeted source data packets once (never FEC repair packets,
-			// which carry msgNo 0); a retransmission or FEC repair recovers them.
-			if dg.isData && dg.msgNo != 0 && drop != nil && drop[dg.seqNo] {
-				delete(drop, dg.seqNo)
+			if dg.isData && dg.msgNo != 0 && drop != nil && drop(dg.seqNo) {
 				continue
 			}
 			*q = append(*q, inflight{arrival: now.Add(linkDelay), data: dg.data})
@@ -187,7 +198,7 @@ func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, nu
 
 	const maxIter = 5_000_000
 	for iter := 0; iter < maxIter; iter++ {
-		if len(receiver.delivered) >= numPayloads {
+		if done() {
 			break
 		}
 		for {
@@ -208,6 +219,22 @@ func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, nu
 		}
 		now = next
 	}
+}
+
+// runStream drives the two cores over the lossy in-memory link until the
+// receiver has delivered numPayloads payloads, then asserts they arrived intact
+// and in order. dropFwd drops the listed forward data sequence numbers once.
+func runStream(t *testing.T, sender, receiver *simHost, base clock.Timestamp, numPayloads int, dropFwd map[uint32]bool) {
+	t.Helper()
+
+	// Hand the whole stream to the sender up front; pacing spreads it out.
+	for i := 0; i < numPayloads; i++ {
+		sender.c.Write(base, makePayload(i))
+	}
+
+	drive(t, sender, receiver, base, dropOnce(dropFwd), func() bool {
+		return len(receiver.delivered) >= numPayloads
+	})
 
 	if got := len(receiver.delivered); got != numPayloads {
 		t.Fatalf("delivered %d/%d payloads (loss not recovered)", got, numPayloads)
@@ -258,6 +285,56 @@ func TestSimFECRecovery(t *testing.T) {
 	st := receiver.c.Stats()
 	if st.RecvFECRecov < uint64(wantRecovered) {
 		t.Fatalf("FEC recovered %d packets, want >= %d", st.RecvFECRecov, wantRecovered)
+	}
+	if st.SentNAKs != 0 {
+		t.Fatalf("receiver sent %d NAKs with arq:never (FEC should suppress all NAK)", st.SentNAKs)
+	}
+}
+
+// TestSimEncryptedFECRecovery exercises encryption AND FEC together: the FEC
+// engine must combine source and repair packets as the on-wire ciphertext (not
+// the decrypted plaintext), and recovered packets must then decrypt cleanly.
+// With ARQ=never the dropped packets can only return via FEC, so an end-to-end
+// in-order delivery of every payload proves encrypted FEC works.
+func TestSimEncryptedFECRecovery(t *testing.T) {
+	const (
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 200
+		fecCfg      = "fec,cols:10,rows:1,arq:never" // row-only FEC, no ARQ
+	)
+	base := clock.Timestamp(1_000_000)
+
+	ctx, err := crypto.New(16) // shared AES-CTR context (same salt + SEKs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 2, PayloadSize: simPayload, SendISN: sndISN, RecvISN: rcvISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg, CryptoCtx: ctx, ActiveKey: packet.EncryptionEven,
+	}, base))
+	receiver := newSimHost(core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: simPayload, SendISN: rcvISN, RecvISN: sndISN,
+		MaxBW: 1 << 34, FilterConfig: fecCfg, CryptoCtx: ctx, ActiveKey: packet.EncryptionEven,
+	}, base))
+
+	// One drop per row of 10 (recoverable by row FEC): seq 105, 115, 125, ...
+	drop := map[uint32]bool{}
+	wantRecovered := 0
+	for s := uint32(sndISN + 5); s < sndISN+numPayloads; s += 10 {
+		drop[s] = true
+		wantRecovered++
+	}
+
+	runStream(t, sender, receiver, base, numPayloads, drop)
+
+	st := receiver.c.Stats()
+	if st.RecvFECRecov < uint64(wantRecovered) {
+		t.Fatalf("FEC recovered %d packets, want >= %d", st.RecvFECRecov, wantRecovered)
+	}
+	if st.RecvUndecrypt != 0 {
+		t.Fatalf("RecvUndecrypt = %d, want 0 (recovered ciphertext must decrypt)", st.RecvUndecrypt)
 	}
 	if st.SentNAKs != 0 {
 		t.Fatalf("receiver sent %d NAKs with arq:never (FEC should suppress all NAK)", st.SentNAKs)
