@@ -14,10 +14,12 @@ import (
 // datagram link and the SRT features (TSBPD latency, etc.) are negotiated after
 // connect via UMSG_EXT HSREQ/HSRSP. The caller is the initiator: it sends the
 // v4 CONCLUSION, establishes on the response, then advertises its parameters
-// with an HSREQ. Encryption is supported post-handshake: the caller establishes
-// encrypted, shares its key in a retransmitted KMREQ, and holds Connected until
-// the peer's KMRSP confirms it (so no plaintext leaks); the receiver awaits the
-// KMREQ with decryption gated until the keys install. See initHSv4KM.
+// with an HSREQ. Encryption is supported post-handshake for any PBKEYLEN and both
+// AES-CTR and AES-GCM, in both directions: the caller establishes encrypted,
+// shares its key in a retransmitted KMREQ, and holds Connected until the peer's
+// KMRSP confirms it (so no plaintext leaks); the receiver (built with the matching
+// configured key length/cipher) awaits the KMREQ with decryption gated until the
+// keys install, then encrypts its own sends with the adopted key. See initHSv4KM.
 
 // sendConclusionV4 emits the HSv4 (UDT_DGRAM) CONCLUSION and arms the retransmit
 // timer. It echoes the listener's cookie from the induction response.

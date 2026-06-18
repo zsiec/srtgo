@@ -163,13 +163,31 @@ func TestNewStackHSv4(t *testing.T) {
 	}
 }
 
-// TestNewStackHSv4Encrypted streams over an ENCRYPTED legacy HSv4 connection: the
-// caller establishes, shares its key via the post-handshake KMREQ, and the
-// listener (sharing the passphrase) adopts it and decrypts. Data integrity end to
-// end proves the post-handshake key exchange and the decryption gate work.
+// TestNewStackHSv4Encrypted streams over an ENCRYPTED legacy HSv4 connection for
+// several cipher/key-length combinations, and BOTH directions: the caller shares
+// its key via the post-handshake KMREQ, the listener (sharing the passphrase and
+// crypto params) adopts it and decrypts, then replies encrypted with the adopted
+// key. End-to-end integrity proves the key exchange, the decryption gate, and
+// bidirectional encryption work for each cipher.
 func TestNewStackHSv4Encrypted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   int
+		keyLen int
+	}{
+		{"AES-CTR-128", 0, 16},
+		{"AES-CTR-256", 0, 32},
+		{"AES-GCM-128", 2, 16},
+		{"AES-GCM-256", 2, 32},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testHSv4Encrypted(t, tc.mode, tc.keyLen) })
+	}
+}
+
+func testHSv4Encrypted(t *testing.T, cryptoMode, keyLen int) {
 	const (
 		n          = 200
+		replyN     = 20
 		payloadLen = 1200
 		pass       = "hsv4-secret-passphrase"
 	)
@@ -179,7 +197,8 @@ func TestNewStackHSv4Encrypted(t *testing.T) {
 		t.Fatal(err)
 	}
 	ln, err := session.Listen(luconn, core.ListenerConfig{
-		MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120, Passphrase: pass,
+		MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+		Passphrase: pass, KeyLength: keyLen, CryptoMode: cryptoMode,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +225,16 @@ func TestNewStackHSv4Encrypted(t *testing.T) {
 				return
 			}
 		}
+		// Bidirectional: reply encrypted with the adopted key (keys are installed
+		// by now, since the inbound data above was gated until they were).
+		for i := 0; i < replyN; i++ {
+			p := make([]byte, payloadLen)
+			binary.BigEndian.PutUint32(p, uint32(1000+i))
+			if err := s.Write(p); err != nil {
+				recvd <- fmt.Errorf("reply write %d: %w", i, err)
+				return
+			}
+		}
 		recvd <- nil
 	}()
 
@@ -214,7 +243,8 @@ func TestNewStackHSv4Encrypted(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
-		ForceHSv4: true, Message: true, MaxBW: 125_000_000, Passphrase: pass, KeyLength: 16,
+		ForceHSv4: true, Message: true, MaxBW: 125_000_000,
+		Passphrase: pass, KeyLength: keyLen, CryptoMode: cryptoMode,
 	}, nil, 5*time.Second)
 	if err != nil {
 		t.Fatalf("encrypted HSv4 dial: %v", err)
@@ -231,13 +261,33 @@ func TestNewStackHSv4Encrypted(t *testing.T) {
 		}
 	}()
 
-	select {
-	case err := <-recvd:
-		if err != nil {
-			t.Fatal(err)
+	// Read the receiver's encrypted reply (caller side decrypts with the same key).
+	replyErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2000)
+		for i := 0; i < replyN; i++ {
+			got, err := s.Read(buf)
+			if err != nil {
+				replyErr <- fmt.Errorf("reply read %d: %w", i, err)
+				return
+			}
+			if got != payloadLen || binary.BigEndian.Uint32(buf) != uint32(1000+i) {
+				replyErr <- fmt.Errorf("reply mismatch at %d", i)
+				return
+			}
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("timeout: encrypted HSv4 did not deliver all payloads")
+		replyErr <- nil
+	}()
+
+	for _, ch := range []chan error{recvd, replyErr} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("timeout: encrypted HSv4 did not deliver all payloads")
+		}
 	}
 }
 

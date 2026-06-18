@@ -34,6 +34,8 @@ type ListenerConfig struct {
 	SendBufCapacity  int    // send ring capacity (0 -> BufferCapacity)
 	RecvBufCapacity  int    // recv ring capacity (0 -> BufferCapacity)
 	Passphrase       string // if set, accept encrypted callers (unwrap their KMREQ)
+	KeyLength        int    // AES key bytes for an HSv4 accept's crypto context (0 -> 16)
+	CryptoMode       int    // cipher for an HSv4 accept: 0/1 -> AES-CTR, 2 -> AES-GCM
 	// AllowUnencryptedFallback accepts a connection unencrypted on a crypto
 	// mismatch (passphrase set but caller offered none, or vice versa) instead of
 	// rejecting — the SRTO_ENFORCEDENCRYPTION=false behavior. A wrong passphrase
@@ -396,7 +398,18 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 			l.reject(peer, hs.SRTSocketID, rejUnsecure)
 			return
 		}
-		ctx, err := l.newCtx(16, crypto.CipherCTR) // keys come from the peer's KMREQ
+		// Build the context with the listener's configured key length/cipher (the
+		// caller is expected to match); the keys themselves arrive in the peer's
+		// KMREQ. Both AES-CTR and AES-GCM and all PBKEYLENs are supported.
+		keyLen := l.cfg.KeyLength
+		if keyLen == 0 {
+			keyLen = 16
+		}
+		mode := crypto.CipherCTR
+		if l.cfg.CryptoMode == 2 {
+			mode = crypto.CipherGCM
+		}
+		ctx, err := l.newCtx(keyLen, mode)
 		if err != nil {
 			l.reject(peer, hs.SRTSocketID, rejUnsecure)
 			return

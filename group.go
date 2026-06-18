@@ -38,7 +38,8 @@ const (
 	// retransmit) still works — and the sender stamps every message with a shared,
 	// monotonic group message number. The receiver reassembles the original order
 	// across links with a reorder buffer keyed by that number (Group.readBalancing),
-	// skipping a message presumed lost if too many pile up behind it.
+	// skipping a message presumed lost (e.g. on a dead link) once a bounded reorder
+	// window elapses, or sooner if too many messages pile up behind it.
 	GroupBalancing
 )
 
@@ -1310,6 +1311,28 @@ func (g *Group) readBalancing(b []byte) (int, error) {
 			return 0, err
 		}
 	}
+	// Reusable, initially-stopped timer that bounds how long a gap (a missing
+	// balNext with messages buffered ahead) blocks delivery — so a message lost to
+	// a dead or stalled link is skipped within a bounded time, not only after
+	// balanceReorderMax messages pile up behind it.
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	armed := false
+	disarm := func() {
+		if armed {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			armed = false
+		}
+	}
+
 	for {
 		// Deliver the next expected message if it is already buffered.
 		if data, ok := g.balBuf[g.balNext]; ok {
@@ -1318,10 +1341,27 @@ func (g *Group) readBalancing(b []byte) (int, error) {
 			g.recvPackets.Add(1)
 			return copy(b, data), nil
 		}
+		// Arm the gap timer while messages are buffered ahead of the missing one.
+		var deadline <-chan time.Time
+		if len(g.balBuf) > 0 {
+			if !armed {
+				timer.Reset(g.balWindow())
+				armed = true
+			}
+			deadline = timer.C
+		} else {
+			disarm()
+		}
 		select {
 		case <-g.done:
 			return 0, ErrGroupClosed
+		case <-deadline:
+			armed = false
+			if len(g.balBuf) > 0 {
+				g.balNext = g.earliestBuffered() // gap unfilled in time; skip ahead
+			}
 		case res := <-g.recvCh:
+			disarm()
 			if res.err != nil {
 				if g.allBroken() {
 					return 0, res.err
@@ -1339,7 +1379,7 @@ func (g *Group) readBalancing(b []byte) (int, error) {
 			default:
 				g.balBuf[m] = res.data
 				if len(g.balBuf) > balanceReorderMax {
-					g.balNext = g.earliestBuffered() // missing message presumed lost; skip ahead
+					g.balNext = g.earliestBuffered() // hard cap: skip the presumed-lost message
 				}
 			}
 		}
@@ -1351,7 +1391,7 @@ func (g *Group) readBalancing(b []byte) (int, error) {
 // the lowest message number seen — the stream's true starting point. It runs
 // once, with readMu held.
 func (g *Group) balAnchor() error {
-	window := g.balAnchorWindow()
+	window := g.balWindow()
 	timer := time.NewTimer(time.Hour) // armed once the first message arrives
 	defer timer.Stop()
 	if !timer.Stop() {
@@ -1384,10 +1424,11 @@ func (g *Group) balAnchor() error {
 	}
 }
 
-// balAnchorWindow returns the initial reorder-gather window: a few times the
-// largest member link latency (so cross-link arrival skew is captured), floored
-// and capped to sane bounds.
-func (g *Group) balAnchorWindow() time.Duration {
+// balWindow returns the balancing reorder window: a few times the largest member
+// link latency (so cross-link arrival skew is captured), floored and capped to
+// sane bounds. Used both for the initial anchor gather and as the gap-skip
+// timeout, so a gap is never blocked longer than reordering could plausibly need.
+func (g *Group) balWindow() time.Duration {
 	var maxLat time.Duration
 	g.mu.RLock()
 	for _, mc := range g.members {

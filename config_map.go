@@ -84,6 +84,8 @@ func (cfg *Config) listenerConfig() core.ListenerConfig {
 		SendBufCapacity:          cfg.SendBufSize,
 		RecvBufCapacity:          cfg.RecvBufSize,
 		Passphrase:               cfg.Passphrase,
+		KeyLength:                cfg.KeyLength,
+		CryptoMode:               cfg.CryptoMode,
 		AllowUnencryptedFallback: cfg.enforcedEncryptionOff(),
 		KMRefreshRate:            cfg.KMRefreshRate,
 		KMPreAnnounce:            cfg.KMPreAnnounce,
