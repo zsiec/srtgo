@@ -48,6 +48,10 @@ type Config struct {
 	Live       bool               // true -> TSBPD playout + too-late drop (live mode)
 	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
 
+	// Congestion selects the congestion controller: "file" -> window-based AIMD
+	// (FileCC); anything else (incl. "") -> the fixed-rate live pacer (LiveCC).
+	Congestion string
+
 	// Message enables message-mode framing (SRTO_MESSAGEAPI): a payload larger
 	// than one packet is fragmented into PB_FIRST..PB_LAST sharing one message
 	// number, and the receiver reassembles and delivers complete messages (in
@@ -371,6 +375,7 @@ type establishParams struct {
 	MaxBW           int64
 	Live            bool
 	TsbpdDelay      clock.Microseconds
+	Congestion      string
 	Message         bool
 	TLPktDrop       bool
 	SndDropDelay    int
@@ -397,6 +402,7 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		MaxBW:           cfg.MaxBW,
 		Live:            cfg.Live,
 		TsbpdDelay:      cfg.TsbpdDelay,
+		Congestion:      cfg.Congestion,
 		Message:         cfg.Message,
 		TLPktDrop:       cfg.TLPktDrop,
 		SndDropDelay:    cfg.SndDropDelay,
@@ -428,7 +434,15 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	c.payloadSize = ep.PayloadSize
 	c.sndTSBase = now.SRTTimestamp()
 	c.sendBuf = buffer.NewSendBuffer(ep.BufferCapacity, ep.SendISN)
-	c.sendCC = congestion.NewLiveCC(ep.MaxBW, ep.PayloadSize)
+	// File mode uses the window-based AIMD controller (slow start + congestion
+	// window); live mode uses the fixed-rate pacer. The core's window() already
+	// honors the controller's CongestionWindow, so FileCC's adaptive cwnd gates
+	// the send window automatically.
+	if ep.Congestion == "file" {
+		c.sendCC = congestion.NewFileCC(ep.MaxBW, ep.PayloadSize, ep.FlowWindow, ep.SendISN.Value())
+	} else {
+		c.sendCC = congestion.NewLiveCC(ep.MaxBW, ep.PayloadSize)
+	}
 	c.recvBuf = buffer.NewRecvBuffer(ep.BufferCapacity, ep.RecvISN)
 	c.flowWindow = ep.FlowWindow
 	c.rcvLastAckAck = ep.RecvISN

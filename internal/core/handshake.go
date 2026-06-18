@@ -337,6 +337,7 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		MaxBW:           d.maxBW,
 		Live:            d.live,
 		TsbpdDelay:      clock.Microseconds(recvLatMS) * 1000, // ms -> us
+		Congestion:      d.cong,
 		Message:         d.message,
 		TLPktDrop:       d.tlPktDrop,
 		SndDropDelay:    d.sndDropDelay,

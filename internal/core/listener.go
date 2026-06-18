@@ -285,6 +285,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		MaxBW:           l.cfg.MaxBW,
 		Live:            l.cfg.Live,
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
+		Congestion:      l.cfg.Congestion,
 		Message:         l.cfg.Message,
 		TLPktDrop:       l.cfg.TLPktDrop,
 		SndDropDelay:    l.cfg.SndDropDelay,
