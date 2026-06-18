@@ -30,9 +30,14 @@ type ListenerConfig struct {
 	PayloadSize     int
 	BufferCapacity  int
 	Passphrase      string // if set, accept encrypted callers (unwrap their KMREQ)
-	KMRefreshRate   uint64 // encrypted packets between key rotations (0 = disabled)
-	KMPreAnnounce   uint64 // packets before a switch to announce the next key
-	FilterConfig    string // FEC packet filter to offer ("" = off)
+	// AllowUnencryptedFallback accepts a connection unencrypted on a crypto
+	// mismatch (passphrase set but caller offered none, or vice versa) instead of
+	// rejecting — the SRTO_ENFORCEDENCRYPTION=false behavior. A wrong passphrase
+	// is still rejected. Off by default (encryption is enforced).
+	AllowUnencryptedFallback bool
+	KMRefreshRate            uint64 // encrypted packets between key rotations (0 = disabled)
+	KMPreAnnounce            uint64 // packets before a switch to announce the next key
+	FilterConfig             string // FEC packet filter to offer ("" = off)
 }
 
 // ListenerOutput is a datagram the listener asks the host to send to a peer.
@@ -212,6 +217,9 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 	switch {
 	case l.cfg.Passphrase != "":
 		if !hasKM { // listener requires encryption, caller offered none
+			if l.cfg.AllowUnencryptedFallback {
+				break // accept unencrypted (EnforcedEncryption=false)
+			}
 			l.reject(peer, hs.SRTSocketID, rejUnsecure)
 			return
 		}
@@ -236,6 +244,9 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		cryptoCtx = ctx
 		kmKey = hs.SRTKM.KeyBasedEncryption
 	case hasKM: // caller wants encryption but the listener has no passphrase
+		if l.cfg.AllowUnencryptedFallback {
+			break // accept unencrypted; the caller falls back too (no KMRSP echoed)
+		}
 		l.reject(peer, hs.SRTSocketID, rejUnsecure)
 		return
 	}

@@ -66,6 +66,9 @@ type DialConfig struct {
 	CryptoMode    int    // 0/1 -> AES-CTR, 2 -> AES-GCM; used by the host
 	KMRefreshRate uint64 // encrypted packets between key rotations (0 = disabled)
 	KMPreAnnounce uint64 // packets before a switch to announce the next key
+	// AllowUnencryptedFallback connects unencrypted if the listener returns no key
+	// material (SRTO_ENFORCEDENCRYPTION=false). Off by default (encryption enforced).
+	AllowUnencryptedFallback bool
 
 	// Applied once the handshake completes.
 	PayloadSize     int                // data payload per packet (0 -> MSS-44)
@@ -107,10 +110,11 @@ type dialState struct {
 
 	cookie uint32 // learned from the induction response
 
-	cryptoCtx     *crypto.Context
-	passphrase    string
-	kmRefreshRate uint64
-	kmPreAnnounce uint64
+	cryptoCtx          *crypto.Context
+	passphrase         string
+	kmRefreshRate      uint64
+	kmPreAnnounce      uint64
+	allowUnencFallback bool
 
 	payloadSize     int
 	bufferCapacity  int
@@ -156,31 +160,32 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 	c := &Conn{
 		state: stateInduction,
 		dial: &dialState{
-			socketID:        dc.CallerSocketID,
-			isn:             dc.CallerISN,
-			mss:             dc.MSS,
-			fc:              dc.FC,
-			recvLatMS:       dc.RecvLatencyMS,
-			sendLatMS:       dc.SendLatencyMS,
-			cong:            dc.Congestion,
-			streamID:        dc.StreamID,
-			filterCfg:       dc.FilterConfig,
-			cryptoCtx:       dc.CryptoCtx,
-			passphrase:      dc.Passphrase,
-			kmRefreshRate:   dc.KMRefreshRate,
-			kmPreAnnounce:   dc.KMPreAnnounce,
-			payloadSize:     payloadSize,
-			bufferCapacity:  dc.BufferCapacity,
-			maxBW:           dc.MaxBW,
-			live:            dc.Live,
-			message:         dc.Message,
-			tlPktDrop:       dc.TLPktDrop,
-			sndDropDelay:    dc.SndDropDelay,
-			peerIdleTimeout: dc.PeerIdleTimeout,
-			forceHSv4:       dc.ForceHSv4,
-			groupID:         dc.GroupID,
-			groupType:       dc.GroupType,
-			groupWeight:     dc.GroupWeight,
+			socketID:           dc.CallerSocketID,
+			isn:                dc.CallerISN,
+			mss:                dc.MSS,
+			fc:                 dc.FC,
+			recvLatMS:          dc.RecvLatencyMS,
+			sendLatMS:          dc.SendLatencyMS,
+			cong:               dc.Congestion,
+			streamID:           dc.StreamID,
+			filterCfg:          dc.FilterConfig,
+			cryptoCtx:          dc.CryptoCtx,
+			passphrase:         dc.Passphrase,
+			kmRefreshRate:      dc.KMRefreshRate,
+			kmPreAnnounce:      dc.KMPreAnnounce,
+			allowUnencFallback: dc.AllowUnencryptedFallback,
+			payloadSize:        payloadSize,
+			bufferCapacity:     dc.BufferCapacity,
+			maxBW:              dc.MaxBW,
+			live:               dc.Live,
+			message:            dc.Message,
+			tlPktDrop:          dc.TLPktDrop,
+			sndDropDelay:       dc.SndDropDelay,
+			peerIdleTimeout:    dc.PeerIdleTimeout,
+			forceHSv4:          dc.ForceHSv4,
+			groupID:            dc.GroupID,
+			groupType:          dc.GroupType,
+			groupWeight:        dc.GroupWeight,
 		},
 	}
 	c.sendInduction(now)
@@ -345,10 +350,15 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		filterCfg = hs.FilterConfig
 	}
 
-	// We requested encryption but the listener returned no key material.
+	// We requested encryption but the listener returned no key material. With the
+	// fallback allowed (EnforcedEncryption=false) we connect unencrypted; otherwise
+	// it is a hard mismatch.
 	if d.cryptoCtx != nil && !hs.HasKM {
-		c.fail(fmt.Errorf("core: listener returned no key material (encryption mismatch)"))
-		return
+		if !d.allowUnencFallback {
+			c.fail(fmt.Errorf("core: listener returned no key material (encryption mismatch)"))
+			return
+		}
+		d.cryptoCtx = nil // fall back to unencrypted
 	}
 
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
