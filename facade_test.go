@@ -269,6 +269,62 @@ func TestFacadeParseStreamID(t *testing.T) {
 	}
 }
 
+// TestFacadeExtendedStats covers the enriched ConnStats: duration, header-byte
+// totals, interval Mbps, OnStats callbacks, and ExtendedStats.
+func TestFacadeExtendedStats(t *testing.T) {
+	caller, server, ln := dialAccept(t, srt.DefaultConfig(), srt.DefaultConfig())
+	defer ln.Close()
+	defer caller.Close()
+	defer server.Close()
+
+	statsCh := make(chan srt.ConnStats, 8)
+	caller.OnStats(20*time.Millisecond, func(s srt.ConnStats) {
+		select {
+		case statsCh <- s:
+		default:
+		}
+	})
+
+	const n = 200
+	go func() {
+		p := make([]byte, 800)
+		for i := 0; i < n; i++ {
+			if _, err := caller.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+	buf := make([]byte, 2000)
+	for i := 0; i < n; i++ {
+		_ = server.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, err := server.Read(buf); err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+	}
+
+	st := caller.Stats(false)
+	if st.Duration <= 0 || st.StartTime.IsZero() {
+		t.Errorf("Duration/StartTime not set: %v / %v", st.Duration, st.StartTime)
+	}
+	if st.SentTotalBytes <= st.SentBytes {
+		t.Errorf("SentTotalBytes (%d) should exceed SentBytes (%d) by header overhead", st.SentTotalBytes, st.SentBytes)
+	}
+
+	// An OnStats callback should fire with progress.
+	select {
+	case s := <-statsCh:
+		_ = s
+	case <-time.After(2 * time.Second):
+		t.Error("OnStats callback did not fire")
+	}
+	caller.OnStats(0, nil) // stop
+
+	ext := caller.ExtendedStats(false)
+	if ext.SentPackets == 0 {
+		t.Error("ExtendedStats.SentPackets = 0, want > 0")
+	}
+}
+
 // TestFacadeRuntimeBW proves SetMaxBW / SetOption(MaxBW) reach the running core
 // (no error/race) and round-trip, and that SendRate reports a positive rate
 // during active sending.

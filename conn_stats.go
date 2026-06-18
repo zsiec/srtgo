@@ -130,15 +130,116 @@ type ConnStats struct {
 	MsRcvTsbPdDelay time.Duration
 }
 
-// Stats returns a snapshot of the connection's statistics. The clear flag
-// (interval-vs-total) is not yet honored — totals are always returned.
-// TODO(cutover): interval/clear semantics + OnStats.
+// Stats returns a snapshot of the connection's statistics. Packet/byte counters
+// are cumulative; the Mbps interval rates are computed over the window since the
+// previous clear=true call, which also resets that window.
+//
+// NOTE(cutover): a few fields the Sans-I/O core does not yet surface read zero —
+// MsSndBuf/MsRcvBuf, ReorderDistance, RecvBelated*, and RcvAvgBelatedTime.
 func (c *Conn) Stats(clear bool) ConnStats {
 	s, err := c.s.Stats()
 	if err != nil {
 		return ConnStats{}
 	}
-	return statsFromCore(s, c.cfg)
+	st := statsFromCore(s, c.cfg)
+	st.StartTime = c.startTime
+	st.Duration = time.Since(c.startTime)
+	const hdr = 44 // IP(20) + UDP(8) + SRT(16) per packet
+
+	// Header-inclusive byte totals.
+	st.SentTotalBytes = st.SentBytes + st.SentPackets*hdr
+	st.RecvTotalBytes = st.RecvBytes + st.RecvPackets*hdr
+	st.SentUniqueTotalBytes = st.SentUniqueBytes + st.SentUniquePackets*hdr
+	st.RecvUniqueTotalBytes = st.RecvUniqueBytes + st.RecvUniquePackets*hdr
+	st.RetransTotalBytes = st.RetransBytes + st.Retransmits*hdr
+	st.RecvRetransTotalBytes = st.RecvRetransBytes + st.RecvRetrans*hdr
+	st.SentDropTotalBytes = st.SentDroppedBytes + st.SentDropped*hdr
+
+	// Loss rates.
+	if st.SentPackets > 0 {
+		st.SendLossRate = float64(st.LostPackets) / float64(st.SentPackets) * 100
+	}
+	if denom := st.RecvPackets + st.RecvDropped; denom > 0 {
+		st.RecvLossRate = float64(st.RecvDropped) / float64(denom) * 100
+	}
+	st.MbpsMaxBW = float64(c.cfg.MaxBW) * 8 / 1e6
+
+	// Interval Mbps rates over the window since the last clear=true.
+	c.statsMu.Lock()
+	dt := time.Since(c.clearAt).Seconds()
+	if dt > 0 {
+		st.MbpsSendRate = float64(st.SentBytes-c.clearSntBytes) * 8 / 1e6 / dt
+		st.MbpsRecvRate = float64(st.RecvBytes-c.clearRcvBytes) * 8 / 1e6 / dt
+	}
+	if clear {
+		c.clearAt = time.Now()
+		c.clearSntBytes = st.SentBytes
+		c.clearRcvBytes = st.RecvBytes
+	}
+	c.statsMu.Unlock()
+	return st
+}
+
+// OnStats registers a callback invoked periodically (every interval, min ~10ms)
+// with interval statistics (Stats(true)). Pass a nil fn to stop. The callback
+// stops automatically when the connection is closed.
+func (c *Conn) OnStats(interval time.Duration, fn func(ConnStats)) {
+	c.statsMu.Lock()
+	if c.onStatsStop != nil {
+		close(c.onStatsStop)
+		c.onStatsStop = nil
+	}
+	if fn == nil {
+		c.statsMu.Unlock()
+		return
+	}
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	stop := make(chan struct{})
+	c.onStatsStop = stop
+	c.statsMu.Unlock()
+
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				fn(c.Stats(true))
+			}
+		}
+	}()
+}
+
+// ExtendedConnStats is ConnStats plus smoothed buffer occupancy and send rate.
+type ExtendedConnStats struct {
+	ConnStats
+	AvgSndBufPkts  float64
+	AvgSndBufBytes float64
+	AvgRcvBufPkts  float64
+	AvgRcvBufBytes float64
+	SendRatePps    int64
+	SendRateBps    int64
+}
+
+// ExtendedStats returns Stats plus current buffer occupancy and the measured
+// send rate. NOTE(cutover): the buffer averages are the current occupancy, not
+// yet IIR-smoothed.
+func (c *Conn) ExtendedStats(clear bool) ExtendedConnStats {
+	base := c.Stats(clear)
+	pps, bps := c.SendRate()
+	return ExtendedConnStats{
+		ConnStats:      base,
+		AvgSndBufPkts:  float64(base.SendBufSize),
+		AvgSndBufBytes: float64(base.SendBufBytes),
+		AvgRcvBufPkts:  float64(base.RecvBufSize),
+		AvgRcvBufBytes: float64(base.RecvBufBytes),
+		SendRatePps:    pps,
+		SendRateBps:    bps,
+	}
 }
 
 func statsFromCore(s core.Stats, cfg Config) ConnStats {

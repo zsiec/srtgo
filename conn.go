@@ -31,6 +31,15 @@ type Conn struct {
 	rateAt time.Time
 	rateP  uint64
 	rateB  uint64
+
+	startTime time.Time // connection start (for Duration)
+
+	// Interval-stats (clear) + OnStats state.
+	statsMu       sync.Mutex
+	clearAt       time.Time
+	clearSntBytes uint64
+	clearRcvBytes uint64
+	onStatsStop   chan struct{}
 }
 
 // newConn wraps an established session, applying the blocking-mode and linger
@@ -38,11 +47,13 @@ type Conn struct {
 // side) connections.
 func newConn(s *session.Session, cfg Config, isServer bool) *Conn {
 	c := &Conn{
-		s:        s,
-		cfg:      cfg,
-		isServer: isServer,
-		sndSyn:   cfg.sndSynEnabled(),
-		rcvSyn:   cfg.rcvSynEnabled(),
+		s:         s,
+		cfg:       cfg,
+		isServer:  isServer,
+		sndSyn:    cfg.sndSynEnabled(),
+		rcvSyn:    cfg.rcvSynEnabled(),
+		startTime: time.Now(),
+		clearAt:   time.Now(),
 	}
 	s.SetReadBlocking(c.rcvSyn)
 	s.SetWriteBlocking(c.sndSyn)
@@ -71,7 +82,15 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 // Close shuts the connection down. With a positive Linger it drains the send
 // buffer (up to Linger) before sending SHUTDOWN; otherwise it closes promptly.
-func (c *Conn) Close() error { return c.s.Close() }
+func (c *Conn) Close() error {
+	c.statsMu.Lock()
+	if c.onStatsStop != nil {
+		close(c.onStatsStop)
+		c.onStatsStop = nil
+	}
+	c.statsMu.Unlock()
+	return c.s.Close()
+}
 
 // LocalAddr returns the local UDP address.
 func (c *Conn) LocalAddr() net.Addr { return c.s.LocalAddr() }
