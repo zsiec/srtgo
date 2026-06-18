@@ -89,6 +89,28 @@ func (cfg *Config) listenerConfig() core.ListenerConfig {
 	}
 }
 
+// rendezvousConfig builds the core.RendezvousConfig for a simultaneous-open
+// connection. The host (session.DialRendezvous) generates the socket ID / ISN /
+// cookie when left zero. NOTE: the rendezvous core path is unencrypted, so
+// Passphrase is not applied here.
+func (cfg *Config) rendezvousConfig() core.RendezvousConfig {
+	return core.RendezvousConfig{
+		MSS:             uint32(cfg.MSS),
+		FC:              uint32(cfg.FC),
+		RecvLatencyMS:   cfg.recvLatencyMS(),
+		SendLatencyMS:   cfg.peerLatencyMS(),
+		Congestion:      cfg.congestionString(),
+		StreamID:        cfg.StreamID,
+		FilterConfig:    cfg.PacketFilter,
+		PayloadSize:     cfg.PayloadSize,
+		BufferCapacity:  cfg.bufferCapacity(),
+		MaxBW:           cfg.MaxBW,
+		Live:            cfg.tsbpdEnabled(),
+		Message:         cfg.messageAPIEnabled(),
+		PeerIdleTimeout: cfg.peerIdleMicros(),
+	}
+}
+
 // udpSocketOptions maps the OS-level socket knobs onto the host helper.
 func (cfg *Config) udpSocketOptions() session.UDPSocketOptions {
 	return session.UDPSocketOptions{

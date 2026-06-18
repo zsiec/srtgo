@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	srt "github.com/zsiec/srtgo"
 )
+
+// newUDP binds an ephemeral 127.0.0.1 UDP socket for tests.
+func newUDP(t *testing.T) (net.PacketConn, error) {
+	t.Helper()
+	return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+}
 
 // TestFacadeLoopback exercises the new public-API façade end to end over real
 // UDP: Listen + Dial + Accept, bidirectional Write/Read, Stats, and Close.
@@ -189,6 +196,76 @@ func TestFacadeStreamID(t *testing.T) {
 	}
 	if server.SocketID() == 0 {
 		t.Error("accepted.SocketID() = 0, want nonzero")
+	}
+}
+
+// TestFacadeRendezvous proves a peer-to-peer simultaneous-open connection works
+// through the façade.
+func TestFacadeRendezvous(t *testing.T) {
+	cfg := srt.DefaultConfig()
+	cfg.ConnTimeout = 5 * time.Second
+
+	// Two ephemeral local sockets; each dials the other.
+	addrA := freeUDPAddr(t)
+	addrB := freeUDPAddr(t)
+
+	type res struct {
+		c   *srt.Conn
+		err error
+	}
+	ch := make(chan res, 2)
+	go func() { c, err := srt.DialRendezvous(addrA, addrB, cfg); ch <- res{c, err} }()
+	go func() { c, err := srt.DialRendezvous(addrB, addrA, cfg); ch <- res{c, err} }()
+
+	var conns []*srt.Conn
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("rendezvous dial: %v", r.err)
+			}
+			conns = append(conns, r.c)
+		case <-time.After(8 * time.Second):
+			t.Fatal("rendezvous timed out")
+		}
+	}
+	defer conns[0].Close()
+	defer conns[1].Close()
+
+	if _, err := conns[0].Write([]byte("rdv-hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = conns[1].SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 100)
+	n, err := conns[1].Read(buf)
+	if err != nil || string(buf[:n]) != "rdv-hello" {
+		t.Fatalf("rendezvous Read: m=%d err=%v got=%q", n, err, buf[:n])
+	}
+}
+
+// freeUDPAddr returns a free 127.0.0.1:port string by briefly binding a socket.
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	c, err := newUDP(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := c.LocalAddr().String()
+	c.Close()
+	return addr
+}
+
+// TestFacadeParseStreamID proves the public stream-ID parser is wired.
+func TestFacadeParseStreamID(t *testing.T) {
+	info, ok := srt.ParseStreamID("#!::u=alice,r=live/stream")
+	if !ok {
+		t.Fatal("ParseStreamID returned ok=false")
+	}
+	if info.UserName != "alice" {
+		t.Errorf("UserName = %q, want alice", info.UserName)
+	}
+	if info.ResourceName != "live/stream" {
+		t.Errorf("ResourceName = %q, want live/stream", info.ResourceName)
 	}
 }
 
