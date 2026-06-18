@@ -345,11 +345,85 @@ func TestE2EFileMode(t *testing.T) {
 	t.Logf("file mode transfer OK: %d bytes verified", totalBytes)
 }
 
-// TestE2EStreamID (stream-ID accept/reject gating) is deferred to the
-// accept-gating cutover increment (SetAcceptFunc/ConnRequest). Stream-ID
-// negotiation + surfacing is already covered by TestFacadeStreamID. The full
-// gating test still lives in internal/legacy and is salvaged when SetAcceptFunc
-// lands on the façade Listener.
+// TestE2EStreamID verifies that stream ID negotiation works end-to-end,
+// including acceptance and rejection based on stream ID.
+func TestE2EStreamID(t *testing.T) {
+	t.Parallel()
+
+	listenerCfg := DefaultConfig()
+	listenerCfg.Latency = 20 * time.Millisecond
+	listenerCfg.ConnTimeout = 10 * time.Second
+
+	l := e2eSetupWithListener(t, listenerCfg)
+
+	// Accept only "test/my-stream"
+	l.SetAcceptFunc(func(req ConnRequest) bool {
+		return req.StreamID == "test/my-stream"
+	})
+
+	// --- Test 1: Correct stream ID is accepted ---
+	dialerCfg := DefaultConfig()
+	dialerCfg.Latency = 20 * time.Millisecond
+	dialerCfg.ConnTimeout = 10 * time.Second
+	dialerCfg.StreamID = "test/my-stream"
+
+	var (
+		dialConn *Conn
+		dialErr  error
+		wg       sync.WaitGroup
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dialConn, dialErr = Dial(l.Addr().String(), dialerCfg)
+	}()
+
+	server, err := l.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	wg.Wait()
+	if dialErr != nil {
+		server.Close()
+		t.Fatalf("Dial with correct StreamID: %v", dialErr)
+	}
+
+	// Verify stream ID on the server-side connection
+	if got := server.StreamID(); got != "test/my-stream" {
+		t.Errorf("server.StreamID() = %q, want %q", got, "test/my-stream")
+	}
+
+	// Verify we can exchange data
+	payload := []byte("stream-id-test-payload")
+	if _, err := dialConn.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1500)
+	n, err := server.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != string(payload) {
+		t.Errorf("got %q, want %q", buf[:n], payload)
+	}
+
+	dialConn.Close()
+	server.Close()
+
+	// --- Test 2: Wrong stream ID is rejected ---
+	rejectCfg := DefaultConfig()
+	rejectCfg.Latency = 20 * time.Millisecond
+	rejectCfg.ConnTimeout = 2 * time.Second
+	rejectCfg.StreamID = "wrong/stream-id"
+
+	_, err = Dial(l.Addr().String(), rejectCfg)
+	if err == nil {
+		t.Fatal("Dial with wrong StreamID should fail")
+	}
+	t.Logf("rejected stream ID as expected: %v", err)
+}
 
 // TestE2EStatsAccuracy sends a known number of packets and verifies that
 // stats counters match.

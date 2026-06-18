@@ -42,6 +42,16 @@ type ListenerConfig struct {
 	FilterConfig             string // FEC packet filter to offer ("" = off)
 }
 
+// AcceptRequest describes an incoming connection at CONCLUSION time, passed to
+// the host's accept gate to authorize or reject it before acceptance.
+type AcceptRequest struct {
+	Peer      PeerID
+	StreamID  string
+	HSVersion uint32
+	GroupID   uint32
+	GroupType uint8
+}
+
 // ListenerOutput is a datagram the listener asks the host to send to a peer.
 // (Sealed; the host switches over it exhaustively.)
 type ListenerOutput interface{ isListenerOutput() }
@@ -106,10 +116,19 @@ type Listener struct {
 	rng          func([]byte)                                                      // host entropy for socket IDs / ISNs
 	newCtx       func(keyLen int, mode crypto.CipherMode) (*crypto.Context, error) // host crypto-context factory (may be nil)
 	accepted     map[PeerID]acceptedConn
-	groups       map[uint32]seq.Number // GroupID -> shared send ISN (bonding)
+	groups       map[uint32]seq.Number                                // GroupID -> shared send ISN (bonding)
+	gate         func(AcceptRequest) (accept bool, rejectCode uint32) // host accept gate (may be nil)
 
 	outputs fifo[ListenerOutput]
 	events  fifo[ListenerEvent]
+}
+
+// SetAcceptGate installs the host accept gate, consulted once per peer at
+// CONCLUSION. Returning (false, code) rejects with that handshake code (0 ->
+// rejPeer). It must be set before the listener is driven (it is read on the
+// same goroutine that calls HandlePacket).
+func (l *Listener) SetAcceptGate(fn func(AcceptRequest) (accept bool, rejectCode uint32)) {
+	l.gate = fn
 }
 
 // NewListener builds a listener. cookieSecret keys the SYN cookie (the host
@@ -202,6 +221,27 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 	if hs.SRTHS.SRTVersion < 0x010300 {
 		l.reject(peer, hs.SRTSocketID, rejRogue)
 		return
+	}
+
+	// Accept gating: let the host authorize the connection (e.g. by StreamID)
+	// before we commit to it. A reject sends a rejection handshake with the
+	// host-supplied code (default rejPeer). Runs once per peer — duplicate
+	// CONCLUSIONs short-circuit above.
+	if l.gate != nil {
+		accept, code := l.gate(AcceptRequest{
+			Peer:      peer,
+			StreamID:  hs.StreamID,
+			HSVersion: hs.Version,
+			GroupID:   hs.GroupID,
+			GroupType: hs.GroupType,
+		})
+		if !accept {
+			if code == 0 {
+				code = rejPeer
+			}
+			l.reject(peer, hs.SRTSocketID, code)
+			return
+		}
 	}
 
 	recvLat, sendLat := l.cfg.RecvLatencyMS, l.cfg.SendLatencyMS

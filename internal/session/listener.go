@@ -32,6 +32,46 @@ type Listener struct {
 	quit      chan struct{}
 	loopDone  chan struct{}
 	closeOnce sync.Once
+
+	gateMu sync.RWMutex
+	gate   func(AcceptRequest) (accept bool, rejectCode uint32)
+}
+
+// AcceptRequest describes an incoming connection at accept time. It adds the
+// resolved RemoteAddr to the core's request.
+type AcceptRequest struct {
+	StreamID   string
+	HSVersion  uint32
+	GroupID    uint32
+	GroupType  uint8
+	RemoteAddr net.Addr
+}
+
+// SetAcceptGate installs (or clears, with nil) the accept gate consulted once
+// per incoming connection during the handshake. Safe to call concurrently with
+// the accept loop.
+func (l *Listener) SetAcceptGate(fn func(AcceptRequest) (accept bool, rejectCode uint32)) {
+	l.gateMu.Lock()
+	l.gate = fn
+	l.gateMu.Unlock()
+}
+
+// coreGate adapts the core's AcceptRequest to the host gate, adding RemoteAddr.
+// Runs on the loop goroutine (called from core.HandlePacket).
+func (l *Listener) coreGate(req core.AcceptRequest) (bool, uint32) {
+	l.gateMu.RLock()
+	fn := l.gate
+	l.gateMu.RUnlock()
+	if fn == nil {
+		return true, 0
+	}
+	return fn(AcceptRequest{
+		StreamID:   req.StreamID,
+		HSVersion:  req.HSVersion,
+		GroupID:    req.GroupID,
+		GroupType:  req.GroupType,
+		RemoteAddr: l.addrs[req.Peer],
+	})
 }
 
 // Listen binds a core.Listener over conn and starts accepting. It owns conn
@@ -58,6 +98,9 @@ func Listen(conn net.PacketConn, cfg core.ListenerConfig, clk clock.Clock) (*Lis
 		quit:        make(chan struct{}),
 		loopDone:    make(chan struct{}),
 	}
+	// Install a fixed adapter once (before the loop starts); it reads the
+	// app-supplied gate atomically, so SetAcceptGate is race-free.
+	l.core.SetAcceptGate(l.coreGate)
 	go l.loop()
 	return l, nil
 }

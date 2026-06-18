@@ -27,6 +27,7 @@ const handshakeRetryInterval = 250 * clock.Millisecond
 
 // SRT rejection codes (subset; mirror the public srt package's Rej* values).
 const (
+	rejPeer      = 1002 // rejected by the host accept gate (default)
 	rejRogue     = 1004 // incorrect data in handshake
 	rejBadSecret = 1010 // wrong passphrase
 	rejUnsecure  = 1011 // passphrase required or unexpected
