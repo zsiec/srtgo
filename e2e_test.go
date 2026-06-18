@@ -1,10 +1,9 @@
-package srt_test
+package srt
 
 import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
-	. "github.com/zsiec/srtgo"
 	"io"
 	"sync"
 	"testing"

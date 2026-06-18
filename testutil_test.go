@@ -1,4 +1,4 @@
-package srt_test
+package srt
 
 import (
 	"testing"
