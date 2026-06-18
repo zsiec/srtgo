@@ -190,6 +190,14 @@ type Conn struct {
 	rtt             clock.Microseconds
 	rttVar          clock.Microseconds
 
+	// RTO / blind retransmit (the EXP timer). lastACKTime is when we last heard
+	// an ACK; rexmitCount backs off the RTO across consecutive timeouts. When the
+	// peer stops ACKing while data is in flight (e.g. a lost tail or a lost NAK),
+	// the EXP timer blind-retransmits the unacked packets — reactive NAK handling
+	// alone can't recover a tail the receiver never detected as a gap.
+	lastACKTime clock.Timestamp
+	rexmitCount int
+
 	// Statistics — plain counters (single-threaded); snapshotted via Stats.
 	sentPackets      uint64
 	sentBytes        uint64
@@ -479,9 +487,12 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 			c.fecARQLevel = fcfg.ARQ
 		}
 	}
+	c.rexmitCount = 1
+	c.lastACKTime = now
 	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
+	c.outputs.push(SetTimer{ID: TimerEXP, Deadline: now.Add(c.rto())})
 	if ep.PeerIdleTimeout > 0 {
 		c.peerIdleTimeout = ep.PeerIdleTimeout
 		c.lastRecvTime = now
@@ -649,6 +660,43 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 		c.checkKeepalive(now)
 	case TimerPeerIdle:
 		c.checkPeerIdle(now)
+	case TimerEXP:
+		c.handleEXP(now)
+	}
+}
+
+// rto returns the current retransmission timeout: (RTT + 4·RTTVar + 2·SYN),
+// scaled by the consecutive-timeout count for exponential-ish backoff, plus a
+// small floor. Mirrors the legacy EXP interval.
+func (c *Conn) rto() clock.Microseconds {
+	n := c.rexmitCount
+	if n < 1 {
+		n = 1
+	}
+	return clock.Microseconds(n)*(c.rtt+4*c.rttVar+2*synInterval) + 10*clock.Millisecond
+}
+
+// handleEXP is the retransmission-timeout timer. When data is in flight and no
+// ACK has advanced it within the RTO, it blind-retransmits the unacked packets
+// (the receiver may never have detected a lost tail as a gap, so it never NAKs
+// it) and tells the congestion controller a timeout occurred. It always re-arms.
+func (c *Conn) handleEXP(now clock.Timestamp) {
+	if c.sendBuf != nil && c.sendBuf.Size() > 0 && now.Sub(c.lastACKTime) > c.rto() {
+		c.sendCC.OnTimeout()
+		c.rexmitCount++
+		c.retransmitAll(now)
+		c.lastACKTime = now // avoid immediate refire before the next RTO
+	}
+	c.outputs.push(SetTimer{ID: TimerEXP, Deadline: now.Add(c.rto())})
+}
+
+// retransmitAll re-sends every unacknowledged packet (blind retransmit on RTO).
+// The send buffer returns retransmit clones (R bit set); the host releases them.
+func (c *Conn) retransmitAll(now clock.Timestamp) {
+	for _, rp := range c.sendBuf.GetAllUnacked() {
+		c.retransPackets++
+		c.retransBytes += uint64(len(rp.Data))
+		c.outputs.push(SendPacket{Packet: rp, Owned: true})
 	}
 }
 
@@ -1231,6 +1279,15 @@ func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
 	c.recvACKs++
 	isLite := len(p.Data) == 4
 	ackd := c.sendBuf.ACK(seq.Number(ack.LastACKPacketSequenceNumber))
+
+	// Only ACK *progress* (the ack point advancing) resets the RTO clock and the
+	// backoff. Redundant periodic ACKs that re-confirm the same point must not, or
+	// a stalled tail (acked-up-to-here, nothing new) would keep the EXP timer from
+	// ever firing.
+	if ackd > 0 {
+		c.lastACKTime = now
+		c.rexmitCount = 1
+	}
 
 	if isLite {
 		if ackd > 0 && c.rcvFlowWin > 0 {
