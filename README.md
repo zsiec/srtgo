@@ -372,6 +372,8 @@ Benchmarks on Apple M1 Pro (single core):
 | Core send path | 396 ns | 3 allocs |
 | AES encrypt | 299 ns | 0 allocs |
 | Key wrap | 350 ns | 0 allocs |
+| Write throughput (loopback) | 236 MB/s | 7 allocs/op |
+| Dial + Accept (loopback) | 812 µs | 217 allocs |
 
 Hot-path allocations are minimized through `sync.Pool` for packet buffers and concrete types (no interfaces on hot paths).
 
