@@ -32,9 +32,16 @@ const (
 	// a sender buffer for seamless continuity.
 	GroupBackup
 
-	// GroupBalancing distributes packets across member connections
-	// for load balancing. Not yet implemented — defined here for
-	// wire protocol compatibility.
+	// GroupBalancing distributes packets across member connections for load
+	// balancing. NOT SUPPORTED in this implementation (Write returns
+	// ErrBalancingUnsupported): each member is an independent SRT connection with
+	// its own receive buffer, so splitting one sequence space across links makes
+	// every link see gaps — triggering in-order stalls, spurious NAK/retransmit,
+	// and TSBPD too-late drops — while cross-link out-of-order arrivals are
+	// discarded by the receiver's monotonic dedup. Faithful balancing needs a
+	// dedicated core link mode (immediate, lossless delivery) plus an app-level
+	// reorder buffer in Group.Read; it is defined here for wire-protocol
+	// compatibility only.
 	GroupBalancing
 )
 
@@ -462,6 +469,8 @@ func (g *Group) Write(b []byte) (int, error) {
 		return g.writeBroadcast(b)
 	case GroupBackup:
 		return g.writeBackup(b)
+	case GroupBalancing:
+		return 0, ErrBalancingUnsupported
 	default:
 		return 0, fmt.Errorf("srt: unknown group mode %d", g.mode)
 	}

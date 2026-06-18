@@ -72,6 +72,10 @@ var (
 	// ErrGroupClosed is returned when operating on a closed Group.
 	ErrGroupClosed = errors.New("srt: group closed")
 
+	// ErrBalancingUnsupported is returned by Group.Write for GroupBalancing mode,
+	// which is not supported (see the GroupBalancing doc for why).
+	ErrBalancingUnsupported = errors.New("srt: balancing group mode is not supported")
+
 	// ErrListenerClosed is returned when Accept is called on a closed Listener.
 	ErrListenerClosed = errors.New("srt: listener closed")
 
