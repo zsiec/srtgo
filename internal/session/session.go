@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
@@ -29,6 +30,20 @@ import (
 
 // ErrClosed is returned by Read/Write after the session is closed.
 var ErrClosed = errors.New("session: closed")
+
+// ErrWouldBlock is returned by a non-blocking Read/Write that cannot proceed.
+var ErrWouldBlock = errors.New("srt: operation would block")
+
+// timeoutErr is the net.Error returned when a read/write deadline expires.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "srt: i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// ErrTimeout is returned when a read/write deadline expires. It satisfies
+// net.Error with Timeout() == true.
+var ErrTimeout net.Error = timeoutErr{}
 
 // Session drives one core.Conn over a mux. Construct it with NewEstablished or
 // Dial; Write/Read/Close are safe to call from other goroutines.
@@ -47,6 +62,13 @@ type Session struct {
 	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
 	quit      chan struct{}        // closed by Close to ask the loop to stop
 	loopDone  chan struct{}        // closed by the loop on exit
+
+	// net.Conn deadlines and SRTO_RCVSYN/SNDSYN blocking modes. Read/Write honor
+	// these; blocking defaults to true.
+	readDeadline  atomic.Value // time.Time
+	writeDeadline atomic.Value // time.Time
+	rcvSyn        atomic.Bool  // true = blocking Read (default)
+	sndSyn        atomic.Bool  // true = blocking Write (default)
 
 	timers    map[core.TimerID]clock.Timestamp
 	closeOnce sync.Once
@@ -70,6 +92,8 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		loopDone:   make(chan struct{}),
 		timers:     make(map[core.TimerID]clock.Timestamp),
 	}
+	s.rcvSyn.Store(true)
+	s.sndSyn.Store(true)
 	go s.loop()
 	return s
 }
@@ -164,35 +188,129 @@ func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk cloc
 	}
 }
 
-// Write queues a payload for transmission. It blocks if the internal queue is
-// full (natural backpressure) and returns ErrClosed once the session is closed.
+// Write queues a payload for transmission. In blocking mode it waits for queue
+// space (natural backpressure), honoring the write deadline; in non-blocking
+// mode it returns ErrWouldBlock if the queue is full. It returns ErrClosed once
+// the session is closed.
 func (s *Session) Write(p []byte) error {
 	cp := make([]byte, len(p))
 	copy(cp, p)
+
+	if !s.sndSyn.Load() {
+		select {
+		case s.writeC <- cp:
+			return nil
+		case <-s.loopDone:
+			return ErrClosed
+		default:
+			return ErrWouldBlock
+		}
+	}
+
+	timeout, stop, expired := s.deadlineChan(&s.writeDeadline)
+	if expired {
+		return ErrTimeout
+	}
+	if stop != nil {
+		defer stop()
+	}
 	select {
 	case s.writeC <- cp:
 		return nil
+	case <-timeout:
+		return ErrTimeout
 	case <-s.loopDone:
 		return ErrClosed
 	}
 }
 
-// Read returns the next delivered payload, copied into b, blocking until data
-// is available. It returns io.EOF once the session is closed and drained.
+// Read returns the next delivered payload, copied into b. In blocking mode it
+// waits for data, honoring the read deadline; in non-blocking mode it returns
+// ErrWouldBlock if none is ready. It returns io.EOF once the session is closed
+// and drained.
 func (s *Session) Read(b []byte) (int, error) {
-	select {
-	case data := <-s.readC:
-		return copy(b, data), nil
-	case <-s.loopDone:
-		// Drain anything already delivered before the loop exited.
+	if !s.rcvSyn.Load() {
 		select {
 		case data := <-s.readC:
 			return copy(b, data), nil
+		case <-s.loopDone:
+			return s.drainRead(b)
 		default:
-			return 0, io.EOF
+			return 0, ErrWouldBlock
 		}
 	}
+
+	timeout, stop, expired := s.deadlineChan(&s.readDeadline)
+	if expired {
+		return 0, ErrTimeout
+	}
+	if stop != nil {
+		defer stop()
+	}
+	select {
+	case data := <-s.readC:
+		return copy(b, data), nil
+	case <-timeout:
+		return 0, ErrTimeout
+	case <-s.loopDone:
+		return s.drainRead(b)
+	}
 }
+
+// drainRead returns any payload delivered before the loop exited, else io.EOF.
+func (s *Session) drainRead(b []byte) (int, error) {
+	select {
+	case data := <-s.readC:
+		return copy(b, data), nil
+	default:
+		return 0, io.EOF
+	}
+}
+
+// deadlineChan returns a timer channel for the given deadline (nil if none),
+// plus a stop func, and whether the deadline has already passed.
+func (s *Session) deadlineChan(dl *atomic.Value) (<-chan time.Time, func() bool, bool) {
+	v := dl.Load()
+	if v == nil {
+		return nil, nil, false
+	}
+	t, _ := v.(time.Time)
+	if t.IsZero() {
+		return nil, nil, false
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return nil, nil, true
+	}
+	timer := time.NewTimer(d)
+	return timer.C, timer.Stop, false
+}
+
+// SetReadDeadline sets the deadline for future Read calls; a zero time clears it.
+func (s *Session) SetReadDeadline(t time.Time) error {
+	s.readDeadline.Store(t)
+	return nil
+}
+
+// SetWriteDeadline sets the deadline for future Write calls; a zero time clears it.
+func (s *Session) SetWriteDeadline(t time.Time) error {
+	s.writeDeadline.Store(t)
+	return nil
+}
+
+// SetDeadline sets both the read and write deadlines.
+func (s *Session) SetDeadline(t time.Time) error {
+	s.readDeadline.Store(t)
+	s.writeDeadline.Store(t)
+	return nil
+}
+
+// SetReadBlocking sets blocking (SRTO_RCVSYN) for Read; non-blocking Read
+// returns ErrWouldBlock when no data is ready.
+func (s *Session) SetReadBlocking(blocking bool) { s.rcvSyn.Store(blocking) }
+
+// SetWriteBlocking sets blocking (SRTO_SNDSYN) for Write.
+func (s *Session) SetWriteBlocking(blocking bool) { s.sndSyn.Store(blocking) }
 
 // Close stops the event loop and, if the session owns the mux, closes it.
 func (s *Session) Close() error {

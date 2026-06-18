@@ -275,6 +275,21 @@ Each phase keeps the public API and `make test` green.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 
+## Public-API parity (the cutover gate)
+
+The legacy public `srt.*` surface the new stack must eventually match: `Conn` (40+ methods —
+net.Conn, message mode, `Stats`, 60+ socket options, group coordination), `Config` (~90 fields),
+`ConnStats` (~60 fields), `Listener`/`ConnRequest`/deferred accept, `Server`, public `Group`,
+`Watcher`, `MsgCtrl`, rejection codes. Tracked here as parity items are built on `internal/session`.
+
+- ✅ net.Conn deadlines + non-blocking I/O on `session.Session`: `SetReadDeadline`/`SetWriteDeadline`/
+  `SetDeadline` (zero clears), `SetReadBlocking`/`SetWriteBlocking` (SRTO_RCVSYN/SNDSYN); Read/Write
+  return `ErrTimeout` (a `net.Error` with `Timeout()==true`) on deadline and `ErrWouldBlock` when
+  non-blocking with nothing ready. Test `TestSessionReadDeadlineNonBlocking`.
+- ⬜ message-mode framing (`ReadMessage`/`WriteMsgCtrl`); file mode; socket options (Get/Set);
+  full `ConnStats` shape; public `Conn`/`Listener`/`Server`/`Group` wrappers; `ConnRequest`/deferred
+  accept; `Watcher`.
+
 ## Open questions (resolve as phases land)
 
 1. **Addressing in outputs.** `SendPacket` leaves `Header.Addr` nil; the host fills the peer addr.
