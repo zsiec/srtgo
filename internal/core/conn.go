@@ -511,6 +511,9 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	if ep.BufferCapacity <= 0 {
 		ep.BufferCapacity = 8192
 	}
+	if ep.FlowWindow <= 0 {
+		ep.FlowWindow = 25600
+	}
 	// Independent send/recv capacities (fall back to the shared BufferCapacity).
 	sndCap, rcvCap := ep.SendBufCapacity, ep.RecvBufCapacity
 	if sndCap <= 0 {
@@ -519,8 +522,16 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	if rcvCap <= 0 {
 		rcvCap = ep.BufferCapacity
 	}
-	if ep.FlowWindow <= 0 {
-		ep.FlowWindow = 25600
+	// The buffers must cover the flow window: the sender can only keep as many
+	// packets in flight as it can buffer for retransmit, and the receiver must not
+	// advertise a window larger than it can store. Without this, a high-BDP link
+	// (BDP > buffer) would cap in flight at the buffer size and stall throughput.
+	// (Mirrors the pre-Sans-I/O max(BufSize, FC) sizing.)
+	if ep.FlowWindow > sndCap {
+		sndCap = ep.FlowWindow
+	}
+	if ep.FlowWindow > rcvCap {
+		rcvCap = ep.FlowWindow
 	}
 	c.peerSocketID = ep.PeerSocketID
 	c.payloadSize = ep.PayloadSize
