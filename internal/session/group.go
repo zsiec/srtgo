@@ -45,7 +45,8 @@ type Group struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	timers map[groupTimerKey]clock.Timestamp
+	timers   map[groupTimerKey]clock.Timestamp
+	ownMuxes bool // close member muxes on Close (false when members share a mux)
 }
 
 type groupMember struct {
@@ -53,6 +54,7 @@ type groupMember struct {
 	mux        *mux.Mux
 	recvC      <-chan packet.Packet
 	remoteAddr net.Addr
+	weight     uint16
 }
 
 type groupInbound struct {
@@ -76,24 +78,40 @@ func NewEstablishedGroup(mode core.GroupMode, mcfgs []GroupMemberConfig, clk clo
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
+	now := clk.Now()
+	members := make([]*groupMember, 0, len(mcfgs))
+	for _, mc := range mcfgs {
+		m := mux.New(mc.Conn, mux.DefaultMSS)
+		recvC := m.Register(mc.LocalSocketID)
+		conn := core.NewEstablished(mc.Config, now)
+		members = append(members, &groupMember{conn: conn, mux: m, recvC: recvC, remoteAddr: mc.RemoteAddr, weight: mc.Weight})
+	}
+	return newGroupFromMembers(mode, members, true, clk)
+}
+
+// newGroupFromMembers assembles a group host over already-established members and
+// starts its event loop. ownMuxes selects whether Close also closes the member
+// muxes (true for one-socket-per-member topologies like the caller side; false
+// when all members share a host-owned mux, e.g. the listener side).
+func newGroupFromMembers(mode core.GroupMode, members []*groupMember, ownMuxes bool, clk clock.Clock) *Group {
+	if clk == nil {
+		clk = clock.NewRealClock()
+	}
 	cg := core.NewGroup(mode)
 	g := &Group{
 		clk:      clk,
 		core:     cg,
-		inbound:  make(chan groupInbound, 256*max1(len(mcfgs))),
+		members:  members,
+		inbound:  make(chan groupInbound, 256*max1(len(members))),
 		writeC:   make(chan []byte, 256),
 		readC:    make(chan []byte, 2048),
 		quit:     make(chan struct{}),
 		loopDone: make(chan struct{}),
 		timers:   make(map[groupTimerKey]clock.Timestamp),
+		ownMuxes: ownMuxes,
 	}
-	now := clk.Now()
-	for _, mc := range mcfgs {
-		m := mux.New(mc.Conn, mux.DefaultMSS)
-		recvC := m.Register(mc.LocalSocketID)
-		conn := core.NewEstablished(mc.Config, now)
-		cg.AddMember(conn, mc.Weight)
-		g.members = append(g.members, &groupMember{conn: conn, mux: m, recvC: recvC, remoteAddr: mc.RemoteAddr})
+	for _, m := range members {
+		cg.AddMember(m.conn, m.weight)
 	}
 	for i, m := range g.members {
 		g.wg.Add(1)
@@ -130,13 +148,17 @@ func (g *Group) Read(b []byte) (int, error) {
 	}
 }
 
-// Close stops the loop and closes every member socket.
+// Close stops the loop. When the group owns its member sockets (one mux per
+// member) it closes each; when members share a host-owned mux (listener side)
+// the muxes are left for the owner to close.
 func (g *Group) Close() error {
 	g.closeOnce.Do(func() { close(g.quit) })
 	<-g.loopDone
 	g.wg.Wait()
-	for _, m := range g.members {
-		_ = m.mux.Close()
+	if g.ownMuxes {
+		for _, m := range g.members {
+			_ = m.mux.Close()
+		}
 	}
 	return nil
 }

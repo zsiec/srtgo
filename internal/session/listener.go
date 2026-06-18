@@ -23,6 +23,12 @@ type Listener struct {
 	addrs  map[core.PeerID]net.Addr // peer id -> resolved address
 	accept chan *Session
 
+	// Bonded-group members accepted via the handshake, collected by GroupID until
+	// AcceptGroup assembles them into a shared-mux group host.
+	groupMu     sync.Mutex
+	groups      map[uint32][]*groupMember
+	groupSignal chan struct{} // buffered(1); poked when a group member arrives
+
 	quit      chan struct{}
 	loopDone  chan struct{}
 	closeOnce sync.Once
@@ -42,13 +48,15 @@ func Listen(conn net.PacketConn, cfg core.ListenerConfig, clk clock.Clock) (*Lis
 
 	m := mux.New(conn, mux.DefaultMSS)
 	l := &Listener{
-		mux:      m,
-		clk:      clk,
-		core:     core.NewListener(cfg, secret, randFill, newCryptoCtx),
-		addrs:    make(map[core.PeerID]net.Addr),
-		accept:   make(chan *Session, 64),
-		quit:     make(chan struct{}),
-		loopDone: make(chan struct{}),
+		mux:         m,
+		clk:         clk,
+		core:        core.NewListener(cfg, secret, randFill, newCryptoCtx),
+		addrs:       make(map[core.PeerID]net.Addr),
+		accept:      make(chan *Session, 64),
+		groups:      make(map[uint32][]*groupMember),
+		groupSignal: make(chan struct{}, 1),
+		quit:        make(chan struct{}),
+		loopDone:    make(chan struct{}),
 	}
 	go l.loop()
 	return l, nil
@@ -61,6 +69,34 @@ func (l *Listener) Accept() (*Session, error) {
 		return s, nil
 	case <-l.loopDone:
 		return nil, ErrClosed
+	}
+}
+
+// AcceptGroup waits until some bonded group has accepted n member links over the
+// handshake, then assembles them into a group host (sharing the listener's mux)
+// and returns it. The members all advertised the same group ID and share a
+// receive sequence space, so the group deduplicates their streams.
+func (l *Listener) AcceptGroup(mode core.GroupMode, n int) (*Group, error) {
+	for {
+		l.groupMu.Lock()
+		for gid, members := range l.groups {
+			if len(members) >= n {
+				picked := members[:n]
+				l.groups[gid] = members[n:]
+				if len(l.groups[gid]) == 0 {
+					delete(l.groups, gid)
+				}
+				l.groupMu.Unlock()
+				return newGroupFromMembers(mode, picked, false, l.clk), nil
+			}
+		}
+		l.groupMu.Unlock()
+
+		select {
+		case <-l.groupSignal:
+		case <-l.loopDone:
+			return nil, ErrClosed
+		}
 	}
 }
 
@@ -116,8 +152,23 @@ func (l *Listener) drain(now clock.Timestamp) {
 			continue
 		}
 		// Route this connection's data packets (DestinationSocketID == a.SocketID)
-		// to a new per-connection session that shares the mux.
+		// to its own registered channel on the shared mux.
 		recvC := l.mux.Register(a.SocketID)
+
+		// A group member is collected (not returned as a standalone session) until
+		// AcceptGroup assembles the group; all members share the listener's mux.
+		if a.GroupID != 0 {
+			gm := &groupMember{conn: a.Conn, mux: l.mux, recvC: recvC, remoteAddr: l.addrs[a.Peer], weight: a.GroupWeight}
+			l.groupMu.Lock()
+			l.groups[a.GroupID] = append(l.groups[a.GroupID], gm)
+			l.groupMu.Unlock()
+			select {
+			case l.groupSignal <- struct{}{}:
+			default:
+			}
+			continue
+		}
+
 		sess := newSession(l.mux, recvC, false, l.addrs[a.Peer], l.clk, a.Conn)
 		sess.groupID = a.GroupID
 		sess.groupType = a.GroupType

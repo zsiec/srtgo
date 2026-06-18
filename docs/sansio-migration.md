@@ -312,11 +312,18 @@ Each phase keeps the public API and `make test` green.
     `GroupID`/`GroupType`/`GroupWeight`/`SharedISN` on the `Accepted` event and the resulting
     `session.Session` (`GroupID()`/`SharedISN()`/...). Test `TestGroupHandshakeFormation` (two callers,
     same GroupID -> one group + shared ISN; a non-group caller -> GroupID 0).
-  - ⬜ TODO (the Group I/O hosting — the bulk of the public Group cutover): caller `DialGroup` (dial N
-    members sharing the GroupID + ISN, assemble into a group host) and a **shared-mux listener group
-    host** (the listener has one socket; members route by socket ID into one group loop + `core.Group`
-    for dedup), versus today's per-member-mux `NewEstablishedGroup`. Also: balancing; sender-buffer
-    prune refinement; idle/keepalive stability.
+  - ✅ Group I/O hosting (handshake-formed bonded groups, end to end). The `session.Group` host is
+    generalized over its member topology (`newGroupFromMembers` + an `ownMuxes` flag; a member sends
+    via its mux by destination addr, so the same loop drives either topology). Caller `session.DialGroup`
+    handshakes N member links (each its own socket, sharing one group ID + ISN via a self-contained
+    handshake driver that leaves the establish timer-arming queued for the group loop) and assembles
+    them. The listener collects same-GroupID members and `AcceptGroup(mode, n)` assembles them into a
+    **shared-mux** group host (the listener's one socket; members route by socket ID into one
+    `core.Group` for dedup). Test `TestGroupDialAcceptUDP`: DialGroup(2, broadcast) ↔ AcceptGroup(2)
+    with one caller link dead — all 200 payloads still arrive once, in order, over the survivor +
+    cross-link dedup. (`NewEstablishedGroup` now delegates to the shared constructor.)
+  - ⬜ TODO: backup-mode group dial/accept (broadcast proven); balancing; sender-buffer prune
+    refinement; idle/keepalive stability; encrypted/group-handshake interop with legacy.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 
