@@ -582,6 +582,12 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		if c.activeKey == packet.EncryptionNone {
 			c.activeKey = packet.EncryptionEven
 		}
+		// GCM 1.5.3 nonce compatibility: a peer at or below SRT v1.5.3 derives the
+		// AES-GCM nonce from salt[4:16] rather than salt[0:12]. Match it so GCM
+		// interoperates with libsrt/older peers (mirrors C++ SRT_VERSION_FEAT_GCM153).
+		if c.cryptoCtx.Mode() == crypto.CipherGCM && c.peerVersion > 0 && c.peerVersion <= 0x010503 {
+			c.cryptoCtx.SetGCM153(true)
+		}
 		c.sndKmState = kmStateSecured
 		c.rcvKmState = kmStateSecured
 		c.kmRefreshRate = ep.KMRefreshRate
