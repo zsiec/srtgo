@@ -2,6 +2,7 @@ package core
 
 import (
 	"github.com/zsiec/srtgo/internal/clock"
+	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/handshake"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
@@ -15,8 +16,10 @@ import (
 // legacy driver; the rest builds/emits the response packets and, on reaching the
 // connected state, hands off to the shared establish() data path.
 //
-// Scope: unencrypted rendezvous. Encrypted rendezvous (KMREQ as initiator / KMRSP
-// as responder) is deferred.
+// Encryption is supported: when a passphrase is configured, the INITIATOR
+// generates the key material and sends it in a KMREQ; the RESPONDER adopts it
+// (overwriting its own keys) and echoes a KMRSP, so both encrypt with the same
+// AES key regardless of who wins the cookie contest.
 
 const rejRdvCookie = 1005 // SRT_REJ_RDVCOOKIE: cookie collision
 
@@ -198,6 +201,14 @@ type RendezvousConfig struct {
 	Live            bool
 	Message         bool
 	PeerIdleTimeout clock.Microseconds
+
+	// Encryption. The host builds CryptoCtx (it owns the entropy for the salt and
+	// keys); Passphrase wraps/unwraps the key material. When set, the rendezvous
+	// initiator (larger cookie) sends its key material in a KMREQ and the responder
+	// adopts it; both then encrypt with the shared key. Nil CryptoCtx = unencrypted.
+	CryptoCtx  *crypto.Context
+	Passphrase string
+	KeyLength  int // AES key bytes (advertised PBKEYLEN); 0 -> 16
 }
 
 // rdvDial holds rendezvous handshake state until the connection establishes.
@@ -218,6 +229,12 @@ type rdvDial struct {
 	payloadSize     int
 	bufferCapacity  int
 	peerIdleTimeout clock.Microseconds
+
+	cryptoCtx  *crypto.Context
+	passphrase string
+	keyLength  int
+	kmKey      packet.PacketEncryption // active key slot once negotiated (0 = none)
+	kmAdopted  bool                    // responder has adopted the initiator's key material
 
 	rstate rdvState
 	side   rdvSide
@@ -275,6 +292,9 @@ func DialRendezvous(rc RendezvousConfig, now clock.Timestamp) *Conn {
 			payloadSize:     payloadSize,
 			bufferCapacity:  rc.BufferCapacity,
 			peerIdleTimeout: rc.PeerIdleTimeout,
+			cryptoCtx:       rc.CryptoCtx,
+			passphrase:      rc.Passphrase,
+			keyLength:       rc.KeyLength,
 			rstate:          rdvWaving,
 			side:            rdvDraw,
 		},
@@ -316,6 +336,18 @@ func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ 
 			d.recvLatMS, d.sendLatMS, hs.SRTHS.RecvTSBPDDelay, hs.SRTHS.SendTSBPDDelay)
 		d.negotiated = true
 	}
+	// Encryption: the responder adopts the initiator's key material from its KMREQ
+	// (overwriting its own generated keys) so both encrypt with the same key. The
+	// initiator keeps its own keys and ignores the responder's echoed KMRSP.
+	if hasExtFlags && hs.HasKM && hs.SRTKM != nil && d.cryptoCtx != nil &&
+		d.side == rdvResponder && !d.kmAdopted {
+		if err := d.cryptoCtx.UnmarshalKM(hs.SRTKM, d.passphrase); err != nil {
+			c.fail(RejectError{Code: rejBadSecret})
+			return
+		}
+		d.kmKey = hs.SRTKM.KeyBasedEncryption
+		d.kmAdopted = true
+	}
 
 	trans := rdvSwitchState(d.rstate, hs.HandshakeType, d.side, hasExtFlags)
 	if trans.rspType.IsRejection() {
@@ -340,10 +372,31 @@ func (c *Conn) rendezvousEmit(trans rdvTransition) {
 	switch trans.rspType {
 	case packet.HandshakeTypeConclusion:
 		isRequest := !trans.needsHSRSP // initiator sends HSREQ, responder HSRSP
+		// Encryption: include key material in the extended CONCLUSION. The
+		// initiator generates fresh keys (EncryptionEven) in its KMREQ; the
+		// responder echoes the keys it adopted in its KMRSP. Both marshal from the
+		// shared crypto context.
+		var km *packet.CIFKeyMaterial
+		keyLen := 0
+		if trans.needsExt && d.cryptoCtx != nil {
+			slot := d.kmKey
+			if slot == 0 {
+				slot = packet.EncryptionEven
+				if d.side == rdvInitiator {
+					d.kmKey = slot
+				}
+			}
+			km = &packet.CIFKeyMaterial{}
+			if err := d.cryptoCtx.MarshalKM(km, d.passphrase, slot); err != nil {
+				km = nil
+			} else if keyLen = d.keyLength; keyLen == 0 {
+				keyLen = 16
+			}
+		}
 		p := handshake.BuildRendezvousConclusion(
 			d.socketID, d.isn.Value(), d.mss, d.fc, d.peerSocketID, d.cookie,
 			isRequest, d.recvLatMS, d.sendLatMS, 0, d.cong, d.filterCfg,
-			0, 0, 0, d.streamID, nil, nil, trans.needsExt, 0)
+			0, 0, 0, d.streamID, nil, km, trans.needsExt, keyLen)
 		c.outputs.push(SendPacket{Packet: p, Owned: true})
 	case packet.HandshakeTypeAgreement:
 		p := handshake.BuildAgreement(d.socketID, d.isn.Value(), d.mss, d.fc, d.peerSocketID, nil)
@@ -378,6 +431,10 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		fc = int(d.peerFC)
 	}
 	peerID := d.peerSocketID
+	activeKey := d.kmKey
+	if activeKey == 0 {
+		activeKey = packet.EncryptionEven
+	}
 	c.establish(now, establishParams{
 		PeerSocketID:    peerID,
 		PayloadSize:     d.payloadSize,
@@ -390,6 +447,9 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
 		Message:         d.message,
 		PeerIdleTimeout: d.peerIdleTimeout,
+		CryptoCtx:       d.cryptoCtx, // nil = unencrypted
+		ActiveKey:       activeKey,
+		Passphrase:      d.passphrase,
 	})
 	c.rdv = nil
 	c.events.push(Connected{PeerSocketID: peerID})

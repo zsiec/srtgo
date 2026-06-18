@@ -292,6 +292,20 @@ func DialRendezvous(conn net.PacketConn, remoteAddr net.Addr, rc core.Rendezvous
 		}
 		rc.Cookie = ck
 	}
+	// Build the crypto context (the I/O layer owns the entropy); the core decides
+	// at handshake time whether this peer generates the key material (initiator) or
+	// adopts the peer's (responder), keeping the core deterministic.
+	if rc.Passphrase != "" && rc.CryptoCtx == nil {
+		keyLen := rc.KeyLength
+		if keyLen == 0 {
+			keyLen = 16
+		}
+		ctx, err := crypto.NewWithMode(keyLen, crypto.CipherCTR)
+		if err != nil {
+			return nil, err
+		}
+		rc.CryptoCtx = ctx
+	}
 	mss := int(rc.MSS)
 	if mss == 0 {
 		mss = mux.DefaultMSS
