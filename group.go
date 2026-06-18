@@ -32,16 +32,13 @@ const (
 	// a sender buffer for seamless continuity.
 	GroupBackup
 
-	// GroupBalancing distributes packets across member connections for load
-	// balancing. NOT SUPPORTED in this implementation (Write returns
-	// ErrBalancingUnsupported): each member is an independent SRT connection with
-	// its own receive buffer, so splitting one sequence space across links makes
-	// every link see gaps — triggering in-order stalls, spurious NAK/retransmit,
-	// and TSBPD too-late drops — while cross-link out-of-order arrivals are
-	// discarded by the receiver's monotonic dedup. Faithful balancing needs a
-	// dedicated core link mode (immediate, lossless delivery) plus an app-level
-	// reorder buffer in Group.Read; it is defined here for wire-protocol
-	// compatibility only.
+	// GroupBalancing distributes each message to a single member link in
+	// round-robin order (rather than broadcasting to all). Each link keeps its own
+	// independent, contiguous sequence space — so per-link loss recovery (NAK/
+	// retransmit) still works — and the sender stamps every message with a shared,
+	// monotonic group message number. The receiver reassembles the original order
+	// across links with a reorder buffer keyed by that number (Group.readBalancing),
+	// skipping a message presumed lost if too many pile up behind it.
 	GroupBalancing
 )
 
@@ -200,6 +197,16 @@ type Group struct {
 	recvCh chan recvResult
 	readMu sync.Mutex // serializes Read calls
 
+	// Balancing mode. Send side (under writeMu): round-robin link index and the
+	// shared monotonic group message number stamped on each message. Receive side
+	// (under readMu): a reorder buffer keyed by group message number that
+	// reconstructs order across the independent member links.
+	balanceIdx   int
+	balanceMsgNo uint32
+	balNext      uint32
+	balStarted   bool
+	balBuf       map[uint32][]byte
+
 	// Backup mode sender buffer for failover replay.
 	senderBuf    []bufferedMsg
 	senderBufMu  sync.Mutex
@@ -229,6 +236,7 @@ type Group struct {
 type recvResult struct {
 	n     int
 	seqNo uint32
+	msgNo uint32 // group message number (balancing mode reorders by this)
 	data  []byte
 	err   error
 }
@@ -442,7 +450,17 @@ func (g *Group) Connect(addr string, cfg Config, token int, weight uint16) error
 		return ErrGroupClosed
 	}
 
-	conn, err := dialGroupMember(addr, cfg, g.sendISN)
+	// Broadcast/backup share one send sequence space across links (the receiver
+	// dedups by sequence number); balancing instead gives each link its own
+	// independent, contiguous sequence space (so per-link loss recovery works) and
+	// reorders by the group message number.
+	var conn *Conn
+	var err error
+	if g.mode == GroupBalancing {
+		conn, err = Dial(addr, cfg)
+	} else {
+		conn, err = dialGroupMember(addr, cfg, g.sendISN)
+	}
 	if err != nil {
 		return fmt.Errorf("srt: group connect: %w", err)
 	}
@@ -470,7 +488,7 @@ func (g *Group) Write(b []byte) (int, error) {
 	case GroupBackup:
 		return g.writeBackup(b)
 	case GroupBalancing:
-		return 0, ErrBalancingUnsupported
+		return g.writeBalancing(b)
 	default:
 		return 0, fmt.Errorf("srt: unknown group mode %d", g.mode)
 	}
@@ -485,6 +503,10 @@ func (g *Group) Read(b []byte) (int, error) {
 
 	g.readMu.Lock()
 	defer g.readMu.Unlock()
+
+	if g.mode == GroupBalancing {
+		return g.readBalancing(b)
+	}
 
 	for {
 		select {
@@ -1174,11 +1196,196 @@ func (g *Group) memberRecvLoop(mc *memberConn) {
 		copy(data, buf[:n])
 
 		select {
-		case g.recvCh <- recvResult{n: n, seqNo: seqNo, data: data}:
+		case g.recvCh <- recvResult{n: n, seqNo: seqNo, msgNo: mctrl.MsgNo, data: data}:
 		case <-g.done:
 			return
 		}
 	}
+}
+
+// balanceReorderMax bounds the receive-side reorder buffer. If more than this
+// many messages pile up ahead of the next expected one, the missing message is
+// presumed lost (its link stalled/died after per-link retransmit) and the buffer
+// skips forward to the earliest message it holds.
+const balanceReorderMax = 512
+
+// nextGroupMsgNo advances a 26-bit group message number, skipping 0 (which marks
+// FEC repair packets on the wire).
+func nextGroupMsgNo(n uint32) uint32 {
+	n = (n + 1) & 0x03FFFFFF
+	if n == 0 {
+		n = 1
+	}
+	return n
+}
+
+// groupMsgAhead reports whether a is at or ahead of b in 26-bit message-number
+// space (wrap-aware: treats the nearer half-space as "ahead").
+func groupMsgAhead(a, b uint32) bool {
+	return ((a - b) & 0x03FFFFFF) < (1 << 25)
+}
+
+// writeBalancing distributes each message to a single running member in
+// round-robin order, stamping it with a shared monotonic group message number.
+// Each member link keeps its own contiguous sequence space (so per-link loss
+// recovery still works); the receiver reconstructs order by group message number
+// in readBalancing. The group message number advances only on a successful send,
+// so a failed link does not leave a permanent gap that would stall the receiver.
+func (g *Group) writeBalancing(b []byte) (int, error) {
+	g.mu.RLock()
+	members := make([]*memberConn, 0, len(g.members))
+	for _, mc := range g.members {
+		if mc.status == MemberRunning || mc.status == MemberIdle {
+			members = append(members, mc)
+		}
+	}
+	g.mu.RUnlock()
+	if len(members) == 0 {
+		return 0, errors.New("srt: no active group members")
+	}
+	if g.balanceMsgNo == 0 {
+		g.balanceMsgNo = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < len(members); attempt++ {
+		mc := members[g.balanceIdx%len(members)]
+		g.balanceIdx++
+		n, err := mc.conn.writeBalanced(b, g.balanceMsgNo)
+		if err != nil {
+			lastErr = err
+			g.markBroken(mc)
+			continue
+		}
+		g.balanceMsgNo = nextGroupMsgNo(g.balanceMsgNo)
+		g.sentPackets.Add(1)
+		return n, nil
+	}
+	return 0, fmt.Errorf("srt: balancing write failed on all members: %w", lastErr)
+}
+
+// readBalancing delivers messages in group-message-number order, merging the
+// independent member links via a small reorder buffer (called with readMu held).
+func (g *Group) readBalancing(b []byte) (int, error) {
+	if g.balBuf == nil {
+		g.balBuf = make(map[uint32][]byte)
+	}
+	// One-time anchor: independent links have skewed TSBPD time bases, so the
+	// first message to arrive is not necessarily the lowest-numbered one. Briefly
+	// gather the initial burst and anchor on the lowest message number, so we do
+	// not commit to a later message and drop the true first one.
+	if !g.balStarted {
+		if err := g.balAnchor(); err != nil {
+			return 0, err
+		}
+	}
+	for {
+		// Deliver the next expected message if it is already buffered.
+		if data, ok := g.balBuf[g.balNext]; ok {
+			delete(g.balBuf, g.balNext)
+			g.balNext = nextGroupMsgNo(g.balNext)
+			g.recvPackets.Add(1)
+			return copy(b, data), nil
+		}
+		select {
+		case <-g.done:
+			return 0, ErrGroupClosed
+		case res := <-g.recvCh:
+			if res.err != nil {
+				if g.allBroken() {
+					return 0, res.err
+				}
+				continue
+			}
+			m := res.msgNo
+			switch {
+			case m == g.balNext:
+				g.balNext = nextGroupMsgNo(g.balNext)
+				g.recvPackets.Add(1)
+				return copy(b, res.data), nil
+			case !groupMsgAhead(m, g.balNext):
+				g.recvDedups.Add(1) // behind the frontier: already delivered or late
+			default:
+				g.balBuf[m] = res.data
+				if len(g.balBuf) > balanceReorderMax {
+					g.balNext = g.earliestBuffered() // missing message presumed lost; skip ahead
+				}
+			}
+		}
+	}
+}
+
+// balAnchor blocks for the first balancing message, then gathers the initial
+// burst for a short window (scaled to the links' latency) and sets balNext to
+// the lowest message number seen — the stream's true starting point. It runs
+// once, with readMu held.
+func (g *Group) balAnchor() error {
+	window := g.balAnchorWindow()
+	timer := time.NewTimer(time.Hour) // armed once the first message arrives
+	defer timer.Stop()
+	if !timer.Stop() {
+		<-timer.C
+	}
+	armed := false
+	for {
+		select {
+		case <-g.done:
+			return ErrGroupClosed
+		case res := <-g.recvCh:
+			if res.err != nil {
+				if g.allBroken() {
+					return res.err
+				}
+				continue
+			}
+			g.balBuf[res.msgNo] = res.data
+			if !armed {
+				armed = true
+				g.balNext = res.msgNo
+				timer.Reset(window)
+			} else if !groupMsgAhead(res.msgNo, g.balNext) {
+				g.balNext = res.msgNo // earlier than the current anchor
+			}
+		case <-timer.C:
+			g.balStarted = true
+			return nil
+		}
+	}
+}
+
+// balAnchorWindow returns the initial reorder-gather window: a few times the
+// largest member link latency (so cross-link arrival skew is captured), floored
+// and capped to sane bounds.
+func (g *Group) balAnchorWindow() time.Duration {
+	var maxLat time.Duration
+	g.mu.RLock()
+	for _, mc := range g.members {
+		if mc.conn.cfg.Latency > maxLat {
+			maxLat = mc.conn.cfg.Latency
+		}
+	}
+	g.mu.RUnlock()
+	w := 4 * maxLat
+	if w < 100*time.Millisecond {
+		w = 100 * time.Millisecond
+	}
+	if w > 2*time.Second {
+		w = 2 * time.Second
+	}
+	return w
+}
+
+// earliestBuffered returns the buffered group message number closest ahead of
+// balNext (wrap-aware). Only called when balBuf is non-empty.
+func (g *Group) earliestBuffered() uint32 {
+	var best uint32
+	var bestDist uint32 = 1<<26 + 1
+	for m := range g.balBuf {
+		if d := (m - g.balNext) & 0x03FFFFFF; d < bestDist {
+			bestDist, best = d, m
+		}
+	}
+	return best
 }
 
 // markBroken transitions a member to broken state.

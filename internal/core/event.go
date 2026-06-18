@@ -9,8 +9,9 @@ type Event interface {
 }
 
 // Connected reports that the handshake completed and the connection is ready.
-// Negotiated parameters are filled in during the handshake phase of the
-// migration; for now it carries the peer's socket ID.
+// It carries the peer's socket ID; the negotiated parameters (latency, payload
+// size, flags, …) are applied to the connection during establish and read back
+// via Stats and the accessor methods rather than echoed in this event.
 type Connected struct {
 	PeerSocketID uint32
 }

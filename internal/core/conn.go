@@ -117,6 +117,12 @@ type MsgOptions struct {
 	// after first transmission. Zero means no per-message TTL. Enforced
 	// independently of TLPktDrop.
 	TTL clock.Microseconds
+	// MsgNo, when ForceMsgNo is set, overrides the message number assigned to
+	// this message instead of advancing the per-connection counter. A balancing
+	// group uses it to stamp a shared, monotonic group message number across
+	// independent member links so the receiver can reorder by it.
+	MsgNo      uint32
+	ForceMsgNo bool
 }
 
 // Conn is the pure, single-threaded SRT state machine for one connection. It
@@ -802,7 +808,11 @@ func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
 	if c.closed || c.state != stateConnected {
 		return
 	}
-	c.msgNumber = nextMsgNo(c.msgNumber)
+	if opts.ForceMsgNo {
+		c.msgNumber = opts.MsgNo & 0x03FFFFFF
+	} else {
+		c.msgNumber = nextMsgNo(c.msgNumber)
+	}
 	msgNo := c.msgNumber
 
 	var ttlNs int64

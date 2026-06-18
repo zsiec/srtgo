@@ -285,6 +285,16 @@ func (c *Conn) WriteMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
 	return len(b), nil
 }
 
+// writeBalanced sends b as one message stamped with the shared group message
+// number msgNo (so a balancing group's receiver can reorder across independent
+// member links). Used by Group.writeBalancing.
+func (c *Conn) writeBalanced(b []byte, msgNo uint32) (int, error) {
+	if err := c.s.WriteMsg(b, core.MsgOptions{InOrder: true, MsgNo: msgNo, ForceMsgNo: true}); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
 // ReadMsgCtrl reads the next complete message into b, filling mc (if non-nil)
 // with the message's read-only metadata (boundary, first packet seq, msg no).
 func (c *Conn) ReadMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
