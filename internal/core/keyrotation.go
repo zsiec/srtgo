@@ -179,10 +179,22 @@ func (c *Conn) handleKMResponse(p packet.Packet) {
 			c.sndKmState = state
 			c.rcvKmState = state
 		}
+		// During the encrypted-HSv4 handshake a rejected key (wrong passphrase)
+		// means the connection can never come up — fail it promptly instead of
+		// retrying until the dial deadline.
+		if c.hsv4DeferConnect {
+			c.outputs.push(ClearTimer{ID: TimerKMRefresh})
+			c.fail(RejectError{Code: rejBadSecret})
+		}
 		return
 	}
 	c.kmConfirmed = true
 	c.sndKmState = kmStateSecured
 	c.rcvKmState = kmStateSecured
 	c.outputs.push(ClearTimer{ID: TimerKMRefresh})
+	// Encrypted HSv4: the deferred Connected fires once the key is confirmed.
+	if c.hsv4DeferConnect {
+		c.hsv4DeferConnect = false
+		c.events.push(Connected{PeerSocketID: c.peerSocketID})
+	}
 }

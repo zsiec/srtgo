@@ -163,14 +163,96 @@ func TestNewStackHSv4(t *testing.T) {
 	}
 }
 
-// TestNewStackHSv4EncryptedRejected proves that requesting encryption on an HSv4
-// connection fails loudly rather than silently downgrading to plaintext.
-func TestNewStackHSv4EncryptedRejected(t *testing.T) {
+// TestNewStackHSv4Encrypted streams over an ENCRYPTED legacy HSv4 connection: the
+// caller establishes, shares its key via the post-handshake KMREQ, and the
+// listener (sharing the passphrase) adopts it and decrypts. Data integrity end to
+// end proves the post-handshake key exchange and the decryption gate work.
+func TestNewStackHSv4Encrypted(t *testing.T) {
+	const (
+		n          = 200
+		payloadLen = 1200
+		pass       = "hsv4-secret-passphrase"
+	)
+
 	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := session.Listen(luconn, core.ListenerConfig{RecvLatencyMS: 120, SendLatencyMS: 120}, nil)
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120, Passphrase: pass,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	recvd := make(chan error, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err != nil {
+			recvd <- fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer s.Close()
+		buf := make([]byte, 2000)
+		for i := 0; i < n; i++ {
+			got, err := s.Read(buf)
+			if err != nil {
+				recvd <- fmt.Errorf("read %d: %w", i, err)
+				return
+			}
+			if got != payloadLen || binary.BigEndian.Uint32(buf) != uint32(i) {
+				recvd <- fmt.Errorf("payload mismatch at %d (n=%d)", i, got)
+				return
+			}
+		}
+		recvd <- nil
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		ForceHSv4: true, Message: true, MaxBW: 125_000_000, Passphrase: pass, KeyLength: 16,
+	}, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("encrypted HSv4 dial: %v", err)
+	}
+	defer s.Close()
+
+	go func() {
+		for i := 0; i < n; i++ {
+			p := make([]byte, payloadLen)
+			binary.BigEndian.PutUint32(p, uint32(i))
+			if err := s.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-recvd:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout: encrypted HSv4 did not deliver all payloads")
+	}
+}
+
+// TestNewStackHSv4WrongPassphrase proves the HSv4 key exchange enforces the
+// passphrase: a caller with the wrong one cannot deliver data (its KMREQ is
+// rejected, so the listener never installs keys and gated decryption drops
+// everything), and the encrypted dial does not complete.
+func TestNewStackHSv4WrongPassphrase(t *testing.T) {
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		RecvLatencyMS: 120, SendLatencyMS: 120, Passphrase: "correct-passphrase",
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +268,11 @@ func TestNewStackHSv4EncryptedRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
-		ForceHSv4: true, Message: true, Passphrase: "should-not-downgrade", KeyLength: 16,
+		ForceHSv4: true, Message: true, Passphrase: "wrong-passphrase", KeyLength: 16,
 	}, nil, 2*time.Second)
 	if err == nil {
 		s.Close()
-		t.Fatal("expected encrypted HSv4 dial to fail, got a connection (silent plaintext downgrade)")
+		t.Fatal("expected encrypted HSv4 dial with wrong passphrase to fail (no KMRSP)")
 	}
 }
 

@@ -136,15 +136,16 @@ type MsgOptions struct {
 // too-late drop (TLPKTDROP + per-message TTL). Encryption, FEC, the listener/
 // rendezvous handshakes, and groups are layered on in their own files.
 type Conn struct {
-	peerSocketID uint32
-	payloadSize  int
-	sndTSBase    uint32             // SRT wire-timestamp epoch (captured at construction)
-	lastNow      clock.Timestamp    // most recent loop time seen (for time-relative stats)
-	sndISN       seq.Number         // local initial send sequence number
-	rcvISN       seq.Number         // peer's initial sequence number (local receive ISN)
-	peerVersion  uint32             // peer's SRT version from the handshake (0 if unknown)
-	tlPktDrop    bool               // sender too-late drop enabled (for SndDropDelay recompute)
-	dropBaseUS   clock.Microseconds // base delay for the sender drop threshold (recompute input)
+	peerSocketID     uint32
+	payloadSize      int
+	sndTSBase        uint32             // SRT wire-timestamp epoch (captured at construction)
+	lastNow          clock.Timestamp    // most recent loop time seen (for time-relative stats)
+	sndISN           seq.Number         // local initial send sequence number
+	rcvISN           seq.Number         // peer's initial sequence number (local receive ISN)
+	peerVersion      uint32             // peer's SRT version from the handshake (0 if unknown)
+	tlPktDrop        bool               // sender too-late drop enabled (for SndDropDelay recompute)
+	dropBaseUS       clock.Microseconds // base delay for the sender drop threshold (recompute input)
+	hsv4DeferConnect bool               // HSv4 caller: hold Connected until the KMRSP confirms encryption
 
 	// Send side.
 	sendBuf      *buffer.SendBuffer
@@ -461,6 +462,11 @@ type establishParams struct {
 	KMRefreshRate    uint64
 	KMPreAnnounce    uint64
 	FilterConfig     string
+	// HSv4AwaitKey marks an HSv4 receiver that establishes a crypto context whose
+	// keys arrive post-handshake via the peer's KMREQ. Until they do, the receive
+	// key state is "securing" and encrypted packets are dropped (not decrypted
+	// with placeholder keys, which AES-CTR would silently corrupt).
+	HSv4AwaitKey bool
 }
 
 // NewEstablished builds a connection already in the connected state and arms
@@ -584,6 +590,12 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		// so the new key is announced with a packet of margin before the switch.
 		if c.kmRefreshRate > 0 && (c.kmPreAnnounce == 0 || c.kmPreAnnounce >= c.kmRefreshRate) {
 			c.kmPreAnnounce = c.kmRefreshRate / 2
+		}
+		// HSv4 receiver: keys are not installed yet (they arrive in the peer's
+		// post-handshake KMREQ). Mark the receive state "securing" so decrypt drops
+		// encrypted packets until the real keys land, instead of corrupting them.
+		if ep.HSv4AwaitKey {
+			c.rcvKmState = kmStateSecuring
 		}
 	}
 	if ep.FilterConfig != "" {
@@ -1262,6 +1274,12 @@ func (c *Conn) encrypt(p *packet.Packet, seqNo uint32) {
 func (c *Conn) decrypt(p *packet.Packet) bool {
 	if c.cryptoCtx == nil {
 		return true // unencrypted connection
+	}
+	if c.rcvKmState == kmStateSecuring {
+		// HSv4: peer key material not installed yet — drop rather than decrypt with
+		// placeholder keys (AES-CTR would produce undetected garbage). The packet is
+		// retransmitted once the keys arrive.
+		return false
 	}
 	if p.Header.Encryption == packet.EncryptionNone {
 		c.recvUndecrypt++ // plaintext on a secured connection: drop

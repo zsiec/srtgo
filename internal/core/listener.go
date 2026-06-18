@@ -384,12 +384,24 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 		l.reject(peer, hs.SRTSocketID, rejRogue)
 		return
 	}
-	// Encrypted HSv4 is not supported. If the listener requires encryption, reject
-	// the (necessarily plaintext) HSv4 caller rather than accept it unencrypted —
-	// unless unencrypted fallback is explicitly allowed.
-	if l.cfg.Passphrase != "" && !l.cfg.AllowUnencryptedFallback {
-		l.reject(peer, hs.SRTSocketID, rejUnsecure)
-		return
+	// Encryption. HSv4 carries no key material in the CONCLUSION (it arrives in a
+	// post-handshake KMREQ), so when the listener requires a passphrase we set up a
+	// key-less crypto context and await the caller's KMREQ — decryption is gated
+	// until the keys install (HSv4AwaitKey). A plaintext HSv4 caller never sends a
+	// KMREQ, so its data stays gated and undelivered (it cannot be cleanly rejected
+	// at this point, as encryption is indistinguishable in the v4 CONCLUSION).
+	var cryptoCtx *crypto.Context
+	if l.cfg.Passphrase != "" {
+		if l.newCtx == nil {
+			l.reject(peer, hs.SRTSocketID, rejUnsecure)
+			return
+		}
+		ctx, err := l.newCtx(16, crypto.CipherCTR) // keys come from the peer's KMREQ
+		if err != nil {
+			l.reject(peer, hs.SRTSocketID, rejUnsecure)
+			return
+		}
+		cryptoCtx = ctx
 	}
 	// Accept gating (no StreamID extension in HSv4).
 	if l.gate != nil {
@@ -430,6 +442,10 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 		Congestion:      l.cfg.Congestion,
 		PeerNakReport:   true, // HSv4 CONCLUSION carries no SRT flags; assume yes (EXP covers us)
 		PeerIdleTimeout: l.cfg.PeerIdleTimeout,
+		CryptoCtx:       cryptoCtx,
+		ActiveKey:       packet.EncryptionEven,
+		Passphrase:      l.cfg.Passphrase,
+		HSv4AwaitKey:    cryptoCtx != nil,
 	})
 	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID})
 }
