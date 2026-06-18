@@ -8,11 +8,12 @@ import (
 	"github.com/zsiec/srtgo/internal/clock"
 )
 
-// resetRCTime sets FileCC's lastRCTime far enough in the past that the
-// next OnACK will pass the 10ms RC interval gate.
+// resetRCTime seeds FileCC's rate-control gate far enough in the past (in
+// OnACK's wall-clock epoch) that the next OnACK passes the 10ms RC interval gate.
 func resetRCTime(cc *FileCC) {
 	cc.mu.Lock()
-	cc.lastRCTime = time.Now().Add(-20 * time.Millisecond)
+	cc.rcInit = true
+	cc.lastRCTime = clock.Timestamp(time.Now().UnixMicro()) - 20_000
 	cc.mu.Unlock()
 }
 

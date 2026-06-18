@@ -38,10 +38,14 @@ func TestSimFileModeCongestion(t *testing.T) {
 	}
 
 	// A lossy transfer completes in order even while the window-based controller
-	// gates the in-flight count (ARQ recovers the drops). NOTE: FileCC's cwnd
-	// growth is gated on a real-clock 10ms rate-control interval, so it does not
-	// advance under virtual time — we assert correctness, not throughput here.
-	// (See docs/sansio-cutover-gaps.md: FileCC should move to the injected clock.)
+	// gates the in-flight count (ARQ recovers the drops).
 	drop := map[uint32]bool{150: true, 151: true, 207: true, 333: true}
 	runStream(t, sender, receiver, base, numPayloads, drop)
+
+	// FileCC's rate-control gate runs on the injected clock (OnACKAt), so slow
+	// start advances deterministically under virtual time — the congestion window
+	// must have grown well past its initial value over the transfer.
+	if cw := sender.c.Stats().CongestionWindow; cw <= 16 {
+		t.Fatalf("final CongestionWindow = %d, want > 16 (FileCC slow start should grow under virtual time)", cw)
+	}
 }

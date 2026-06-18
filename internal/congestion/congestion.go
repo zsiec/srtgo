@@ -19,10 +19,16 @@ type Controller interface {
 	// The sender should pace packets at this rate.
 	PacketInterval() clock.Microseconds
 
-	// OnACK is called when an ACK is received.
-	// deliveryRate is the receiver's packet arrival rate (packets/sec).
-	// bandwidth is the estimated link capacity from probe pairs (packets/sec).
+	// OnACK is called when an ACK is received. It reads the wall clock for
+	// FileCC's rate-control gate; deliveryRate is the receiver's packet arrival
+	// rate (packets/sec) and bandwidth the probe-estimated link capacity.
 	OnACK(ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32)
+
+	// OnACKAt is OnACK driven by an injected clock instead of the wall clock, so
+	// the controller is a deterministic function of its inputs. The Sans-I/O core
+	// calls this (passing the loop's now); the legacy path uses OnACK. After the
+	// legacy cutover the two collapse into one.
+	OnACKAt(now clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32)
 
 	// OnNAK is called when a loss report (NAK) is received.
 	// lossSeqs contains the lost sequence numbers for epoch detection.
