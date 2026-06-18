@@ -86,6 +86,83 @@ func TestNewStackEndToEnd(t *testing.T) {
 	}
 }
 
+// TestNewStackHSv4 connects a legacy HSv4 (UDT_DGRAM) caller to the new
+// Sans-I/O listener over real UDP and streams messages. It proves the
+// listener-side HSv4 handshake (v4 CONCLUSION + post-connect HSREQ/HSRSP) and the
+// reliable message data path work end to end.
+func TestNewStackHSv4(t *testing.T) {
+	const (
+		n          = 200
+		payloadLen = 1200
+	)
+
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{
+		MaxBW: 125_000_000, RecvLatencyMS: 120, SendLatencyMS: 120,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	recvd := make(chan error, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err != nil {
+			recvd <- fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer s.Close()
+		buf := make([]byte, 2000)
+		for i := 0; i < n; i++ {
+			got, err := s.Read(buf)
+			if err != nil {
+				recvd <- fmt.Errorf("read %d: %w", i, err)
+				return
+			}
+			if got != payloadLen || binary.BigEndian.Uint32(buf) != uint32(i) {
+				recvd <- fmt.Errorf("payload mismatch at %d (n=%d)", i, got)
+				return
+			}
+		}
+		recvd <- nil
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		ForceHSv4: true, Message: true, MaxBW: 125_000_000,
+	}, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial (HSv4): %v", err)
+	}
+	defer s.Close()
+
+	go func() {
+		for i := 0; i < n; i++ {
+			p := make([]byte, payloadLen)
+			binary.BigEndian.PutUint32(p, uint32(i))
+			if err := s.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-recvd:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout: HSv4 listener did not deliver all payloads")
+	}
+}
+
 // streamEncrypted runs a 300-payload AES-CTR stream from caller (a Session) to
 // a reader goroutine, used by the encrypted listener tests below.
 func streamEncrypted(t *testing.T, write func([]byte) error, read func([]byte) (int, error)) {

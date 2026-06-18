@@ -73,6 +73,22 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 	c.events.push(Connected{PeerSocketID: peerID})
 }
 
+// handleHSv4HSREQ is the responder (listener/receiver) side of the post-handshake
+// SRT extension exchange: it records the initiator's advertised latency and
+// replies with an HSRSP carrying our SRT version. Informational in this
+// implementation — HSv4 runs as a reliable message link without TSBPD.
+func (c *Conn) handleHSv4HSREQ(p packet.Packet) {
+	_, _, latency, err := handshake.ParseExtHSREQ(p.Data)
+	if err != nil {
+		return
+	}
+	if latency > 0 {
+		c.negotiatedLatency = clock.Microseconds(latency) * clock.Millisecond
+	}
+	rsp := handshake.BuildExtHSRSP(c.peerSocketID, handshake.SRTVersion, 0, latency, nil)
+	c.outputs.push(SendPacket{Packet: rsp, Owned: true})
+}
+
 // handleHSv4HSRSP records the peer's negotiated latency from the post-handshake
 // HSRSP. For a sender it is informational (surfaced in Stats.NegotiatedLatency).
 func (c *Conn) handleHSv4HSRSP(p packet.Packet) {

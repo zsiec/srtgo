@@ -884,6 +884,8 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 				c.handleKMRequest(now, p)
 			case packet.ExtTypeKMRsp:
 				c.handleKMResponse(p)
+			case packet.ExtTypeHSReq:
+				c.handleHSv4HSREQ(p)
 			case packet.ExtTypeHSRsp:
 				c.handleHSv4HSRSP(p)
 			}

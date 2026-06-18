@@ -209,6 +209,11 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 	if hs.SynCookie != l.cookie(peer) {
 		return // missing/invalid cookie: drop silently (likely stale or spoofed)
 	}
+	// Legacy HSv4 (UDT_DGRAM) caller: no SRT extensions in the CONCLUSION.
+	if hs.Version == 4 {
+		l.handleConclusionV4(now, peer, hs)
+		return
+	}
 	// Duplicate CONCLUSION (our response was lost): resend, don't re-accept.
 	if a, ok := l.accepted[peer]; ok {
 		l.outputs.push(SendTo{Peer: peer, Packet: l.buildConclusionResponse(a, hs.SRTSocketID)})
@@ -362,6 +367,64 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID,
 		GroupID: a.groupID, GroupType: a.groupType, GroupWeight: a.groupWeight, SharedISN: a.isn,
 	})
+}
+
+// handleConclusionV4 accepts a legacy HSv4 (UDT_DGRAM) caller. HSv4 carries no
+// SRT extensions in the CONCLUSION, so the connection comes up as a plain
+// reliable message link (no TSBPD, no encryption/FEC/groups); the SRT version
+// and latency are exchanged post-connect via HSREQ/HSRSP (informational here).
+func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *packet.CIFHandshake) {
+	// Duplicate CONCLUSION (our response was lost): resend, don't re-accept.
+	if a, ok := l.accepted[peer]; ok {
+		l.outputs.push(SendTo{Peer: peer, Packet: handshake.BuildConclusionResponseV4(
+			a.socketID, a.isn.Value(), a.mss, a.fc, hs.SRTSocketID, nil)})
+		return
+	}
+	if hs.InitialPacketSequenceNumber > uint32(seq.Max) || hs.MaxFlowWindowSize < 2 {
+		l.reject(peer, hs.SRTSocketID, rejRogue)
+		return
+	}
+	// Accept gating (no StreamID extension in HSv4).
+	if l.gate != nil {
+		if accept, code := l.gate(AcceptRequest{Peer: peer, HSVersion: hs.Version}); !accept {
+			if code == 0 {
+				code = rejPeer
+			}
+			l.reject(peer, hs.SRTSocketID, code)
+			return
+		}
+	}
+
+	a := acceptedConn{
+		socketID: l.randUint32() | 1, // nonzero
+		isn:      seq.Number(l.randUint32() & uint32(seq.Max)),
+		mss:      hs.MaxTransmissionUnitSize,
+		fc:       hs.MaxFlowWindowSize,
+		recvLat:  l.cfg.RecvLatencyMS,
+		sendLat:  l.cfg.SendLatencyMS,
+	}
+	l.accepted[peer] = a
+	l.outputs.push(SendTo{Peer: peer, Packet: handshake.BuildConclusionResponseV4(
+		a.socketID, a.isn.Value(), a.mss, a.fc, hs.SRTSocketID, nil)})
+
+	conn := &Conn{}
+	conn.establish(now, establishParams{
+		PeerSocketID:    hs.SRTSocketID,
+		PayloadSize:     l.cfg.PayloadSize,
+		SendISN:         a.isn,
+		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:      int(a.fc),
+		BufferCapacity:  l.cfg.BufferCapacity,
+		SendBufCapacity: l.cfg.SendBufCapacity,
+		RecvBufCapacity: l.cfg.RecvBufCapacity,
+		MaxBW:           l.cfg.MaxBW,
+		Live:            false, // HSv4: reliable datagram, no TSBPD until/unless HSREQ
+		Message:         true,  // UDT_DGRAM message framing
+		Congestion:      l.cfg.Congestion,
+		PeerNakReport:   true, // HSv4 CONCLUSION carries no SRT flags; assume yes (EXP covers us)
+		PeerIdleTimeout: l.cfg.PeerIdleTimeout,
+	})
+	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID})
 }
 
 // srtFlags computes the SRT feature flags this listener advertises in its
