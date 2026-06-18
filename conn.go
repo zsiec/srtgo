@@ -2,6 +2,7 @@ package srt
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
@@ -24,6 +25,12 @@ type Conn struct {
 	rcvSyn   bool
 	sndTimeo time.Duration
 	rcvTimeo time.Duration
+
+	// SendRate sampling state.
+	rateMu sync.Mutex
+	rateAt time.Time
+	rateP  uint64
+	rateB  uint64
 }
 
 // newConn wraps an established session, applying the blocking-mode and linger
@@ -89,6 +96,33 @@ func (c *Conn) SetWriteDeadline(t time.Time) error { return c.s.SetWriteDeadline
 // GroupID returns the bonding group this connection joined in the handshake, or
 // 0 if it is not a group member.
 func (c *Conn) GroupID() uint32 { return c.s.GroupID() }
+
+// SetMaxBW changes the maximum sending bandwidth in bytes/sec at runtime (0 =
+// auto). It takes effect on the running connection.
+func (c *Conn) SetMaxBW(bw int64) {
+	c.cfg.MaxBW = bw
+	c.s.SetMaxBW(bw)
+}
+
+// SendRate returns the send rate (packets/sec, bytes/sec) measured since the
+// previous SendRate call. The first call returns (0, 0).
+func (c *Conn) SendRate() (pktPerSec int64, bytesPerSec int64) {
+	st, err := c.s.Stats()
+	if err != nil {
+		return 0, 0
+	}
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	now := time.Now()
+	if !c.rateAt.IsZero() {
+		if dt := now.Sub(c.rateAt).Seconds(); dt > 0 {
+			pktPerSec = int64(float64(st.SentPackets-c.rateP) / dt)
+			bytesPerSec = int64(float64(st.SentBytes-c.rateB) / dt)
+		}
+	}
+	c.rateAt, c.rateP, c.rateB = now, st.SentPackets, st.SentBytes
+	return pktPerSec, bytesPerSec
+}
 
 // StreamID returns the stream identifier negotiated in the handshake ("" if none).
 func (c *Conn) StreamID() string { return c.s.StreamID() }

@@ -338,12 +338,14 @@ func (c *Conn) SetOption(opt SockOpt, val any) error {
 			return fmt.Errorf("srt: SockOptMaxBW requires a non-negative int64, got %v", val)
 		}
 		c.cfg.MaxBW = v
+		c.s.SetMaxBW(v)
 	case SockOptInputBW:
 		v, ok := val.(int64)
 		if !ok || v < 0 {
 			return fmt.Errorf("srt: SockOptInputBW requires a non-negative int64, got %v", val)
 		}
 		c.cfg.InputBW = v
+		c.s.SetInputBW(v)
 	case SockOptMinInputBW:
 		v, ok := val.(int64)
 		if !ok || v < 0 {
@@ -356,18 +358,20 @@ func (c *Conn) SetOption(opt SockOpt, val any) error {
 			return fmt.Errorf("srt: SockOptOverheadBW requires an int in 5..100, got %v", val)
 		}
 		c.cfg.OverheadBW = v
+		c.s.SetOverhead(v)
 	case SockOptSndDropDelay:
 		v, ok := val.(int)
 		if !ok {
 			return fmt.Errorf("srt: SockOptSndDropDelay requires an int, got %v", val)
 		}
-		c.cfg.SndDropDelay = v
+		c.cfg.SndDropDelay = v // TODO(cutover): runtime re-application (drop-threshold recompute)
 	case SockOptLossMaxTTL:
 		v, ok := val.(int)
 		if !ok || v < 0 {
 			return fmt.Errorf("srt: SockOptLossMaxTTL requires a non-negative int, got %v", val)
 		}
 		c.cfg.LossMaxTTL = v
+		c.s.SetReorderTolerance(v)
 	case SockOptLinger:
 		v, ok := val.(time.Duration)
 		if !ok {

@@ -82,6 +82,7 @@ type Session struct {
 
 	connected chan error           // receives nil on Connected, err on Failed (dial)
 	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
+	ctrl      chan func()          // runtime control closures, run on the loop goroutine
 	quit      chan struct{}        // closed by Close to ask the loop to stop
 	loopDone  chan struct{}        // closed by the loop on exit
 
@@ -145,6 +146,7 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		readC:      make(chan delivery, 2048),
 		connected:  make(chan error, 1),
 		statsReq:   make(chan chan core.Stats),
+		ctrl:       make(chan func(), 8),
 		quit:       make(chan struct{}),
 		loopDone:   make(chan struct{}),
 		timers:     make(map[core.TimerID]clock.Timestamp),
@@ -470,6 +472,27 @@ func (s *Session) SetDeadline(t time.Time) error {
 	return nil
 }
 
+// control runs fn on the loop goroutine (where it may safely touch the core).
+// Dropped if the loop has already exited.
+func (s *Session) control(fn func()) {
+	select {
+	case s.ctrl <- fn:
+	case <-s.loopDone:
+	}
+}
+
+// SetMaxBW changes the max sending bandwidth (bytes/sec) at runtime; 0 = auto.
+func (s *Session) SetMaxBW(bw int64) { s.control(func() { s.core.SetMaxBW(bw) }) }
+
+// SetInputBW updates the estimated input bandwidth (bytes/sec) for auto-rate.
+func (s *Session) SetInputBW(bw int64) { s.control(func() { s.core.SetInputBW(bw) }) }
+
+// SetOverhead updates the retransmit bandwidth overhead percentage.
+func (s *Session) SetOverhead(pct int) { s.control(func() { s.core.SetOverhead(pct) }) }
+
+// SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
+func (s *Session) SetReorderTolerance(n int) { s.control(func() { s.core.SetReorderTolerance(n) }) }
+
 // SetLinger sets how long Close drains in-flight data before sending SHUTDOWN.
 // Zero (the default) closes immediately (still sending SHUTDOWN). Call before
 // Close. Not safe to call concurrently with the event loop after Close begins.
@@ -554,6 +577,10 @@ func (s *Session) loop() {
 
 		case resp := <-s.statsReq:
 			resp <- s.core.Stats()
+
+		case fn := <-s.ctrl:
+			fn()
+			backlog = s.drain(s.clk.Now(), timer, backlog)
 		}
 	}
 }

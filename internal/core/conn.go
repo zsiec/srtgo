@@ -579,6 +579,40 @@ func (c *Conn) Write(now clock.Timestamp, payload []byte) {
 	c.WriteMsg(now, payload, MsgOptions{InOrder: true})
 }
 
+// SetMaxBW changes the maximum sending bandwidth (bytes/sec) at runtime; 0 means
+// auto. Call it on the host loop goroutine.
+func (c *Conn) SetMaxBW(bw int64) {
+	if c.sendCC != nil {
+		c.sendCC.SetMaxBandwidth(bw)
+	}
+}
+
+// SetInputBW updates the estimated input bandwidth (bytes/sec) used for auto-rate
+// when MaxBW is 0.
+func (c *Conn) SetInputBW(bw int64) {
+	if c.sendCC != nil {
+		c.sendCC.UpdateBandwidth(c.sendCC.MaxBandwidth(), bw)
+	}
+}
+
+// SetOverhead updates the retransmit bandwidth overhead percentage (5..100).
+func (c *Conn) SetOverhead(pct int) {
+	if c.sendCC != nil {
+		c.sendCC.SetOverhead(pct)
+	}
+}
+
+// SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
+func (c *Conn) SetReorderTolerance(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.reorderTolerance = n
+	if n > 0 && c.deferredLoss == nil {
+		c.deferredLoss = make(map[uint32]struct{})
+	}
+}
+
 // PendingSend returns the number of unacknowledged packets in the send buffer.
 // The host uses it to linger on close until in-flight data has drained.
 func (c *Conn) PendingSend() int {

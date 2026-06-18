@@ -269,6 +269,51 @@ func TestFacadeParseStreamID(t *testing.T) {
 	}
 }
 
+// TestFacadeRuntimeBW proves SetMaxBW / SetOption(MaxBW) reach the running core
+// (no error/race) and round-trip, and that SendRate reports a positive rate
+// during active sending.
+func TestFacadeRuntimeBW(t *testing.T) {
+	caller, server, ln := dialAccept(t, srt.DefaultConfig(), srt.DefaultConfig())
+	defer ln.Close()
+	defer caller.Close()
+	defer server.Close()
+
+	caller.SetMaxBW(10_000_000)
+	if v, _ := caller.GetOption(srt.SockOptMaxBW); v.(int64) != 10_000_000 {
+		t.Errorf("after SetMaxBW: GetOption(MaxBW) = %v, want 10000000", v)
+	}
+	if err := caller.SetOption(srt.SockOptMaxBW, int64(5_000_000)); err != nil {
+		t.Fatalf("SetOption(MaxBW): %v", err)
+	}
+	if v, _ := caller.GetOption(srt.SockOptMaxBW); v.(int64) != 5_000_000 {
+		t.Errorf("after SetOption(MaxBW): GetOption(MaxBW) = %v, want 5000000", v)
+	}
+
+	caller.SendRate() // baseline
+
+	const n = 300
+	go func() {
+		p := make([]byte, 1000)
+		for i := 0; i < n; i++ {
+			if _, err := caller.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+	buf := make([]byte, 2000)
+	for i := 0; i < n; i++ {
+		_ = server.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, err := server.Read(buf); err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+	}
+
+	pps, bps := caller.SendRate()
+	if pps <= 0 || bps <= 0 {
+		t.Errorf("SendRate = (%d pkt/s, %d B/s), want both > 0", pps, bps)
+	}
+}
+
 // TestFacadeSocketOptions exercises GetOption/SetOption: read-side values,
 // round-tripping writable options, blocking-mode changes, and error contracts.
 func TestFacadeSocketOptions(t *testing.T) {
