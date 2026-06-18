@@ -163,6 +163,37 @@ func TestNewStackHSv4(t *testing.T) {
 	}
 }
 
+// TestNewStackHSv4EncryptedRejected proves that requesting encryption on an HSv4
+// connection fails loudly rather than silently downgrading to plaintext.
+func TestNewStackHSv4EncryptedRejected(t *testing.T) {
+	luconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := session.Listen(luconn, core.ListenerConfig{RecvLatencyMS: 120, SendLatencyMS: 120}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if s, err := ln.Accept(); err == nil {
+			s.Close()
+		}
+	}()
+
+	cuconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Dial(cuconn, ln.Addr(), core.DialConfig{
+		ForceHSv4: true, Message: true, Passphrase: "should-not-downgrade", KeyLength: 16,
+	}, nil, 2*time.Second)
+	if err == nil {
+		s.Close()
+		t.Fatal("expected encrypted HSv4 dial to fail, got a connection (silent plaintext downgrade)")
+	}
+}
+
 // streamEncrypted runs a 300-payload AES-CTR stream from caller (a Session) to
 // a reader goroutine, used by the encrypted listener tests below.
 func streamEncrypted(t *testing.T, write func([]byte) error, read func([]byte) (int, error)) {

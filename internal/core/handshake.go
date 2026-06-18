@@ -341,6 +341,13 @@ func (c *Conn) handleInductionResponse(now clock.Timestamp, hs *packet.CIFHandsh
 	// the caller is forced to HSv4. The SRT features are negotiated post-handshake
 	// over UMSG_EXT instead of in the CONCLUSION.
 	if d.forceHSv4 || (hs.Version == 4 && hs.ExtensionField == handshake.UDTV4Marker) {
+		// Encrypted HSv4 (post-handshake KMREQ/KMRSP) is not implemented. Fail
+		// loudly rather than silently downgrade a requested-encrypted connection
+		// to plaintext.
+		if d.cryptoCtx != nil || d.passphrase != "" {
+			c.fail(fmt.Errorf("core: encrypted HSv4 is not supported (use HSv5)"))
+			return
+		}
 		d.hsv4 = true
 		d.cookie = hs.SynCookie
 		c.state = stateConclusion

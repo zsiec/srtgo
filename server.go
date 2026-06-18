@@ -2,6 +2,7 @@ package srt
 
 import (
 	"errors"
+	"runtime/debug"
 	"sync"
 )
 
@@ -227,12 +228,14 @@ func (s *Server) untrackConn(c *Conn) {
 }
 
 // recoverHandler catches panics from user-supplied handler callbacks,
-// preventing a single misbehaving handler from crashing the process.
+// preventing a single misbehaving handler from crashing the process. The panic
+// is logged (with stack) when a Logger is configured; the deferred c.Close() and
+// untrackConn still run because this defer was registered first. Users who need
+// to handle panics themselves should recover inside their handlers.
 func (s *Server) recoverHandler() {
 	if r := recover(); r != nil {
-		// Silently recover — the deferred c.Close() and untrackConn
-		// will still run because this defer was registered first.
-		// Users who need panic visibility should recover inside their handlers.
+		logf(s.config().Logger, LogError, LogConn, 0,
+			"handler panic recovered: %v\n%s", r, debug.Stack())
 	}
 }
 

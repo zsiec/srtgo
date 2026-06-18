@@ -14,7 +14,9 @@ import (
 // datagram link and the SRT features (TSBPD latency, etc.) are negotiated after
 // connect via UMSG_EXT HSREQ/HSRSP. The caller is the initiator: it sends the
 // v4 CONCLUSION, establishes on the response, then advertises its parameters
-// with an HSREQ. Encrypted HSv4 (post-handshake KMREQ/KMRSP) is not implemented.
+// with an HSREQ. Encrypted HSv4 (post-handshake KMREQ/KMRSP) is not implemented:
+// rather than silently downgrade to plaintext, the caller fails the handshake and
+// the listener rejects (rejUnsecure) when encryption is requested — use HSv5.
 
 // sendConclusionV4 emits the HSv4 (UDT_DGRAM) CONCLUSION and arms the retransmit
 // timer. It echoes the listener's cookie from the induction response.

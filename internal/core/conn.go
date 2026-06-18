@@ -246,8 +246,9 @@ type Conn struct {
 	recvLoss         uint64
 	recvBelated      uint64 // packets that arrived after their sequence was already ACK'd/read past
 	recvBelatedBytes uint64
-	recvReorderDist  int32  // max observed reorder distance (packets) — a reordered packet's lag
-	lostPackets      uint64 // sequence numbers the peer reported lost (sum over received NAKs)
+	recvAvgBelatedUS float64 // EWMA of how late belated packets arrived vs their play deadline (µs)
+	recvReorderDist  int32   // max observed reorder distance (packets) — a reordered packet's lag
+	lostPackets      uint64  // sequence numbers the peer reported lost (sum over received NAKs)
 	sentACKs         uint64
 	sentNAKs         uint64
 	sentACKACKs      uint64
@@ -334,6 +335,7 @@ type Stats struct {
 
 	RecvBelated      uint64             // packets that arrived after their sequence was read/ACK'd past
 	RecvBelatedBytes uint64             // payload bytes of belated packets
+	AvgBelatedMicros clock.Microseconds // EWMA lateness of belated packets vs their play deadline
 	ReorderDistance  int32              // max observed reorder distance (packets)
 	PeerVersion      uint32             // peer's SRT version from the handshake
 	SendISN          uint32             // local initial send sequence number
@@ -383,6 +385,7 @@ func (c *Conn) Stats() Stats {
 		PeerNakReport:     c.peerNakReport,
 		RecvBelated:       c.recvBelated,
 		RecvBelatedBytes:  c.recvBelatedBytes,
+		AvgBelatedMicros:  clock.Microseconds(c.recvAvgBelatedUS),
 		ReorderDistance:   c.recvReorderDist,
 		PeerVersion:       c.peerVersion,
 		SendISN:           c.sndISN.Value(),
@@ -1308,6 +1311,16 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		if belatedBefore { // arrived after its sequence was already read/ACK'd past
 			c.recvBelated++
 			c.recvBelatedBytes += uint64(len(p.Data))
+			// Track how late it arrived versus its TSBPD play deadline (EWMA, 1/8).
+			if c.tsbpdTimer != nil {
+				if late := now.Sub(c.tsbpdTimer.DeliveryTime(p.Header.Timestamp)); late > 0 {
+					if c.recvAvgBelatedUS == 0 {
+						c.recvAvgBelatedUS = float64(late)
+					} else {
+						c.recvAvgBelatedUS = c.recvAvgBelatedUS*0.875 + float64(late)*0.125
+					}
+				}
+			}
 		}
 		return // duplicate or belated
 	}

@@ -384,6 +384,13 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 		l.reject(peer, hs.SRTSocketID, rejRogue)
 		return
 	}
+	// Encrypted HSv4 is not supported. If the listener requires encryption, reject
+	// the (necessarily plaintext) HSv4 caller rather than accept it unencrypted —
+	// unless unencrypted fallback is explicitly allowed.
+	if l.cfg.Passphrase != "" && !l.cfg.AllowUnencryptedFallback {
+		l.reject(peer, hs.SRTSocketID, rejUnsecure)
+		return
+	}
 	// Accept gating (no StreamID extension in HSv4).
 	if l.gate != nil {
 		if accept, code := l.gate(AcceptRequest{Peer: peer, HSVersion: hs.Version}); !accept {

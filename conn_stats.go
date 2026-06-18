@@ -9,8 +9,8 @@ import (
 // ConnStats is a snapshot of a connection's statistics. Field names and types
 // mirror the legacy public API. NOTE (cutover, in progress): the fields the
 // Sans-I/O core exposes are populated, including the derived fields (header-byte
-// totals, loss rates, interval Mbps, StartTime/Duration). A few that need core
-// instrumentation not yet present read zero — see the Stats method doc.
+// totals, loss rates, interval Mbps, StartTime/Duration) and the belated/reorder/
+// ms-buffer instrumentation.
 type ConnStats struct {
 	// Timing
 	StartTime time.Time
@@ -132,9 +132,6 @@ type ConnStats struct {
 // Stats returns a snapshot of the connection's statistics. Packet/byte counters
 // are cumulative; the Mbps interval rates are computed over the window since the
 // previous clear=true call, which also resets that window.
-//
-// NOTE: RcvAvgBelatedTime reads zero — the core drops belated packets before a
-// per-packet lateness is computable; the belated counts (RecvBelated*) are wired.
 func (c *Conn) Stats(clear bool) ConnStats {
 	s, err := c.s.Stats()
 	if err != nil {
@@ -167,6 +164,7 @@ func (c *Conn) Stats(clear bool) ConnStats {
 	st.RecvBelated = s.RecvBelated
 	st.RecvBelatedBytes = s.RecvBelatedBytes
 	st.RecvBelatedTotalBytes = s.RecvBelatedBytes + s.RecvBelated*hdr
+	st.RcvAvgBelatedTime = time.Duration(s.AvgBelatedMicros) * time.Microsecond
 	st.ReorderDistance = s.ReorderDistance
 	st.MsSndBuf = time.Duration(s.MsSndBuf) * time.Microsecond
 	st.MsRcvBuf = time.Duration(s.MsRcvBuf) * time.Microsecond
