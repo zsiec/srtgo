@@ -181,7 +181,15 @@ Each phase keeps the public API and `make test` green.
   - ✅ **Interop proven**: `TestInteropCallerToLegacyListener` — the new caller completes a real
     HSv5 handshake against the existing `srt.Listen` listener over UDP and streams 300 payloads it
     receives in order. Confirms wire compatibility of both handshake and data path.
-  - ⬜ TODO: HSv4 fallback; rejection-code handling; populate `Connected` with full negotiated params.
+  - ✅ HSv4 caller fallback (`internal/core/hsv4.go`): when the peer answers induction with version 4
+    (UDT marker), or `DialConfig.ForceHSv4` is set, the caller sends a UDT_DGRAM CONCLUSION
+    (`BuildConclusionV4`), establishes a reliable-datagram link (Message mode, no TSBPD in the
+    handshake), and advertises its SRT parameters with a post-handshake HSREQ over UMSG_EXT; the HSRSP
+    is recorded as the negotiated latency. Encrypted HSv4 (post-handshake KMREQ/KMRSP) is not
+    implemented. Test `TestInteropHSv4CallerToLegacyListener` (forced HSv4 → legacy `srt.Listen`'s
+    `handleConclusionV4`, 100 payloads in order).
+  - ⬜ TODO: rejection-code handling on the caller (done — see rejection codes); populate `Connected`
+    with full negotiated params; HSv4 listener/responder side; encrypted HSv4.
 - **Phase 3 — crypto & key rotation. 🚧 encrypted data path done.**
   - ✅ Encrypted data path in the core: `encrypt`/`decrypt` helpers (AES-CTR + AES-GCM code paths),
     encrypting *before* the send buffer so retransmissions resend identical ciphertext. The caller

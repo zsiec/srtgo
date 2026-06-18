@@ -600,6 +600,8 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 				c.handleKMRequest(now, p)
 			case packet.ExtTypeKMRsp:
 				c.handleKMResponse(p)
+			case packet.ExtTypeHSRsp:
+				c.handleHSv4HSRSP(p)
 			}
 		case packet.CtrlTypeKeepalive:
 			// Liveness only — lastRecvTime was already refreshed above.

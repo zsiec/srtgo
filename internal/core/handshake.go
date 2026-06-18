@@ -76,6 +76,12 @@ type DialConfig struct {
 	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
 	SndDropDelay    int                // extra ms added to the sender drop threshold
 	PeerIdleTimeout clock.Microseconds // dead-peer timeout (0 = disabled)
+
+	// ForceHSv4 makes the caller use the legacy HSv4 handshake (UDT_DGRAM
+	// CONCLUSION + post-handshake HSREQ/HSRSP over UMSG_EXT) regardless of the
+	// peer's induction response. The caller also falls back to HSv4 automatically
+	// when the peer answers induction with HSv4 (version 4, UDT marker).
+	ForceHSv4 bool
 }
 
 // dialState holds the caller handshake parameters until the connection is
@@ -106,6 +112,9 @@ type dialState struct {
 	tlPktDrop       bool
 	sndDropDelay    int
 	peerIdleTimeout clock.Microseconds
+
+	forceHSv4 bool // caller: force the legacy HSv4 handshake
+	hsv4      bool // caller: HSv4 negotiated (forced or peer answered v4)
 }
 
 // Dial creates a caller-side connection, emits the INDUCTION request, and arms
@@ -156,6 +165,7 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			tlPktDrop:       dc.TLPktDrop,
 			sndDropDelay:    dc.SndDropDelay,
 			peerIdleTimeout: dc.PeerIdleTimeout,
+			forceHSv4:       dc.ForceHSv4,
 		},
 	}
 	c.sendInduction(now)
@@ -230,7 +240,11 @@ func (c *Conn) handleHandshakeTimer(now clock.Timestamp) {
 	case stateInduction:
 		c.sendInduction(now)
 	case stateConclusion:
-		c.sendConclusion(now)
+		if c.dial.hsv4 {
+			c.sendConclusionV4(now)
+		} else {
+			c.sendConclusion(now)
+		}
 	}
 }
 
@@ -238,17 +252,32 @@ func (c *Conn) handleInductionResponse(now clock.Timestamp, hs *packet.CIFHandsh
 	if hs.HandshakeType != packet.HandshakeTypeInduction {
 		return
 	}
-	// HSv5 only: require the SRT magic in the extension field.
+	d := c.dial
+	// HSv4: fall back when the peer answers with version 4 (UDT marker), or when
+	// the caller is forced to HSv4. The SRT features are negotiated post-handshake
+	// over UMSG_EXT instead of in the CONCLUSION.
+	if d.forceHSv4 || (hs.Version == 4 && hs.ExtensionField == handshake.UDTV4Marker) {
+		d.hsv4 = true
+		d.cookie = hs.SynCookie
+		c.state = stateConclusion
+		c.sendConclusionV4(now)
+		return
+	}
+	// Otherwise HSv5: require the SRT magic in the extension field.
 	if hs.Version != 5 || hs.ExtensionField != handshake.SRTMagic {
 		c.fail(fmt.Errorf("core: peer is not HSv5 SRT (version=%d extField=%#x)", hs.Version, hs.ExtensionField))
 		return
 	}
-	c.dial.cookie = hs.SynCookie
+	d.cookie = hs.SynCookie
 	c.state = stateConclusion
 	c.sendConclusion(now)
 }
 
 func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHandshake) {
+	if c.dial.hsv4 {
+		c.handleConclusionResponseV4(now, hs)
+		return
+	}
 	if hs.HandshakeType != packet.HandshakeTypeConclusion {
 		return // e.g. a duplicated induction response; keep waiting
 	}
