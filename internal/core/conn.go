@@ -144,6 +144,7 @@ type Conn struct {
 	tsbpdBaseSet bool         // time base initialized from the first data packet
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
 	messageMode  bool         // message-mode framing: fragment on send, reassemble on receive
+	periodicNAK  bool         // send periodic loss reports (live mode; off in file mode)
 
 	// Liveness (0 timeout = disabled). lastRecvTime feeds dead-peer detection;
 	// lastSentDataTime feeds the idle keepalive.
@@ -503,9 +504,14 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	}
 	c.rexmitCount = 1
 	c.lastACKTime = now
+	// Periodic loss reporting is a live-mode feature; file mode relies on reactive
+	// (immediate) NAK plus the RTO blind-retransmit, so it suppresses periodic NAK.
+	c.periodicNAK = ep.Congestion != "file"
 	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
-	c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
+	if c.periodicNAK {
+		c.outputs.push(SetTimer{ID: TimerNAK, Deadline: now.Add(c.nakInterval())})
+	}
 	c.outputs.push(SetTimer{ID: TimerEXP, Deadline: now.Add(c.rto())})
 	if ep.PeerIdleTimeout > 0 {
 		c.peerIdleTimeout = ep.PeerIdleTimeout
@@ -656,6 +662,9 @@ func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
 			c.pump(now)
 		}
 	case TimerNAK:
+		if !c.periodicNAK {
+			return // periodic loss reporting disabled (file mode)
+		}
 		if c.fecReceiver == nil || c.fecARQLevel == filter.ARQAlways {
 			c.sendPeriodicNAK(now)
 		}
@@ -970,11 +979,18 @@ func (c *Conn) encrypt(p *packet.Packet, seqNo uint32) {
 }
 
 // decrypt reverses encrypt. It returns false (drop the packet) on auth/decrypt
-// failure. Unencrypted packets pass through. For GCM the AAD must match the
-// sender's original header, so the retransmit (R) bit is zeroed before marshal.
+// failure. On an unencrypted connection packets pass through; on a secured
+// connection a plaintext (EncryptionNone) data packet is rejected as stray or
+// injected — all data is encrypted once a crypto context is negotiated. For GCM
+// the AAD must match the sender's original header, so the retransmit (R) bit is
+// zeroed before marshal.
 func (c *Conn) decrypt(p *packet.Packet) bool {
-	if p.Header.Encryption == packet.EncryptionNone || c.cryptoCtx == nil {
-		return true
+	if c.cryptoCtx == nil {
+		return true // unencrypted connection
+	}
+	if p.Header.Encryption == packet.EncryptionNone {
+		c.recvUndecrypt++ // plaintext on a secured connection: drop
+		return false
 	}
 	var aad []byte
 	if c.cryptoCtx.Mode() == crypto.CipherGCM {

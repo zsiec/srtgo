@@ -211,7 +211,7 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 	p := handshake.BuildConclusion(
 		d.socketID, d.isn.Value(), d.mss, d.fc, d.cookie,
 		d.streamID, d.recvLatMS, d.sendLatMS,
-		0, // srtFlags 0 -> handshake defaults (live, rexmit, periodic NAK, ...)
+		d.srtFlags(), // advertise our negotiated feature set
 		d.cong,
 		d.filterCfg,                           // FEC filter ("" = off)
 		d.groupID, d.groupType, d.groupWeight, // group membership (0 = none)
@@ -220,6 +220,31 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 	)
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
 	c.outputs.push(SetTimer{ID: TimerHandshake, Deadline: now.Add(handshakeRetryInterval)})
+}
+
+// srtFlags computes the SRT feature flags this caller advertises in its
+// CONCLUSION, reflecting the actual configuration rather than a fixed default:
+// TSBPD in live mode, Crypt when encrypted, TLPKTDROP when enabled, periodic NAK
+// except in file mode, retransmit always, and the byte-stream flag for stream
+// mode (non-live, non-message).
+func (d *dialState) srtFlags() uint32 {
+	f := packet.FlagRexmit
+	if d.live {
+		f |= packet.FlagTSBPDSend | packet.FlagTSBPDRecv
+	}
+	if d.cryptoCtx != nil {
+		f |= packet.FlagCrypt
+	}
+	if d.tlPktDrop {
+		f |= packet.FlagTLPktDrop
+	}
+	if d.cong != "file" {
+		f |= packet.FlagPeriodicNAK
+	}
+	if !d.live && !d.message {
+		f |= packet.FlagStream
+	}
+	return f
 }
 
 // handleHandshake dispatches a received handshake packet by current state.
