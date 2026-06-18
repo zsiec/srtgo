@@ -295,6 +295,7 @@ type Stats struct {
 	EstimatedBandwidth uint32             // probe-estimated link capacity (packets/sec)
 	PktSndPeriodMicros int64              // current inter-packet send period (microseconds)
 	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
+	DriftMicros        clock.Microseconds // TSBPD clock-drift correction (live mode; from ACKACK/keepalive)
 }
 
 // Stats returns a snapshot of the connection's counters and live levels. Call it
@@ -351,6 +352,9 @@ func (c *Conn) Stats() Stats {
 		s.PacketRecvRate = pktRate
 		s.EstimatedBandwidth = c.sendCC.EstimatedBandwidth()
 		s.PktSndPeriodMicros = int64(c.sendCC.PacketInterval())
+	}
+	if c.tsbpdTimer != nil {
+		s.DriftMicros = c.tsbpdTimer.DriftOffset()
 	}
 	return s
 }
@@ -657,7 +661,12 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 				c.handleHSv4HSRSP(p)
 			}
 		case packet.CtrlTypeKeepalive:
-			// Liveness only — lastRecvTime was already refreshed above.
+			// Liveness, plus a TSBPD drift sample from the sender's clock (no RTT
+			// sample available here) — useful during data pauses when no ACKACKs flow.
+			if c.tsbpdTimer != nil {
+				c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
+				c.tsbpdTimer.OnACK(p.Header.Timestamp, now, -1)
+			}
 		case packet.CtrlTypeShutdown:
 			c.closed = true
 			c.events.push(Closed{})
@@ -1086,13 +1095,11 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 			c.tsbpdBaseSet = true
 		}
 		c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
-		// Feed a drift sample (data arrival vs expected), using the current RTT
-		// estimate for one-way-delay compensation.
-		rttSample := int64(-1)
-		if c.rtt > 0 {
-			rttSample = int64(c.rtt)
-		}
-		c.tsbpdTimer.OnACK(p.Header.Timestamp, now, rttSample)
+		// NB: drift samples are NOT taken here. A data packet's timestamp is the
+		// application's source time (subject to pacing/buffering jitter), not the
+		// sender's clock at send. Drift is sampled from ACKACK and keepalive
+		// timestamps instead (handleACKACK / the keepalive case), which reflect the
+		// sender's clock directly at a known round trip.
 	}
 
 	// Feed the data packet into the FEC engine for group accumulation; it may
@@ -1394,6 +1401,18 @@ func (c *Conn) handleACKACK(now clock.Timestamp, p packet.Packet) {
 	}
 	if seq.Number(e.dataSeq).GreaterThan(c.rcvLastAckAck) {
 		c.rcvLastAckAck = seq.Number(e.dataSeq)
+	}
+
+	// TSBPD drift sample from the ACKACK timestamp (the sender's clock), with the
+	// raw round-trip from this pair — not the smoothed EWMA — so the drift tracer
+	// sees instantaneous path-delay measurements.
+	if c.tsbpdTimer != nil {
+		rttSample := int64(-1)
+		if rtt > 0 && rtt < rttSanityCap {
+			rttSample = int64(rtt)
+		}
+		c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
+		c.tsbpdTimer.OnACK(p.Header.Timestamp, now, rttSample)
 	}
 }
 
