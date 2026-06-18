@@ -313,7 +313,11 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 		return
 	}
 	if c.state != stateConnected {
-		return // ignore data/ACK/NAK until the handshake completes
+		// Before the connection is up, a SHUTDOWN is how an HSv4 listener refuses.
+		if c.dial != nil && p.Header.IsControl && p.Header.ControlType == packet.CtrlTypeShutdown {
+			c.handshakeRefused()
+		}
+		return // otherwise ignore data/ACK/NAK until the handshake completes
 	}
 	if p.Header.IsControl {
 		switch p.Header.ControlType {

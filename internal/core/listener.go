@@ -159,7 +159,7 @@ func (l *Listener) handleInduction(peer PeerID, hs *packet.CIFHandshake) {
 // connection, and replies with the CONCLUSION response.
 func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet.CIFHandshake) {
 	if hs.SynCookie != l.cookie(peer) {
-		return // missing/invalid cookie: drop
+		return // missing/invalid cookie: drop silently (likely stale or spoofed)
 	}
 	// Duplicate CONCLUSION (our response was lost): resend, don't re-accept.
 	if a, ok := l.accepted[peer]; ok {
@@ -167,32 +167,52 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		return
 	}
 
-	recvLat, sendLat := l.cfg.RecvLatencyMS, l.cfg.SendLatencyMS
-	if hs.HasHS && hs.SRTHS != nil { // negotiated latency = max of both sides
-		if hs.SRTHS.RecvTSBPDDelay > recvLat {
-			recvLat = hs.SRTHS.RecvTSBPDDelay
-		}
-		if hs.SRTHS.SendTSBPDDelay > sendLat {
-			sendLat = hs.SRTHS.SendTSBPDDelay
-		}
+	// An HSv5 SRT caller must carry the HSREQ extension with a sane version.
+	if !hs.HasHS || hs.SRTHS == nil {
+		l.reject(peer, hs.SRTSocketID, rejRogue)
+		return
+	}
+	if hs.SRTHS.SRTVersion < 0x010300 {
+		l.reject(peer, hs.SRTSocketID, rejRogue)
+		return
 	}
 
-	// Unwrap the caller's key material if encryption is configured.
+	recvLat, sendLat := l.cfg.RecvLatencyMS, l.cfg.SendLatencyMS
+	if hs.SRTHS.RecvTSBPDDelay > recvLat { // negotiated latency = max of both sides
+		recvLat = hs.SRTHS.RecvTSBPDDelay
+	}
+	if hs.SRTHS.SendTSBPDDelay > sendLat {
+		sendLat = hs.SRTHS.SendTSBPDDelay
+	}
+
+	// Encryption negotiation. Reject mismatches with the appropriate code.
 	var cryptoCtx *crypto.Context
 	var kmKey packet.PacketEncryption
-	if l.cfg.Passphrase != "" && hs.HasKM && hs.SRTKM != nil && l.newCtx != nil {
+	hasKM := hs.HasKM && hs.SRTKM != nil
+	switch {
+	case l.cfg.Passphrase != "":
+		if !hasKM { // listener requires encryption, caller offered none
+			l.reject(peer, hs.SRTSocketID, rejUnsecure)
+			return
+		}
+		if l.newCtx == nil {
+			l.reject(peer, hs.SRTSocketID, rejUnsecure)
+			return
+		}
 		keyLen := int(hs.SRTKM.KLen)
 		if keyLen == 0 {
 			keyLen = 16
 		}
 		ctx, err := l.newCtx(keyLen)
-		if err == nil && ctx.UnmarshalKM(hs.SRTKM, l.cfg.Passphrase) == nil {
-			cryptoCtx = ctx
-			kmKey = hs.SRTKM.KeyBasedEncryption
+		if err != nil || ctx.UnmarshalKM(hs.SRTKM, l.cfg.Passphrase) != nil {
+			l.reject(peer, hs.SRTSocketID, rejBadSecret) // wrong passphrase
+			return
 		}
-		if cryptoCtx == nil {
-			return // bad passphrase / key material: drop (rejection codes are a later step)
-		}
+		cryptoCtx = ctx
+		kmKey = hs.SRTKM.KeyBasedEncryption
+	case hasKM: // caller wants encryption but the listener has no passphrase
+		l.reject(peer, hs.SRTSocketID, rejUnsecure)
+		return
 	}
 
 	// FEC: adopt the caller's filter config when offered (the host validated a
@@ -255,6 +275,22 @@ func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32
 		nil, // addr (host fills); PeerIP 0.0.0.0
 		km,  // key material echo (nil = unencrypted)
 	)
+}
+
+// reject sends an HSv5 rejection handshake (HandshakeType set to a rejection
+// code) to the caller, which surfaces it as a RejectError.
+func (l *Listener) reject(peer PeerID, callerSocketID uint32, code uint32) {
+	p := packet.NewControl(nil, packet.CtrlTypeHandshake, callerSocketID, 0)
+	rej := &packet.CIFHandshake{
+		Version:       5,
+		HandshakeType: packet.HandshakeType(code),
+		SRTSocketID:   0,
+	}
+	if err := p.MarshalCIF(rej); err != nil {
+		p.Release()
+		return
+	}
+	l.outputs.push(SendTo{Peer: peer, Packet: p})
 }
 
 func (l *Listener) randUint32() uint32 {

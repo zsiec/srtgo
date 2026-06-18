@@ -25,6 +25,23 @@ const (
 // overall dial deadline expires.
 const handshakeRetryInterval = 250 * clock.Millisecond
 
+// SRT rejection codes (subset; mirror the public srt package's Rej* values).
+const (
+	rejRogue     = 1004 // incorrect data in handshake
+	rejBadSecret = 1010 // wrong passphrase
+	rejUnsecure  = 1011 // passphrase required or unexpected
+)
+
+// RejectError is the error surfaced (via a Failed event) when the peer rejects
+// a connection with an SRT rejection code.
+type RejectError struct {
+	Code uint32
+}
+
+func (e RejectError) Error() string {
+	return fmt.Sprintf("srt: connection rejected (code %d)", e.Code)
+}
+
 // DialConfig parameters a caller-side HSv5 handshake. The host generates the
 // random socket ID and ISN (the core takes no entropy source) and supplies the
 // data-path configuration to apply once the connection is established.
@@ -164,11 +181,19 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 
 // handleHandshake dispatches a received handshake packet by current state.
 func (c *Conn) handleHandshake(now clock.Timestamp, p packet.Packet) {
+	var hs packet.CIFHandshake
+	if err := p.UnmarshalCIF(&hs); err != nil {
+		return // malformed; a retransmit will follow
+	}
+	if hs.HandshakeType.IsRejection() {
+		c.fail(RejectError{Code: uint32(hs.HandshakeType)})
+		return
+	}
 	switch c.state {
 	case stateInduction:
-		c.handleInductionResponse(now, p)
+		c.handleInductionResponse(now, &hs)
 	case stateConclusion:
-		c.handleConclusionResponse(now, p)
+		c.handleConclusionResponse(now, &hs)
 	}
 	// Connected/failed: ignore stray handshake retransmissions.
 }
@@ -183,11 +208,7 @@ func (c *Conn) handleHandshakeTimer(now clock.Timestamp) {
 	}
 }
 
-func (c *Conn) handleInductionResponse(now clock.Timestamp, p packet.Packet) {
-	var hs packet.CIFHandshake
-	if err := p.UnmarshalCIF(&hs); err != nil {
-		return // malformed; a retransmit will follow
-	}
+func (c *Conn) handleInductionResponse(now clock.Timestamp, hs *packet.CIFHandshake) {
 	if hs.HandshakeType != packet.HandshakeTypeInduction {
 		return
 	}
@@ -201,11 +222,7 @@ func (c *Conn) handleInductionResponse(now clock.Timestamp, p packet.Packet) {
 	c.sendConclusion(now)
 }
 
-func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
-	var hs packet.CIFHandshake
-	if err := p.UnmarshalCIF(&hs); err != nil {
-		return
-	}
+func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHandshake) {
 	if hs.HandshakeType != packet.HandshakeTypeConclusion {
 		return // e.g. a duplicated induction response; keep waiting
 	}
@@ -257,6 +274,12 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, p packet.Packet) {
 	})
 	c.dial = nil
 	c.events.push(Connected{PeerSocketID: hs.SRTSocketID})
+}
+
+// handshakeRefused fails a connecting caller that received a SHUTDOWN (the way
+// an HSv4 listener refuses a connection).
+func (c *Conn) handshakeRefused() {
+	c.fail(fmt.Errorf("srt: connection refused during handshake"))
 }
 
 // fail marks the handshake failed and surfaces a Failed event.

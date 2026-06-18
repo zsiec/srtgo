@@ -212,6 +212,12 @@ Each phase keeps the public API and `make test` green.
     corrupt/spurious recoveries in no-loss 2D streams. The receiver now measures a column's series
     from its own staircase base offset. Regression-guarded by `fec_staircase_test.go`.
   - ⬜ TODO: delivery-rate / bandwidth stats fields.
+- **Handshake rejection codes. ✅** The listener rejects bad/unauthorized CONCLUSIONs with the
+  proper SRT code (missing/old HSREQ → RejRogue; wrong passphrase → RejBadSecret; encryption
+  required/unexpected → RejUnsecure) via an HSv5 rejection handshake; the caller surfaces it as a
+  typed `core.RejectError{Code}` (and treats a SHUTDOWN during handshake as a refusal). Tests:
+  `TestRejectWrongPassphrase`, `TestRejectEncryptionRequired`, `TestRejectUnexpectedEncryption`.
+
 - **Phase 5 — listener & rendezvous. 🚧 listener done (unencrypted).**
   - ✅ `core.Listener` (`internal/core/listener.go`): stateless SYN-cookie induction (cookie =
     keyed hash of an opaque `PeerID`, keeping the core net-free — the host maps PeerID↔addr),
