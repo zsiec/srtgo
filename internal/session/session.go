@@ -105,7 +105,17 @@ type Session struct {
 	groupType   uint8
 	groupWeight uint16
 	sharedISN   seq.Number
+
+	// Identity from the handshake; set at construction, read-only thereafter.
+	streamID string
+	socketID uint32
 }
+
+// StreamID returns the stream identifier negotiated in the handshake ("" if none).
+func (s *Session) StreamID() string { return s.streamID }
+
+// SocketID returns this connection's local SRT socket ID.
+func (s *Session) SocketID() uint32 { return s.socketID }
 
 // GroupID returns the bonding group this connection joined in the handshake, or
 // 0 if it is not a group member.
@@ -225,6 +235,8 @@ func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk cloc
 	s.groupType = dc.GroupType
 	s.groupWeight = dc.GroupWeight
 	s.sharedISN = dc.CallerISN
+	s.streamID = dc.StreamID
+	s.socketID = dc.CallerSocketID
 
 	select {
 	case err := <-s.connected:

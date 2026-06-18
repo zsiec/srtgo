@@ -139,3 +139,93 @@ func isTimeout(err error) bool {
 	var ne interface{ Timeout() bool }
 	return errors.As(err, &ne) && ne.Timeout()
 }
+
+// dialAccept is a small helper: spin up a listener and a connected caller/server
+// pair with the given configs.
+func dialAccept(t *testing.T, lcfg, dcfg srt.Config) (caller, server *srt.Conn, ln *srt.Listener) {
+	t.Helper()
+	ln, err := srt.Listen("127.0.0.1:0", lcfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	accCh := make(chan *srt.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accCh <- c
+		}
+	}()
+	caller, err = srt.Dial(ln.Addr().String(), dcfg)
+	if err != nil {
+		ln.Close()
+		t.Fatalf("Dial: %v", err)
+	}
+	select {
+	case server = <-accCh:
+	case <-time.After(3 * time.Second):
+		caller.Close()
+		ln.Close()
+		t.Fatal("Accept timed out")
+	}
+	return caller, server, ln
+}
+
+// TestFacadeStreamID proves the stream ID set by the caller is negotiated in the
+// handshake and surfaced on both ends.
+func TestFacadeStreamID(t *testing.T) {
+	lcfg := srt.DefaultConfig()
+	dcfg := srt.DefaultConfig()
+	dcfg.StreamID = "live/stream-42"
+
+	caller, server, ln := dialAccept(t, lcfg, dcfg)
+	defer ln.Close()
+	defer caller.Close()
+	defer server.Close()
+
+	if got := caller.StreamID(); got != "live/stream-42" {
+		t.Errorf("caller.StreamID() = %q, want %q", got, "live/stream-42")
+	}
+	if got := server.StreamID(); got != "live/stream-42" {
+		t.Errorf("accepted.StreamID() = %q, want %q", got, "live/stream-42")
+	}
+	if server.SocketID() == 0 {
+		t.Error("accepted.SocketID() = 0, want nonzero")
+	}
+}
+
+// TestFacadeMessageAPI proves WriteMessage/ReadMsgCtrl carry message boundaries
+// and metadata through the façade.
+func TestFacadeMessageAPI(t *testing.T) {
+	cfg := srt.DefaultConfig() // live mode: message API on by default
+
+	caller, server, ln := dialAccept(t, cfg, cfg)
+	defer ln.Close()
+	defer caller.Close()
+	defer server.Close()
+
+	const n = 50
+	go func() {
+		for i := 0; i < n; i++ {
+			if _, err := caller.WriteMessage([]byte(fmt.Sprintf("msg-%03d", i))); err != nil {
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, 2000)
+	var lastMsgNo uint32
+	for i := 0; i < n; i++ {
+		_ = server.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var mc srt.MsgCtrl
+		m, err := server.ReadMsgCtrl(buf, &mc)
+		if err != nil {
+			t.Fatalf("ReadMsgCtrl %d: %v", i, err)
+		}
+		if want := fmt.Sprintf("msg-%03d", i); string(buf[:m]) != want {
+			t.Fatalf("message %d = %q, want %q", i, buf[:m], want)
+		}
+		if i > 0 && mc.MsgNo == lastMsgNo {
+			t.Errorf("message %d: MsgNo did not advance (%d)", i, mc.MsgNo)
+		}
+		lastMsgNo = mc.MsgNo
+	}
+}

@@ -174,6 +174,8 @@ func (l *Listener) drain(now clock.Timestamp) {
 		sess.groupType = a.GroupType
 		sess.groupWeight = a.GroupWeight
 		sess.sharedISN = a.SharedISN
+		sess.streamID = a.StreamID
+		sess.socketID = a.SocketID
 		select {
 		case l.accept <- sess:
 		default:

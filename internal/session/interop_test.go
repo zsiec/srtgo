@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	srt "github.com/zsiec/srtgo/internal/legacy"
 	"github.com/zsiec/srtgo/internal/core"
+	srt "github.com/zsiec/srtgo/internal/legacy"
 	"github.com/zsiec/srtgo/internal/session"
 )
 
