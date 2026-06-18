@@ -883,6 +883,37 @@ func (rb *RecvBuffer) Capacity() int {
 	return len(rb.entries) - 1
 }
 
+// BufferedTimeSpan returns the span between the oldest and newest available
+// packet SRT timestamps in the buffer — the buffered playout duration (MsRcvBuf).
+// Zero if fewer than two packets are buffered.
+func (rb *RecvBuffer) BufferedTimeSpan() clock.Microseconds {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if rb.size < 2 {
+		return 0
+	}
+	var oldest, newest uint32
+	first := true
+	for s := rb.startSeq; s.LessThan(rb.maxSeq); s = s.Inc() {
+		e := rb.entries[int(uint32(s))&rb.mask]
+		if e.state != EntryAvailable {
+			continue
+		}
+		ts := e.pkt.Header.Timestamp
+		if first {
+			oldest, newest, first = ts, ts, false
+			continue
+		}
+		if int32(ts-oldest) < 0 {
+			oldest = ts
+		}
+		if int32(ts-newest) > 0 {
+			newest = ts
+		}
+	}
+	return clock.Microseconds(newest - oldest)
+}
+
 // AvailableSize returns the available buffer size for an ACK.
 // The available space is calculated as capacity - seqlen(startSeq, lastAck) + 1,
 // where seqlen counts the range from startSeq to lastAck as "used" (including

@@ -31,6 +31,8 @@ type ListenerConfig struct {
 	MaxBW            int64
 	PayloadSize      int
 	BufferCapacity   int
+	SendBufCapacity  int    // send ring capacity (0 -> BufferCapacity)
+	RecvBufCapacity  int    // recv ring capacity (0 -> BufferCapacity)
 	Passphrase       string // if set, accept encrypted callers (unwrap their KMREQ)
 	// AllowUnencryptedFallback accepts a connection unencrypted on a crypto
 	// mismatch (passphrase set but caller offered none, or vice versa) instead of
@@ -335,6 +337,8 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:       int(a.fc),
 		BufferCapacity:   l.cfg.BufferCapacity,
+		SendBufCapacity:  l.cfg.SendBufCapacity,
+		RecvBufCapacity:  l.cfg.RecvBufCapacity,
 		MaxBW:            l.cfg.MaxBW,
 		Live:             l.cfg.Live,
 		TsbpdDelay:       clock.Microseconds(recvLat) * 1000,
@@ -345,6 +349,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		LossMaxTTL:       l.cfg.LossMaxTTL,
 		DisableNAKReport: l.cfg.DisableNAKReport,
 		PeerNakReport:    peerNakReportFromHS(hs),
+		PeerVersion:      peerVersionFromHS(hs),
 		PeerIdleTimeout:  l.cfg.PeerIdleTimeout,
 		CryptoCtx:        cryptoCtx,
 		ActiveKey:        packet.EncryptionEven,

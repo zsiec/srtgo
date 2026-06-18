@@ -498,6 +498,30 @@ func (s *Session) SetOverhead(pct int) { s.control(func() { s.core.SetOverhead(p
 // SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
 func (s *Session) SetReorderTolerance(n int) { s.control(func() { s.core.SetReorderTolerance(n) }) }
 
+// SetSndDropDelay updates the extra sender-drop delay (ms) at runtime.
+func (s *Session) SetSndDropDelay(ms int) { s.control(func() { s.core.SetSndDropDelay(ms) }) }
+
+// SendISN returns the local initial send sequence number.
+func (s *Session) SendISN() uint32 {
+	var v uint32
+	s.onLoop(func() { v = s.core.SendISN() })
+	return v
+}
+
+// RecvISN returns the peer's initial sequence number.
+func (s *Session) RecvISN() uint32 {
+	var v uint32
+	s.onLoop(func() { v = s.core.RecvISN() })
+	return v
+}
+
+// PeerVersion returns the peer's SRT version from the handshake (0 if unknown).
+func (s *Session) PeerVersion() uint32 {
+	var v uint32
+	s.onLoop(func() { v = s.core.PeerVersion() })
+	return v
+}
+
 // onLoop runs fn on the loop goroutine and waits for it (so reads of core state
 // are race-free). Returns immediately if the loop has exited.
 func (s *Session) onLoop(fn func()) {

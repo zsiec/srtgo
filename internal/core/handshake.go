@@ -74,6 +74,8 @@ type DialConfig struct {
 	// Applied once the handshake completes.
 	PayloadSize      int                // data payload per packet (0 -> MSS-44)
 	BufferCapacity   int                // send/recv ring capacity (0 -> default)
+	SendBufCapacity  int                // send ring capacity (0 -> BufferCapacity)
+	RecvBufCapacity  int                // recv ring capacity (0 -> BufferCapacity)
 	MaxBW            int64              // max send bandwidth bytes/sec (0 -> LiveCC default)
 	Live             bool               // TSBPD playout (live mode)
 	Message          bool               // message-mode framing (file API; ignored when Live)
@@ -121,6 +123,8 @@ type dialState struct {
 
 	payloadSize      int
 	bufferCapacity   int
+	sendBufCapacity  int
+	recvBufCapacity  int
 	maxBW            int64
 	live             bool
 	message          bool
@@ -181,6 +185,8 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			allowUnencFallback: dc.AllowUnencryptedFallback,
 			payloadSize:        payloadSize,
 			bufferCapacity:     dc.BufferCapacity,
+			sendBufCapacity:    dc.SendBufCapacity,
+			recvBufCapacity:    dc.RecvBufCapacity,
 			maxBW:              dc.MaxBW,
 			live:               dc.Live,
 			message:            dc.Message,
@@ -267,6 +273,15 @@ func peerNakReportFromHS(hs *packet.CIFHandshake) bool {
 		return true
 	}
 	return hs.SRTHS.SRTFlags&packet.FlagPeriodicNAK != 0
+}
+
+// peerVersionFromHS returns the peer's SRT version from the handshake (0 if the
+// SRT extension is absent).
+func peerVersionFromHS(hs *packet.CIFHandshake) uint32 {
+	if !hs.HasHS || hs.SRTHS == nil {
+		return 0
+	}
+	return hs.SRTHS.SRTVersion
 }
 
 // srtFlags computes the SRT feature flags this caller advertises in its
@@ -393,6 +408,8 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:       fc,
 		BufferCapacity:   d.bufferCapacity,
+		SendBufCapacity:  d.sendBufCapacity,
+		RecvBufCapacity:  d.recvBufCapacity,
 		MaxBW:            d.maxBW,
 		Live:             d.live,
 		TsbpdDelay:       clock.Microseconds(recvLatMS) * 1000, // ms -> us
@@ -403,6 +420,7 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		LossMaxTTL:       d.lossMaxTTL,
 		DisableNAKReport: d.disableNAKReport,
 		PeerNakReport:    peerNakReportFromHS(hs),
+		PeerVersion:      peerVersionFromHS(hs),
 		PeerIdleTimeout:  d.peerIdleTimeout,
 		CryptoCtx:        d.cryptoCtx,
 		ActiveKey:        packet.EncryptionEven,

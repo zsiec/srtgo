@@ -188,10 +188,6 @@ var ErrPreConnectOnly = errors.New("srt: socket option can only be set before co
 
 // GetOption retrieves the current value of a socket option. The returned type
 // depends on the option (see the SockOpt constants).
-//
-// NOTE(cutover): a few values the Sans-I/O core does not yet surface read as
-// their zero value — SockOptISN/PeerISN/PeerVersion, SockOptEvent (readiness,
-// pending the Watcher), and SockOptMaxRexmitBW.
 func (c *Conn) GetOption(opt SockOpt) (any, error) {
 	st, statsErr := c.s.Stats()
 	switch opt {
@@ -279,10 +275,24 @@ func (c *Conn) GetOption(opt SockOpt) (any, error) {
 		return c.sndTimeo, nil
 	case SockOptRcvTimeo:
 		return c.rcvTimeo, nil
-	case SockOptISN, SockOptPeerISN, SockOptPeerVersion:
-		return uint32(0), nil // TODO(cutover): not yet surfaced by the core
+	case SockOptISN:
+		return c.s.SendISN(), nil
+	case SockOptPeerISN:
+		return c.s.RecvISN(), nil
+	case SockOptPeerVersion:
+		return c.s.PeerVersion(), nil
 	case SockOptEvent:
-		return 0, nil // TODO(cutover): readiness — pending the Watcher
+		ev := 0
+		if c.s.ReadReady() {
+			ev |= EventIn
+		}
+		if c.s.WriteReady() {
+			ev |= EventOut
+		}
+		if !c.s.Alive() {
+			ev |= EventErr
+		}
+		return ev, nil
 	}
 
 	// Live values require a stats snapshot.
@@ -364,7 +374,8 @@ func (c *Conn) SetOption(opt SockOpt, val any) error {
 		if !ok {
 			return fmt.Errorf("srt: SockOptSndDropDelay requires an int, got %v", val)
 		}
-		c.cfg.SndDropDelay = v // TODO(cutover): runtime re-application (drop-threshold recompute)
+		c.cfg.SndDropDelay = v
+		c.s.SetSndDropDelay(v)
 	case SockOptLossMaxTTL:
 		v, ok := val.(int)
 		if !ok || v < 0 {

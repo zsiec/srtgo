@@ -47,6 +47,14 @@ type Conn struct {
 	clearSntBytes uint64
 	clearRcvBytes uint64
 	onStatsStop   chan struct{}
+
+	// ExtendedStats IIR-smoothed buffer occupancy.
+	extMu       sync.Mutex
+	extInit     bool
+	avgSndPkts  float64
+	avgSndBytes float64
+	avgRcvPkts  float64
+	avgRcvBytes float64
 }
 
 // newConn wraps an established session, applying the blocking-mode and linger
@@ -260,9 +268,14 @@ func (c *Conn) WriteMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
 		if mc.MsgTTL > 0 {
 			opts.TTL = clock.Microseconds(mc.MsgTTL.Microseconds())
 		}
+		// A non-zero SrcTime overrides the wire timestamp: convert the wall-clock
+		// instant to the connection's wire-timestamp base (now ⇄ CurrentSRTTimestamp).
+		if !mc.SrcTime.IsZero() {
+			opts.SrcTime = c.s.CurrentSRTTimestamp() - uint32(time.Since(mc.SrcTime).Microseconds())
+		}
 	}
 	// A pinned group source timestamp makes every member stamp the message
-	// identically (TSBPD consistency across links).
+	// identically (TSBPD consistency across links); it takes precedence.
 	if gst := c.groupSrcTime.Load(); gst != 0 {
 		opts.SrcTime = gst
 	}

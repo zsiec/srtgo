@@ -132,7 +132,13 @@ type MsgOptions struct {
 type Conn struct {
 	peerSocketID uint32
 	payloadSize  int
-	sndTSBase    uint32 // SRT wire-timestamp epoch (captured at construction)
+	sndTSBase    uint32             // SRT wire-timestamp epoch (captured at construction)
+	lastNow      clock.Timestamp    // most recent loop time seen (for time-relative stats)
+	sndISN       seq.Number         // local initial send sequence number
+	rcvISN       seq.Number         // peer's initial sequence number (local receive ISN)
+	peerVersion  uint32             // peer's SRT version from the handshake (0 if unknown)
+	tlPktDrop    bool               // sender too-late drop enabled (for SndDropDelay recompute)
+	dropBaseUS   clock.Microseconds // base delay for the sender drop threshold (recompute input)
 
 	// Send side.
 	sendBuf      *buffer.SendBuffer
@@ -238,6 +244,9 @@ type Conn struct {
 	recvRetrans      uint64 // received packets carrying the retransmit (R) bit
 	recvRetransBytes uint64
 	recvLoss         uint64
+	recvBelated      uint64 // packets that arrived after their sequence was already ACK'd/read past
+	recvBelatedBytes uint64
+	recvReorderDist  int32  // max observed reorder distance (packets) — a reordered packet's lag
 	lostPackets      uint64 // sequence numbers the peer reported lost (sum over received NAKs)
 	sentACKs         uint64
 	sentNAKs         uint64
@@ -322,6 +331,15 @@ type Stats struct {
 	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
 	DriftMicros        clock.Microseconds // TSBPD clock-drift correction (live mode; from ACKACK/keepalive)
 	PeerNakReport      bool               // peer advertised periodic NAK reporting in the handshake
+
+	RecvBelated      uint64             // packets that arrived after their sequence was read/ACK'd past
+	RecvBelatedBytes uint64             // payload bytes of belated packets
+	ReorderDistance  int32              // max observed reorder distance (packets)
+	PeerVersion      uint32             // peer's SRT version from the handshake
+	SendISN          uint32             // local initial send sequence number
+	RecvISN          uint32             // peer's initial sequence number
+	MsSndBuf         clock.Microseconds // age of the oldest unacked send-buffer packet
+	MsRcvBuf         clock.Microseconds // buffered playout span in the receive buffer
 }
 
 // Stats returns a snapshot of the connection's counters and live levels. Call it
@@ -363,15 +381,25 @@ func (c *Conn) Stats() Stats {
 		FlowWindow:        c.flowWindow,
 		NegotiatedLatency: c.negotiatedLatency,
 		PeerNakReport:     c.peerNakReport,
+		RecvBelated:       c.recvBelated,
+		RecvBelatedBytes:  c.recvBelatedBytes,
+		ReorderDistance:   c.recvReorderDist,
+		PeerVersion:       c.peerVersion,
+		SendISN:           c.sndISN.Value(),
+		RecvISN:           c.rcvISN.Value(),
 	}
 	if c.sendBuf != nil {
 		s.FlightSize = c.sendBuf.Size()
 		s.SendBufPackets = c.sendBuf.Size()
 		s.SendBufAvailable = c.sendBuf.Available()
+		if oldest := c.sendBuf.OldestSentAt(); oldest != 0 && c.lastNow > oldest {
+			s.MsSndBuf = c.lastNow.Sub(oldest)
+		}
 	}
 	if c.recvBuf != nil {
 		s.RecvBufPackets = c.recvBuf.Size()
 		s.RecvBufAvailable = c.recvBuf.AvailableSize(c.recvBuf.ACKSequence())
+		s.MsRcvBuf = c.recvBuf.BufferedTimeSpan()
 	}
 	if c.sendCC != nil {
 		s.CongestionWindow = c.window()
@@ -402,8 +430,11 @@ type establishParams struct {
 	PayloadSize      int
 	SendISN          seq.Number
 	RecvISN          seq.Number
+	PeerVersion      uint32 // peer's SRT version from the handshake (0 if unknown)
 	FlowWindow       int
-	BufferCapacity   int
+	BufferCapacity   int // shared default when SendBufCapacity/RecvBufCapacity are 0
+	SendBufCapacity  int
+	RecvBufCapacity  int
 	MaxBW            int64
 	Live             bool
 	TsbpdDelay       clock.Microseconds
@@ -465,13 +496,25 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	if ep.BufferCapacity <= 0 {
 		ep.BufferCapacity = 8192
 	}
+	// Independent send/recv capacities (fall back to the shared BufferCapacity).
+	sndCap, rcvCap := ep.SendBufCapacity, ep.RecvBufCapacity
+	if sndCap <= 0 {
+		sndCap = ep.BufferCapacity
+	}
+	if rcvCap <= 0 {
+		rcvCap = ep.BufferCapacity
+	}
 	if ep.FlowWindow <= 0 {
 		ep.FlowWindow = 25600
 	}
 	c.peerSocketID = ep.PeerSocketID
 	c.payloadSize = ep.PayloadSize
 	c.sndTSBase = now.SRTTimestamp()
-	c.sendBuf = buffer.NewSendBuffer(ep.BufferCapacity, ep.SendISN)
+	c.lastNow = now
+	c.sndISN = ep.SendISN
+	c.rcvISN = ep.RecvISN
+	c.peerVersion = ep.PeerVersion
+	c.sendBuf = buffer.NewSendBuffer(sndCap, ep.SendISN)
 	// File mode uses the window-based AIMD controller (slow start + congestion
 	// window); live mode uses the fixed-rate pacer. The core's window() already
 	// honors the controller's CongestionWindow, so FileCC's adaptive cwnd gates
@@ -481,7 +524,7 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	} else {
 		c.sendCC = congestion.NewLiveCC(ep.MaxBW, ep.PayloadSize)
 	}
-	c.recvBuf = buffer.NewRecvBuffer(ep.BufferCapacity, ep.RecvISN)
+	c.recvBuf = buffer.NewRecvBuffer(rcvCap, ep.RecvISN)
 	c.flowWindow = ep.FlowWindow
 	c.rcvLastAckAck = ep.RecvISN
 	c.rtt = initialRTT
@@ -503,6 +546,8 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		// plus the configured extra. (The negotiated live latency is symmetric,
 		// so the local delay stands in for the peer's.)
 		if ep.TLPktDrop {
+			c.tlPktDrop = true
+			c.dropBaseUS = delay
 			thr := delay + clock.Microseconds(ep.SndDropDelay)*clock.Millisecond
 			if thr < 1*clock.Second {
 				thr = 1 * clock.Second
@@ -601,6 +646,28 @@ func (c *Conn) SetOverhead(pct int) {
 	if c.sendCC != nil {
 		c.sendCC.SetOverhead(pct)
 	}
+}
+
+// SendISN returns the local initial send sequence number.
+func (c *Conn) SendISN() uint32 { return c.sndISN.Value() }
+
+// RecvISN returns the peer's initial sequence number (local receive ISN).
+func (c *Conn) RecvISN() uint32 { return c.rcvISN.Value() }
+
+// PeerVersion returns the peer's SRT version from the handshake (0 if unknown).
+func (c *Conn) PeerVersion() uint32 { return c.peerVersion }
+
+// SetSndDropDelay updates the extra sender-drop delay (ms) at runtime, recomputing
+// the send-drop threshold. No-op if too-late drop is disabled for this connection.
+func (c *Conn) SetSndDropDelay(ms int) {
+	if !c.tlPktDrop {
+		return
+	}
+	thr := c.dropBaseUS + clock.Microseconds(ms)*clock.Millisecond
+	if thr < 1*clock.Second {
+		thr = 1 * clock.Second
+	}
+	c.sendDropThresh = thr + 20*clock.Millisecond
 }
 
 // SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
@@ -782,6 +849,7 @@ func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
 
 // HandlePacket feeds one received SRT packet into the state machine.
 func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
+	c.lastNow = now
 	if c.closed {
 		return
 	}
@@ -838,6 +906,7 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 
 // HandleTimer fires a logical timer the host previously armed via SetTimer.
 func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
+	c.lastNow = now
 	if c.closed {
 		return
 	}
@@ -1231,14 +1300,25 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		p.Release()
 		return // undecryptable: drop
 	}
+	belatedBefore := seq.Number(p.Header.SequenceNumber).LessThan(c.recvBuf.StartSeq())
 	res := c.recvBuf.Insert(p, now)
 	if !res.Inserted {
+		if belatedBefore { // arrived after its sequence was already read/ACK'd past
+			c.recvBelated++
+			c.recvBelatedBytes += uint64(len(p.Data))
+		}
 		return // duplicate or belated
 	}
 	c.groupIdle = false // data is flowing again (clears the group idle-link signal)
 	// Reorder tolerance: a packet we were holding off NAKing has now arrived (it
-	// was merely reordered, not lost) — cancel its deferred loss report.
+	// was merely reordered, not lost) — cancel its deferred loss report and record
+	// how far it lagged the frontier (max observed reorder distance).
 	if c.deferredLoss != nil {
+		if _, deferred := c.deferredLoss[p.Header.SequenceNumber]; deferred {
+			if d := int32(seq.Number(p.Header.SequenceNumber).Distance(c.recvBuf.MaxSeq())); d > c.recvReorderDist {
+				c.recvReorderDist = d
+			}
+		}
 		delete(c.deferredLoss, p.Header.SequenceNumber)
 	}
 	c.rcvPktCount++

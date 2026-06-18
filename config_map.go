@@ -10,10 +10,8 @@ import (
 // configuration the façade delegates to. The derivation helpers it relies on
 // (congestionString, tsbpdEnabled, messageAPIEnabled, …) live in config.go.
 
-// bufferCapacity collapses the separate send/recv buffer sizes onto the single
-// ring capacity the core currently takes (it sizes both buffers the same). We
-// use the larger of the two. TODO(cutover): give the core independent send/recv
-// capacities for exact parity.
+// bufferCapacity is the shared default ring capacity (the larger of the two);
+// the core also takes independent SendBufCapacity/RecvBufCapacity below.
 func (cfg *Config) bufferCapacity() int {
 	n := cfg.SendBufSize
 	if cfg.RecvBufSize > n {
@@ -54,6 +52,8 @@ func (cfg *Config) dialConfig() core.DialConfig {
 		AllowUnencryptedFallback: cfg.enforcedEncryptionOff(),
 		PayloadSize:              cfg.PayloadSize,
 		BufferCapacity:           cfg.bufferCapacity(),
+		SendBufCapacity:          cfg.SendBufSize,
+		RecvBufCapacity:          cfg.RecvBufSize,
 		MaxBW:                    cfg.MaxBW,
 		Live:                     cfg.tsbpdEnabled(),
 		Message:                  cfg.messageAPIEnabled(),
@@ -81,6 +81,8 @@ func (cfg *Config) listenerConfig() core.ListenerConfig {
 		MaxBW:                    cfg.MaxBW,
 		PayloadSize:              cfg.PayloadSize,
 		BufferCapacity:           cfg.bufferCapacity(),
+		SendBufCapacity:          cfg.SendBufSize,
+		RecvBufCapacity:          cfg.RecvBufSize,
 		Passphrase:               cfg.Passphrase,
 		AllowUnencryptedFallback: cfg.enforcedEncryptionOff(),
 		KMRefreshRate:            cfg.KMRefreshRate,

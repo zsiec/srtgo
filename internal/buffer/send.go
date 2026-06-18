@@ -199,6 +199,22 @@ func (sb *SendBuffer) Size() int {
 	return sb.size
 }
 
+// OldestSentAt returns the send time of the oldest unacknowledged packet (the
+// head of the buffer), or zero if empty — used to report the send buffer age
+// (MsSndBuf).
+func (sb *SendBuffer) OldestSentAt() clock.Timestamp {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.size == 0 {
+		return 0
+	}
+	e := sb.entries[int(uint32(sb.startSeq))&sb.mask]
+	if !e.used {
+		return 0
+	}
+	return e.sentAt
+}
+
 // Capacity returns the total buffer capacity.
 func (sb *SendBuffer) Capacity() int {
 	return len(sb.entries)

@@ -133,8 +133,8 @@ type ConnStats struct {
 // are cumulative; the Mbps interval rates are computed over the window since the
 // previous clear=true call, which also resets that window.
 //
-// NOTE(cutover): a few fields the Sans-I/O core does not yet surface read zero —
-// MsSndBuf/MsRcvBuf, ReorderDistance, RecvBelated*, and RcvAvgBelatedTime.
+// NOTE: RcvAvgBelatedTime reads zero — the core drops belated packets before a
+// per-packet lateness is computable; the belated counts (RecvBelated*) are wired.
 func (c *Conn) Stats(clear bool) ConnStats {
 	s, err := c.s.Stats()
 	if err != nil {
@@ -162,6 +162,14 @@ func (c *Conn) Stats(clear bool) ConnStats {
 		st.RecvLossRate = float64(st.RecvDropped) / float64(denom) * 100
 	}
 	st.MbpsMaxBW = float64(c.cfg.MaxBW) * 8 / 1e6
+
+	// Fields the core surfaces directly.
+	st.RecvBelated = s.RecvBelated
+	st.RecvBelatedBytes = s.RecvBelatedBytes
+	st.RecvBelatedTotalBytes = s.RecvBelatedBytes + s.RecvBelated*hdr
+	st.ReorderDistance = s.ReorderDistance
+	st.MsSndBuf = time.Duration(s.MsSndBuf) * time.Microsecond
+	st.MsRcvBuf = time.Duration(s.MsRcvBuf) * time.Microsecond
 
 	// Interval Mbps rates over the window since the last clear=true.
 	c.statsMu.Lock()
@@ -224,21 +232,35 @@ type ExtendedConnStats struct {
 	SendRateBps    int64
 }
 
-// ExtendedStats returns Stats plus current buffer occupancy and the measured
-// send rate. NOTE(cutover): the buffer averages are the current occupancy, not
-// yet IIR-smoothed.
+// ExtendedStats returns Stats plus IIR-smoothed buffer occupancy and the
+// measured send rate. The averages use an 8-tap IIR updated on each call
+// (avg = avg*7/8 + current/8), seeded on the first call — so they smooth when
+// ExtendedStats is polled periodically.
 func (c *Conn) ExtendedStats(clear bool) ExtendedConnStats {
 	base := c.Stats(clear)
 	pps, bps := c.SendRate()
-	return ExtendedConnStats{
+
+	iir := func(avg *float64, cur float64) float64 {
+		*avg = *avg*7/8 + cur/8
+		return *avg
+	}
+	c.extMu.Lock()
+	if !c.extInit {
+		c.extInit = true
+		c.avgSndPkts, c.avgSndBytes = float64(base.SendBufSize), float64(base.SendBufBytes)
+		c.avgRcvPkts, c.avgRcvBytes = float64(base.RecvBufSize), float64(base.RecvBufBytes)
+	}
+	ext := ExtendedConnStats{
 		ConnStats:      base,
-		AvgSndBufPkts:  float64(base.SendBufSize),
-		AvgSndBufBytes: float64(base.SendBufBytes),
-		AvgRcvBufPkts:  float64(base.RecvBufSize),
-		AvgRcvBufBytes: float64(base.RecvBufBytes),
+		AvgSndBufPkts:  iir(&c.avgSndPkts, float64(base.SendBufSize)),
+		AvgSndBufBytes: iir(&c.avgSndBytes, float64(base.SendBufBytes)),
+		AvgRcvBufPkts:  iir(&c.avgRcvPkts, float64(base.RecvBufSize)),
+		AvgRcvBufBytes: iir(&c.avgRcvBytes, float64(base.RecvBufBytes)),
 		SendRatePps:    pps,
 		SendRateBps:    bps,
 	}
+	c.extMu.Unlock()
+	return ext
 }
 
 func statsFromCore(s core.Stats, cfg Config) ConnStats {

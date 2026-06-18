@@ -6,9 +6,8 @@ import "time"
 // WriteMsgCtrl / ReadMsgCtrl.
 type MsgCtrl struct {
 	// SrcTime is a custom source timestamp for the message (send only). Zero uses
-	// the current time. TODO(cutover): a non-zero SrcTime override is not yet
-	// applied (it requires converting wall-clock time to the connection's wire
-	// time base); the current time is used regardless.
+	// the current time; a non-zero value is converted to the connection's wire
+	// time base and stamped on the packet.
 	SrcTime time.Time
 
 	// MsgTTL is a per-message time-to-live (send only). The sender drops the
