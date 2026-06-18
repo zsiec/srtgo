@@ -119,6 +119,10 @@ func (l *Listener) drain(now clock.Timestamp) {
 		// to a new per-connection session that shares the mux.
 		recvC := l.mux.Register(a.SocketID)
 		sess := newSession(l.mux, recvC, false, l.addrs[a.Peer], l.clk, a.Conn)
+		sess.groupID = a.GroupID
+		sess.groupType = a.GroupType
+		sess.groupWeight = a.GroupWeight
+		sess.sharedISN = a.SharedISN
 		select {
 		case l.accept <- sess:
 		default:

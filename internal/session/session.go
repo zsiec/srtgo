@@ -95,7 +95,28 @@ type Session struct {
 	timers    map[core.TimerID]clock.Timestamp
 	closeOnce sync.Once
 	dead      bool // set on the loop goroutine when the core fails mid-stream
+
+	// Group membership negotiated in the handshake (0 GroupID = not a member).
+	// Set at construction; read-only thereafter.
+	groupID     uint32
+	groupType   uint8
+	groupWeight uint16
+	sharedISN   seq.Number
 }
+
+// GroupID returns the bonding group this connection joined in the handshake, or
+// 0 if it is not a group member.
+func (s *Session) GroupID() uint32 { return s.groupID }
+
+// GroupType returns the negotiated group type (1=broadcast, 2=backup).
+func (s *Session) GroupType() uint8 { return s.groupType }
+
+// GroupWeight returns the member's priority weight (backup mode).
+func (s *Session) GroupWeight() uint16 { return s.groupWeight }
+
+// SharedISN returns the group's shared send sequence space (members of the same
+// group share it so the receiver can deduplicate across links).
+func (s *Session) SharedISN() seq.Number { return s.sharedISN }
 
 // newSession wires a session around a (possibly still-connecting) core and
 // starts its event loop.
@@ -197,6 +218,10 @@ func Dial(conn net.PacketConn, remoteAddr net.Addr, dc core.DialConfig, clk cloc
 	m := mux.New(conn, mss)
 	recvC := m.Register(dc.CallerSocketID)
 	s := newSession(m, recvC, true, remoteAddr, clk, core.Dial(dc, clk.Now()))
+	s.groupID = dc.GroupID
+	s.groupType = dc.GroupType
+	s.groupWeight = dc.GroupWeight
+	s.sharedISN = dc.CallerISN
 
 	select {
 	case err := <-s.connected:

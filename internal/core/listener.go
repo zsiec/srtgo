@@ -59,6 +59,14 @@ type Accepted struct {
 	Peer     PeerID
 	SocketID uint32 // listener-assigned socket ID for this connection
 	StreamID string
+
+	// Group membership (connection bonding). GroupID is nonzero when the caller
+	// advertised group membership; members sharing a GroupID also share SharedISN
+	// (the send sequence space) so the host can assemble them into one group.
+	GroupID     uint32
+	GroupType   uint8
+	GroupWeight uint16
+	SharedISN   seq.Number
 }
 
 func (Accepted) isListenerEvent() {}
@@ -75,6 +83,10 @@ type acceptedConn struct {
 	filterCfg string                  // negotiated FEC filter, echoed in the response
 	cryptoCtx *crypto.Context         // non-nil for encrypted callers
 	kmKey     packet.PacketEncryption // key slot to echo in the KMRSP
+
+	groupID     uint32 // group membership (0 = none)
+	groupType   uint8
+	groupWeight uint16
 }
 
 // Listener is the pure, Sans-I/O SRT listener state machine. Induction is
@@ -87,6 +99,7 @@ type Listener struct {
 	rng          func([]byte)                                                      // host entropy for socket IDs / ISNs
 	newCtx       func(keyLen int, mode crypto.CipherMode) (*crypto.Context, error) // host crypto-context factory (may be nil)
 	accepted     map[PeerID]acceptedConn
+	groups       map[uint32]seq.Number // GroupID -> shared send ISN (bonding)
 
 	outputs fifo[ListenerOutput]
 	events  fifo[ListenerEvent]
@@ -114,6 +127,7 @@ func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte), newC
 		rng:          rng,
 		newCtx:       newCtx,
 		accepted:     make(map[PeerID]acceptedConn),
+		groups:       make(map[uint32]seq.Number),
 	}
 }
 
@@ -244,6 +258,19 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		cryptoCtx: cryptoCtx,
 		kmKey:     kmKey,
 	}
+	// Group bonding: all members sharing a GroupID also share the send sequence
+	// space (so the receiver can deduplicate across links). The first member of a
+	// group fixes the group's send ISN; later members adopt it.
+	if hs.HasGroup && hs.GroupID != 0 {
+		if shared, ok := l.groups[hs.GroupID]; ok {
+			a.isn = shared
+		} else {
+			l.groups[hs.GroupID] = a.isn
+		}
+		a.groupID = hs.GroupID
+		a.groupType = hs.GroupType
+		a.groupWeight = hs.GroupWeight
+	}
 	l.accepted[peer] = a
 	l.outputs.push(SendTo{Peer: peer, Packet: l.buildConclusionResponse(a, hs.SRTSocketID)})
 
@@ -269,7 +296,10 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		KMPreAnnounce:   l.cfg.KMPreAnnounce,
 		FilterConfig:    filterCfg,
 	})
-	l.events.push(Accepted{Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID})
+	l.events.push(Accepted{
+		Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID,
+		GroupID: a.groupID, GroupType: a.groupType, GroupWeight: a.groupWeight, SharedISN: a.isn,
+	})
 }
 
 func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32) packet.Packet {

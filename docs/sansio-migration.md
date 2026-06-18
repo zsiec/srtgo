@@ -305,9 +305,18 @@ Each phase keeps the public API and `make test` green.
     streams in order and the group merges them in sequence order, buffering out-of-merge-order
     deliveries and skipping a gap only once it is lost on every link (a bare waterline dropped a
     slower link's copy of a packet the faster link skipped when playout deadlines coalesced).
-  - ⬜ TODO: group handshake extension / member discovery (needed for cutover & interop, and for
-    handshake-based group dialing); balancing; sender-buffer prune refinement; idle/keepalive
-    stability handling.
+  - ✅ Group handshake negotiation (the protocol substrate for handshake-formed groups): the caller
+    advertises membership via `DialConfig.GroupID`/`GroupType`/`GroupWeight` (carried in the
+    CONCLUSION's group extension), and the core listener forms a group keyed by GroupID — the first
+    member fixes the group's shared send ISN, later members adopt it — surfacing
+    `GroupID`/`GroupType`/`GroupWeight`/`SharedISN` on the `Accepted` event and the resulting
+    `session.Session` (`GroupID()`/`SharedISN()`/...). Test `TestGroupHandshakeFormation` (two callers,
+    same GroupID -> one group + shared ISN; a non-group caller -> GroupID 0).
+  - ⬜ TODO (the Group I/O hosting — the bulk of the public Group cutover): caller `DialGroup` (dial N
+    members sharing the GroupID + ISN, assemble into a group host) and a **shared-mux listener group
+    host** (the listener has one socket; members route by socket ID into one group loop + `core.Group`
+    for dedup), versus today's per-member-mux `NewEstablishedGroup`. Also: balancing; sender-buffer
+    prune refinement; idle/keepalive stability.
 - **Phase 7 — cleanup.** Delete dead atomics/channels from the root files; deterministic seed-replay
   loss/jitter simulator test (template: ristgo `internal/simtest`).
 

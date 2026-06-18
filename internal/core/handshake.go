@@ -82,6 +82,14 @@ type DialConfig struct {
 	// peer's induction response. The caller also falls back to HSv4 automatically
 	// when the peer answers induction with HSv4 (version 4, UDT marker).
 	ForceHSv4 bool
+
+	// Group membership (connection bonding). When GroupID is nonzero the caller
+	// advertises this connection as a member of the group in its CONCLUSION; the
+	// listener forms/joins a group keyed by GroupID. GroupType is 1=broadcast,
+	// 2=backup; GroupWeight is the member priority (backup).
+	GroupID     uint32
+	GroupType   uint8
+	GroupWeight uint16
 }
 
 // dialState holds the caller handshake parameters until the connection is
@@ -115,6 +123,10 @@ type dialState struct {
 
 	forceHSv4 bool // caller: force the legacy HSv4 handshake
 	hsv4      bool // caller: HSv4 negotiated (forced or peer answered v4)
+
+	groupID     uint32 // group membership advertised in the CONCLUSION (0 = none)
+	groupType   uint8
+	groupWeight uint16
 }
 
 // Dial creates a caller-side connection, emits the INDUCTION request, and arms
@@ -166,6 +178,9 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			sndDropDelay:    dc.SndDropDelay,
 			peerIdleTimeout: dc.PeerIdleTimeout,
 			forceHSv4:       dc.ForceHSv4,
+			groupID:         dc.GroupID,
+			groupType:       dc.GroupType,
+			groupWeight:     dc.GroupWeight,
 		},
 	}
 	c.sendInduction(now)
@@ -198,8 +213,8 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 		d.streamID, d.recvLatMS, d.sendLatMS,
 		0, // srtFlags 0 -> handshake defaults (live, rexmit, periodic NAK, ...)
 		d.cong,
-		d.filterCfg, // FEC filter ("" = off)
-		0, 0, 0,     // no group
+		d.filterCfg,                           // FEC filter ("" = off)
+		d.groupID, d.groupType, d.groupWeight, // group membership (0 = none)
 		nil, // addr (host fills); PeerIP 0.0.0.0
 		km,  // key material (nil = unencrypted)
 	)
