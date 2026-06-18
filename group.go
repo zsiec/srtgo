@@ -435,7 +435,7 @@ func (g *Group) Connect(addr string, cfg Config, token int, weight uint16) error
 		return ErrGroupClosed
 	}
 
-	conn, err := dialGroupMember(addr, cfg, g.groupID, uint8(g.mode), weight, g.sendISN)
+	conn, err := dialGroupMember(addr, cfg, g.sendISN)
 	if err != nil {
 		return fmt.Errorf("srt: group connect: %w", err)
 	}

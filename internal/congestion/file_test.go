@@ -3,17 +3,19 @@ package congestion
 import (
 	"math"
 	"testing"
-	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
 )
 
-// resetRCTime seeds FileCC's rate-control gate far enough in the past (in
-// OnACK's wall-clock epoch) that the next OnACK passes the 10ms RC interval gate.
+// tNow is the fixed injected clock value the congestion tests pass to OnACK.
+const tNow = clock.Timestamp(1 << 30)
+
+// resetRCTime seeds FileCC's rate-control gate far enough in the past (relative
+// to tNow) that the next OnACK(tNow, …) passes the 10ms RC interval gate.
 func resetRCTime(cc *FileCC) {
 	cc.mu.Lock()
 	cc.rcInit = true
-	cc.lastRCTime = clock.Timestamp(time.Now().UnixMicro()) - 20_000
+	cc.lastRCTime = tNow - 20_000
 	cc.mu.Unlock()
 }
 
@@ -31,7 +33,7 @@ func TestFileCCSlowStart(t *testing.T) {
 
 	// Simulate ACK: seqLen(0, 100) = 101 (inclusive), so CWND = 16 + 101 = 117
 	resetRCTime(cc)
-	cc.OnACK(100, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 100, 50_000, 5000, 5000)
 	cwnd := cc.CongestionWindow()
 	if cwnd <= initialCWND {
 		t.Errorf("CWND should grow after ACK: got %d, initial %d", cwnd, initialCWND)
@@ -44,11 +46,11 @@ func TestFileCCExitSlowStart(t *testing.T) {
 
 	// First ACK: seqLen(0, 50) = 51, CWND = 16 + 51 = 67
 	resetRCTime(cc)
-	cc.OnACK(50, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 50, 50_000, 5000, 5000)
 
 	// Second ACK: seqLen(50, 120) = 71, CWND = 67 + 71 = 138 > FC=100
 	resetRCTime(cc)
-	cc.OnACK(120, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 120, 50_000, 5000, 5000)
 
 	cc.mu.RLock()
 	inSlowStart := cc.slowStart
@@ -157,7 +159,7 @@ func TestFileCCCongestionAvoidance(t *testing.T) {
 	// Multiple ACKs without loss → rate should increase (period decreases)
 	for i := range 20 {
 		resetRCTime(cc)
-		cc.OnACK(uint32(110+i*10), 50_000, 10000, 5000)
+		cc.OnACK(tNow, uint32(110+i*10), 50_000, 10000, 5000)
 	}
 
 	periodAfter := cc.PacketInterval()
@@ -185,7 +187,7 @@ func TestFileCCMaxBWEnforcement(t *testing.T) {
 
 	// ACK triggers enforceMaxBW
 	resetRCTime(cc)
-	cc.OnACK(100, 50_000, 100000, 100000)
+	cc.OnACK(tNow, 100, 50_000, 100000, 100000)
 
 	period := cc.PacketInterval()
 
@@ -205,7 +207,7 @@ func TestFileCCCongestionWindow(t *testing.T) {
 
 	// CWND should grow during slow start
 	resetRCTime(cc)
-	cc.OnACK(100, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 100, 50_000, 5000, 5000)
 	cwnd2 := cc.CongestionWindow()
 	if cwnd2 <= cwnd {
 		t.Errorf("CWND should grow: %d -> %d", cwnd, cwnd2)
@@ -326,11 +328,11 @@ func TestFileCCRCIntervalGate(t *testing.T) {
 
 	// First ACK passes the gate
 	resetRCTime(cc)
-	cc.OnACK(50, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 50, 50_000, 5000, 5000)
 	cwnd1 := cc.CongestionWindow()
 
 	// Immediate second ACK should be rate-limited (no CWND change)
-	cc.OnACK(100, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 100, 50_000, 5000, 5000)
 	cwnd2 := cc.CongestionWindow()
 
 	if cwnd1 != cwnd2 {
@@ -339,7 +341,7 @@ func TestFileCCRCIntervalGate(t *testing.T) {
 
 	// After resetting RC time, ACK should work
 	resetRCTime(cc)
-	cc.OnACK(100, 50_000, 5000, 5000)
+	cc.OnACK(tNow, 100, 50_000, 5000, 5000)
 	cwnd3 := cc.CongestionWindow()
 
 	if cwnd3 <= cwnd2 {
@@ -657,9 +659,9 @@ func TestFileCCExitSlowStartWithRTTOnly(t *testing.T) {
 
 	// ACK enough to exceed FC=100 and exit slow start
 	resetRCTime(cc)
-	cc.OnACK(50, 50_000, 0, 0)
+	cc.OnACK(tNow, 50, 50_000, 0, 0)
 	resetRCTime(cc)
-	cc.OnACK(120, 50_000, 0, 0)
+	cc.OnACK(tNow, 120, 50_000, 0, 0)
 
 	cc.mu.RLock()
 	inSlowStart := cc.slowStart
@@ -750,7 +752,7 @@ func TestFileCCEnforceMaxBWZero(t *testing.T) {
 	cc.mu.Unlock()
 
 	resetRCTime(cc)
-	cc.OnACK(100, 50_000, 100000, 100000)
+	cc.OnACK(tNow, 100, 50_000, 100000, 100000)
 
 	period := cc.PacketInterval()
 	// Without maxBW cap, period can be very small
@@ -794,7 +796,7 @@ func TestFileCCRateIncreaseLowB(t *testing.T) {
 
 	periodBefore := cc.PacketInterval()
 	resetRCTime(cc)
-	cc.OnACK(110, 50_000, 100, 5000)
+	cc.OnACK(tNow, 110, 50_000, 100, 5000)
 	periodAfter := cc.PacketInterval()
 
 	// Rate should still try to increase (period decrease), even if slowly
@@ -818,7 +820,7 @@ func TestFileCCRateIncreaseSndPeriodZero(t *testing.T) {
 	cc.mu.Unlock()
 
 	resetRCTime(cc)
-	cc.OnACK(110, 50_000, 10000, 5000)
+	cc.OnACK(tNow, 110, 50_000, 10000, 5000)
 
 	// Should not panic; period should remain reasonable
 	interval := cc.PacketInterval()
@@ -872,7 +874,7 @@ func TestFileCCOnACKCongAvoidanceLossFlag(t *testing.T) {
 
 	periodBefore := cc.PacketInterval()
 	resetRCTime(cc)
-	cc.OnACK(110, 50_000, 10000, 5000)
+	cc.OnACK(tNow, 110, 50_000, 10000, 5000)
 
 	// CWND is updated, but period should not decrease because loss=true skips rateIncrease
 	cc.mu.RLock()
@@ -908,7 +910,7 @@ func TestFileCCRateIncreaseWithHighBandwidth(t *testing.T) {
 
 	periodBefore := cc.PacketInterval()
 	resetRCTime(cc)
-	cc.OnACK(110, 50_000, 20000, 5000)
+	cc.OnACK(tNow, 110, 50_000, 20000, 5000)
 	periodAfter := cc.PacketInterval()
 
 	// Period should decrease (rate increase)
@@ -935,7 +937,7 @@ func BenchmarkFileCCOnACK(b *testing.B) {
 	for b.Loop() {
 		ack += 10
 		resetRCTime(cc)
-		cc.OnACK(ack, 50_000, 10000, 5000)
+		cc.OnACK(tNow, ack, 50_000, 10000, 5000)
 	}
 }
 

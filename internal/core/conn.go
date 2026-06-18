@@ -1545,7 +1545,7 @@ func (c *Conn) handleACK(now clock.Timestamp, p packet.Packet) {
 		c.rtt = clock.Microseconds(ack.RTT)
 		c.rttVar = clock.Microseconds(ack.RTTVariance)
 	}
-	c.sendCC.OnACKAt(now, ack.LastACKPacketSequenceNumber, c.rtt, ack.EstimatedLinkCapacity, ack.PacketsReceivingRate)
+	c.sendCC.OnACK(now, ack.LastACKPacketSequenceNumber, c.rtt, ack.EstimatedLinkCapacity, ack.PacketsReceivingRate)
 	c.pump(now)
 }
 

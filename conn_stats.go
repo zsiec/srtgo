@@ -8,10 +8,9 @@ import (
 
 // ConnStats is a snapshot of a connection's statistics. Field names and types
 // mirror the legacy public API. NOTE (cutover, in progress): the fields the
-// Sans-I/O core exposes today are populated; the derived/aggregated fields
-// (Mbps rates, *-with-header byte totals, ms-buffer timings, reorder/belated,
-// interval/clear semantics, OnStats, StartTime/Duration) are not yet wired and
-// read zero. These are filled in a later cutover step.
+// Sans-I/O core exposes are populated, including the derived fields (header-byte
+// totals, loss rates, interval Mbps, StartTime/Duration). A few that need core
+// instrumentation not yet present read zero — see the Stats method doc.
 type ConnStats struct {
 	// Timing
 	StartTime time.Time

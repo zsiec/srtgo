@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/rand"
 	"sync"
-	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/packet"
@@ -89,8 +88,8 @@ func NewFileCC(maxBW int64, packetSize int, fc int, isn uint32) *FileCC {
 		lastDecSeq:    seq.Number(isn).Dec().Dec().Value(), // ISN-2 (one before lastAck)
 		lastDecPeriod: fileCCInitialPeriod,
 		decRandom:     1,
-		// lastRCTime is seeded lazily on the first ACK so it matches the clock
-		// epoch in use (wall clock via OnACK, or the injected clock via OnACKAt).
+		// lastRCTime is seeded lazily on the first ACK (from the injected clock the
+		// caller passes to OnACK), so it matches whatever clock epoch is in use.
 		maxBW:      maxBW,
 		overhead:   DefaultOverhead,
 		packetSize: packetSize,
@@ -112,22 +111,12 @@ func (cc *FileCC) PacketInterval() clock.Microseconds {
 	return clock.Microseconds(period)
 }
 
-// OnACK processes an ACK from the receiver, reading the wall clock for the
-// rate-control gate (legacy path). In slow start CWND grows by the acked packet
-// count, exiting when CWND > maxCWND; in congestion avoidance CWND and sndPeriod
-// adjust from the delivery rate.
-func (cc *FileCC) OnACK(ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
-	cc.onACKAt(clock.Timestamp(time.Now().UnixMicro()), ackSeqNo, rtt, bandwidth, deliveryRate)
-}
-
-// OnACKAt is OnACK driven by an injected clock (the Sans-I/O core's loop time),
-// making rate control a deterministic function of inputs rather than the wall
-// clock.
-func (cc *FileCC) OnACKAt(now clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
-	cc.onACKAt(now, ackSeqNo, rtt, bandwidth, deliveryRate)
-}
-
-func (cc *FileCC) onACKAt(now clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
+// OnACK processes an ACK from the receiver, using the injected clock (the host
+// loop's now) for the rate-control gate so rate control is a deterministic
+// function of its inputs. In slow start CWND grows by the acked packet count,
+// exiting when CWND > maxCWND; in congestion avoidance CWND and sndPeriod adjust
+// from the delivery rate.
+func (cc *FileCC) OnACK(now clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
