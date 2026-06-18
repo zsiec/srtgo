@@ -883,6 +883,37 @@ func (rb *RecvBuffer) Capacity() int {
 	return len(rb.entries) - 1
 }
 
+// BufferedTimeSpan returns the span between the oldest and newest available
+// packet SRT timestamps in the buffer — the buffered playout duration (MsRcvBuf).
+// Zero if fewer than two packets are buffered.
+func (rb *RecvBuffer) BufferedTimeSpan() clock.Microseconds {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if rb.size < 2 {
+		return 0
+	}
+	var oldest, newest uint32
+	first := true
+	for s := rb.startSeq; s.LessThan(rb.maxSeq); s = s.Inc() {
+		e := rb.entries[int(uint32(s))&rb.mask]
+		if e.state != EntryAvailable {
+			continue
+		}
+		ts := e.pkt.Header.Timestamp
+		if first {
+			oldest, newest, first = ts, ts, false
+			continue
+		}
+		if int32(ts-oldest) < 0 {
+			oldest = ts
+		}
+		if int32(ts-newest) > 0 {
+			newest = ts
+		}
+	}
+	return clock.Microseconds(newest - oldest)
+}
+
 // AvailableSize returns the available buffer size for an ACK.
 // The available space is calculated as capacity - seqlen(startSeq, lastAck) + 1,
 // where seqlen counts the range from startSeq to lastAck as "used" (including
@@ -922,6 +953,24 @@ func (rb *RecvBuffer) IsEmpty() bool {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	return rb.size == 0
+}
+
+// PeekNextAvailableTimestamp returns the 32-bit SRT timestamp of the earliest
+// available (received, unread) packet at or after the head, scanning past empty
+// or dropped slots. Returns false if no available packet is buffered. Used by
+// TSBPD scheduling to compute the next playout wake-up time.
+func (rb *RecvBuffer) PeekNextAvailableTimestamp() (uint32, bool) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	s := rb.startSeq
+	for s.LessThan(rb.maxSeq) {
+		idx := int(uint32(s)) & rb.mask
+		if rb.entries[idx].state == EntryAvailable {
+			return rb.entries[idx].pkt.Header.Timestamp, true
+		}
+		s = s.Inc()
+	}
+	return 0, false
 }
 
 // SetInitialRcvSeq resets the receive buffer to a new initial sequence number,

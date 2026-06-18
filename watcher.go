@@ -258,7 +258,7 @@ func (w *Watcher) watchWrite(entry *watchEntry, writeCh <-chan struct{}) {
 
 func (w *Watcher) watchDone(entry *watchEntry) {
 	select {
-	case <-entry.conn.done:
+	case <-entry.conn.done():
 		err := entry.conn.getShutdownErr()
 		if err == nil {
 			err = errors.New("srt: connection closed")

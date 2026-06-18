@@ -238,7 +238,7 @@ func TestLiveCCOnACKNoRateChange(t *testing.T) {
 	cc := NewLiveCC(10_000_000, 1316)
 
 	before := cc.PacketInterval()
-	cc.OnACK(100, 50000, 5000, 5000)
+	cc.OnACK(tNow, 100, 50000, 5000, 5000)
 	after := cc.PacketInterval()
 
 	if before != after {
@@ -310,9 +310,9 @@ func TestLiveCCOnACKNoOpVerifyInterval(t *testing.T) {
 	before := cc.PacketInterval()
 
 	// Multiple ACKs with various parameters
-	cc.OnACK(100, 50000, 5000, 5000)
-	cc.OnACK(200, 100000, 10000, 10000)
-	cc.OnACK(300, 25000, 1000, 1000)
+	cc.OnACK(tNow, 100, 50000, 5000, 5000)
+	cc.OnACK(tNow, 200, 100000, 10000, 10000)
+	cc.OnACK(tNow, 300, 25000, 1000, 1000)
 
 	after := cc.PacketInterval()
 	if before != after {

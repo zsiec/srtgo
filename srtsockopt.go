@@ -3,10 +3,8 @@ package srt
 import (
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
-	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/handshake"
 )
 
@@ -14,201 +12,56 @@ import (
 type SockOpt int
 
 const (
-	// SockOptMaxBW is the maximum sending bandwidth in bytes/sec.
-	// Get returns int64. Set accepts int64. 0 = auto (DefaultMaxBW).
-	SockOptMaxBW SockOpt = iota
+	SockOptMaxBW       SockOpt = iota // int64: max sending bandwidth bytes/sec (0=auto)
+	SockOptPayloadSize                // int (get): negotiated payload per packet
+	SockOptRcvLatency                 // time.Duration (get): negotiated receive TSBPD latency
+	SockOptSndLatency                 // time.Duration (get): peer's TSBPD latency
+	SockOptState                      // ConnState (get)
+	SockOptPeerVersion                // uint32 (get): peer SRT version
+	SockOptStreamID                   // string (get)
+	SockOptMSS                        // int (get)
+	SockOptFC                         // int (get): flow window
+	SockOptInputBW                    // int64: estimated input bandwidth bytes/sec
 
-	// SockOptPayloadSize is the negotiated maximum payload per packet.
-	// Get only; returns int.
-	SockOptPayloadSize
-
-	// SockOptRcvLatency is the negotiated receive TSBPD latency.
-	// Get only; returns time.Duration.
-	SockOptRcvLatency
-
-	// SockOptSndLatency is the peer's TSBPD latency used for sender-side drop.
-	// Get only; returns time.Duration.
-	SockOptSndLatency
-
-	// SockOptState is the connection state. Get only; returns ConnState.
-	SockOptState
-
-	// SockOptPeerVersion is the peer's SRT version from the handshake.
-	// Get only; returns uint32 (e.g., 0x010500 = v1.5.0).
-	SockOptPeerVersion
-
-	// SockOptStreamID is the stream identifier negotiated during handshake.
-	// Get only; returns string.
-	SockOptStreamID
-
-	// SockOptMSS is the negotiated Maximum Segment Size.
-	// Get only; returns int.
-	SockOptMSS
-
-	// SockOptFC is the negotiated flow control window in packets.
-	// Get only; returns int.
-	SockOptFC
-
-	// SockOptInputBW is the estimated input bandwidth in bytes/sec.
-	// Get/Set; accepts int64. When MaxBW=0, InputBW * (1 + overhead) is used.
-	SockOptInputBW
-
-	// --- New read-only options ---
-
-	// SockOptISN is the local initial sequence number. Get only; returns uint32.
-	SockOptISN
-
-	// SockOptPeerISN is the peer's initial sequence number. Get only; returns uint32.
-	SockOptPeerISN
-
-	// SockOptSndKmState is the send-side key material state.
-	// Get only; returns int32 (0=unsecured, 1=securing, 2=secured, 3=nosecret, 4=badsecret, 5=badcryptomode).
-	SockOptSndKmState
-
-	// SockOptRcvKmState is the recv-side key material state.
-	// Get only; returns int32.
-	SockOptRcvKmState
-
-	// SockOptKmState is the combined key material state.
-	// For senders returns SndKmState, for receivers returns RcvKmState.
-	// Get only; returns int32.
-	SockOptKmState
-
-	// SockOptSndData is the number of unacknowledged packets in the send buffer.
-	// Get only; returns int.
-	SockOptSndData
-
-	// SockOptRcvData is the number of available packets in the receive buffer.
-	// Get only; returns int.
-	SockOptRcvData
-
-	// SockOptSndBuf is the send buffer capacity in packets.
-	// Get only; returns int.
-	SockOptSndBuf
-
-	// SockOptRcvBuf is the receive buffer capacity in packets.
-	// Get only; returns int.
-	SockOptRcvBuf
-
-	// SockOptFlightSize is the number of in-flight (unacknowledged) packets.
-	// Get only; returns int.
-	SockOptFlightSize
-
-	// SockOptRTT is the smoothed round-trip time in microseconds.
-	// Get only; returns int64.
-	SockOptRTT
-
-	// SockOptRTTVar is the RTT variance in microseconds.
-	// Get only; returns int64.
-	SockOptRTTVar
-
-	// SockOptVersion is the local SRT version. Get only; returns uint32.
-	SockOptVersion
-
-	// SockOptCongestion is the congestion control type ("live" or "file").
-	// Get only; returns string.
-	SockOptCongestion
-
-	// SockOptTransType is the transfer type. Get only; returns TransType.
-	SockOptTransType
-
-	// SockOptMessageAPI indicates whether message API mode is enabled.
-	// Get only; returns bool.
-	SockOptMessageAPI
-
-	// SockOptTSBPDMode indicates whether TSBPD is enabled.
-	// Get only; returns bool.
-	SockOptTSBPDMode
-
-	// SockOptTLPktDrop indicates whether too-late packet drop is enabled.
-	// Get only; returns bool.
-	SockOptTLPktDrop
-
-	// SockOptNAKReport indicates whether periodic NAK reports are enabled.
-	// Get only; returns bool.
-	SockOptNAKReport
-
-	// SockOptRetransmitAlgo is the retransmission algorithm (0=immediate, 1=timing gate).
-	// Get only; returns int.
-	SockOptRetransmitAlgo
-
-	// SockOptPBKeyLen is the encryption key length in bytes (0, 16, 24, or 32).
-	// Get only; returns int.
-	SockOptPBKeyLen
-
-	// SockOptCryptoMode is the encryption cipher mode (0=auto, 1=CTR, 2=GCM).
-	// Get only; returns int.
-	SockOptCryptoMode
-
-	// SockOptPeerIdleTimeout is the peer inactivity timeout.
-	// Get only; returns time.Duration.
+	SockOptISN            // uint32 (get): local initial sequence number
+	SockOptPeerISN        // uint32 (get): peer initial sequence number
+	SockOptSndKmState     // int32 (get)
+	SockOptRcvKmState     // int32 (get)
+	SockOptKmState        // int32 (get)
+	SockOptSndData        // int (get): unacked packets in send buffer
+	SockOptRcvData        // int (get): available packets in receive buffer
+	SockOptSndBuf         // int (get): send buffer capacity
+	SockOptRcvBuf         // int (get): receive buffer capacity
+	SockOptFlightSize     // int (get): in-flight packets
+	SockOptRTT            // int64 (get): smoothed RTT microseconds
+	SockOptRTTVar         // int64 (get): RTT variance microseconds
+	SockOptVersion        // uint32 (get): local SRT version
+	SockOptCongestion     // string (get): "live"/"file"
+	SockOptTransType      // TransType (get)
+	SockOptMessageAPI     // bool (get)
+	SockOptTSBPDMode      // bool (get)
+	SockOptTLPktDrop      // bool (get)
+	SockOptNAKReport      // bool (get)
+	SockOptRetransmitAlgo // int (get)
+	SockOptPBKeyLen       // int (get): encryption key length
+	SockOptCryptoMode     // int (get): cipher mode
 	SockOptPeerIdleTimeout
-
-	// SockOptLinger is the maximum time Close waits for send buffer drain.
-	// Get/Set; accepts time.Duration.
-	SockOptLinger
-
-	// SockOptEvent returns poll-like event flags (SRT_EPOLL_IN/OUT/ERR).
-	// Get only; returns int.
-	SockOptEvent
-
-	// SockOptDriftTracer indicates whether TSBPD drift correction is enabled.
-	// Get only; returns bool.
-	SockOptDriftTracer
-
-	// SockOptPacketFilter is the negotiated FEC filter configuration string.
-	// Get only; returns string.
-	SockOptPacketFilter
-
-	// SockOptMinVersion is the minimum SRT version required of the peer.
-	// Get only (pre-connect option); returns uint32.
-	SockOptMinVersion
-
-	// SockOptEnforcedEncryption indicates whether encryption is enforced.
-	// Get only (pre-connect option); returns bool.
-	SockOptEnforcedEncryption
-
-	// SockOptGroupConnect indicates whether the listener accepts grouped connections.
-	// Get only (pre-connect option); returns bool.
-	SockOptGroupConnect
-
-	// SockOptMaxRexmitBW is the maximum retransmission bandwidth in bytes/sec.
-	// Get only; returns int64.
-	SockOptMaxRexmitBW
-
-	// --- New writable options ---
-
-	// SockOptOverheadBW is the bandwidth overhead percentage for retransmissions.
-	// Get/Set; accepts int (range 5-100).
-	SockOptOverheadBW
-
-	// SockOptMinInputBW is the minimum input bandwidth floor in bytes/sec.
-	// Get/Set; accepts int64.
-	SockOptMinInputBW
-
-	// SockOptSndDropDelay is the extra sender drop delay in milliseconds.
-	// Get/Set; accepts int. -1 disables sender drop.
-	SockOptSndDropDelay
-
-	// SockOptLossMaxTTL is the maximum reorder tolerance in packets.
-	// Get/Set; accepts int.
-	SockOptLossMaxTTL
-
-	// SockOptSndSyn controls blocking mode for Write.
-	// Get/Set; accepts bool. true = blocking (default).
-	SockOptSndSyn
-
-	// SockOptRcvSyn controls blocking mode for Read.
-	// Get/Set; accepts bool. true = blocking (default).
-	SockOptRcvSyn
-
-	// SockOptSndTimeo is the send timeout for non-blocking mode.
-	// Get/Set; accepts time.Duration.
-	SockOptSndTimeo
-
-	// SockOptRcvTimeo is the receive timeout for non-blocking mode.
-	// Get/Set; accepts time.Duration.
-	SockOptRcvTimeo
+	SockOptLinger             // time.Duration: Close drain timeout
+	SockOptEvent              // int (get): poll event flags
+	SockOptDriftTracer        // bool (get)
+	SockOptPacketFilter       // string (get): negotiated FEC filter
+	SockOptMinVersion         // uint32 (get)
+	SockOptEnforcedEncryption // bool (get)
+	SockOptGroupConnect       // bool (get)
+	SockOptMaxRexmitBW        // int64 (get)
+	SockOptOverheadBW         // int: retransmit overhead %
+	SockOptMinInputBW         // int64: min input bandwidth floor
+	SockOptSndDropDelay       // int: extra sender drop delay ms
+	SockOptLossMaxTTL         // int: reorder tolerance packets
+	SockOptSndSyn             // bool: blocking Write
+	SockOptRcvSyn             // bool: blocking Read
+	SockOptSndTimeo           // time.Duration: send timeout (non-blocking)
+	SockOptRcvTimeo           // time.Duration: receive timeout (non-blocking)
 )
 
 // Poll event flags for SockOptEvent.
@@ -222,96 +75,83 @@ const (
 type BindingTime int
 
 const (
-	// BindPreBind means the option cannot change after the socket is bound.
-	BindPreBind BindingTime = iota
-	// BindPre means the option cannot change after connect/listen.
-	BindPre
-	// BindPost means the option can change while connected.
-	BindPost
+	BindPreBind BindingTime = iota // cannot change after bind
+	BindPre                        // cannot change after connect/listen
+	BindPost                       // can change while connected
 )
 
-// optionMeta describes the metadata for a socket option.
 type optionMeta struct {
 	binding  BindingTime
-	readonly bool   // true = get only
-	typ      string // "int", "int64", "bool", "string", "time.Duration", "uint32", "ConnState", "TransType"
+	readonly bool
 }
 
-// optionTable maps each SockOpt to its metadata.
 var optionTable = map[SockOpt]optionMeta{
-	// Existing options
-	SockOptMaxBW:       {binding: BindPost, readonly: false, typ: "int64"},
-	SockOptPayloadSize: {binding: BindPre, readonly: true, typ: "int"},
-	SockOptRcvLatency:  {binding: BindPre, readonly: true, typ: "time.Duration"},
-	SockOptSndLatency:  {binding: BindPre, readonly: true, typ: "time.Duration"},
-	SockOptState:       {binding: BindPost, readonly: true, typ: "ConnState"},
-	SockOptPeerVersion: {binding: BindPost, readonly: true, typ: "uint32"},
-	SockOptStreamID:    {binding: BindPre, readonly: true, typ: "string"},
-	SockOptMSS:         {binding: BindPre, readonly: true, typ: "int"},
-	SockOptFC:          {binding: BindPre, readonly: true, typ: "int"},
-	SockOptInputBW:     {binding: BindPost, readonly: false, typ: "int64"},
-
-	// New read-only options
-	SockOptISN:                {binding: BindPost, readonly: true, typ: "uint32"},
-	SockOptPeerISN:            {binding: BindPost, readonly: true, typ: "uint32"},
-	SockOptSndKmState:         {binding: BindPost, readonly: true, typ: "int32"},
-	SockOptRcvKmState:         {binding: BindPost, readonly: true, typ: "int32"},
-	SockOptKmState:            {binding: BindPost, readonly: true, typ: "int32"},
-	SockOptSndData:            {binding: BindPost, readonly: true, typ: "int"},
-	SockOptRcvData:            {binding: BindPost, readonly: true, typ: "int"},
-	SockOptSndBuf:             {binding: BindPre, readonly: true, typ: "int"},
-	SockOptRcvBuf:             {binding: BindPre, readonly: true, typ: "int"},
-	SockOptFlightSize:         {binding: BindPost, readonly: true, typ: "int"},
-	SockOptRTT:                {binding: BindPost, readonly: true, typ: "int64"},
-	SockOptRTTVar:             {binding: BindPost, readonly: true, typ: "int64"},
-	SockOptVersion:            {binding: BindPost, readonly: true, typ: "uint32"},
-	SockOptCongestion:         {binding: BindPre, readonly: true, typ: "string"},
-	SockOptTransType:          {binding: BindPre, readonly: true, typ: "TransType"},
-	SockOptMessageAPI:         {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptTSBPDMode:          {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptTLPktDrop:          {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptNAKReport:          {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptRetransmitAlgo:     {binding: BindPre, readonly: true, typ: "int"},
-	SockOptPBKeyLen:           {binding: BindPre, readonly: true, typ: "int"},
-	SockOptCryptoMode:         {binding: BindPre, readonly: true, typ: "int"},
-	SockOptPeerIdleTimeout:    {binding: BindPre, readonly: true, typ: "time.Duration"},
-	SockOptLinger:             {binding: BindPost, readonly: false, typ: "time.Duration"},
-	SockOptEvent:              {binding: BindPost, readonly: true, typ: "int"},
-	SockOptDriftTracer:        {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptPacketFilter:       {binding: BindPre, readonly: true, typ: "string"},
-	SockOptMinVersion:         {binding: BindPre, readonly: true, typ: "uint32"},
-	SockOptEnforcedEncryption: {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptGroupConnect:       {binding: BindPre, readonly: true, typ: "bool"},
-	SockOptMaxRexmitBW:        {binding: BindPost, readonly: true, typ: "int64"},
-
-	// New writable options
-	SockOptOverheadBW:   {binding: BindPost, readonly: false, typ: "int"},
-	SockOptMinInputBW:   {binding: BindPost, readonly: false, typ: "int64"},
-	SockOptSndDropDelay: {binding: BindPost, readonly: false, typ: "int"},
-	SockOptLossMaxTTL:   {binding: BindPost, readonly: false, typ: "int"},
-	SockOptSndSyn:       {binding: BindPost, readonly: false, typ: "bool"},
-	SockOptRcvSyn:       {binding: BindPost, readonly: false, typ: "bool"},
-	SockOptSndTimeo:     {binding: BindPost, readonly: false, typ: "time.Duration"},
-	SockOptRcvTimeo:     {binding: BindPost, readonly: false, typ: "time.Duration"},
+	SockOptMaxBW:              {BindPost, false},
+	SockOptPayloadSize:        {BindPre, true},
+	SockOptRcvLatency:         {BindPre, true},
+	SockOptSndLatency:         {BindPre, true},
+	SockOptState:              {BindPost, true},
+	SockOptPeerVersion:        {BindPost, true},
+	SockOptStreamID:           {BindPre, true},
+	SockOptMSS:                {BindPre, true},
+	SockOptFC:                 {BindPre, true},
+	SockOptInputBW:            {BindPost, false},
+	SockOptISN:                {BindPost, true},
+	SockOptPeerISN:            {BindPost, true},
+	SockOptSndKmState:         {BindPost, true},
+	SockOptRcvKmState:         {BindPost, true},
+	SockOptKmState:            {BindPost, true},
+	SockOptSndData:            {BindPost, true},
+	SockOptRcvData:            {BindPost, true},
+	SockOptSndBuf:             {BindPre, true},
+	SockOptRcvBuf:             {BindPre, true},
+	SockOptFlightSize:         {BindPost, true},
+	SockOptRTT:                {BindPost, true},
+	SockOptRTTVar:             {BindPost, true},
+	SockOptVersion:            {BindPost, true},
+	SockOptCongestion:         {BindPre, true},
+	SockOptTransType:          {BindPre, true},
+	SockOptMessageAPI:         {BindPre, true},
+	SockOptTSBPDMode:          {BindPre, true},
+	SockOptTLPktDrop:          {BindPre, true},
+	SockOptNAKReport:          {BindPre, true},
+	SockOptRetransmitAlgo:     {BindPre, true},
+	SockOptPBKeyLen:           {BindPre, true},
+	SockOptCryptoMode:         {BindPre, true},
+	SockOptPeerIdleTimeout:    {BindPre, true},
+	SockOptLinger:             {BindPost, false},
+	SockOptEvent:              {BindPost, true},
+	SockOptDriftTracer:        {BindPre, true},
+	SockOptPacketFilter:       {BindPre, true},
+	SockOptMinVersion:         {BindPre, true},
+	SockOptEnforcedEncryption: {BindPre, true},
+	SockOptGroupConnect:       {BindPre, true},
+	SockOptMaxRexmitBW:        {BindPost, true},
+	SockOptOverheadBW:         {BindPost, false},
+	SockOptMinInputBW:         {BindPost, false},
+	SockOptSndDropDelay:       {BindPost, false},
+	SockOptLossMaxTTL:         {BindPost, false},
+	SockOptSndSyn:             {BindPost, false},
+	SockOptRcvSyn:             {BindPost, false},
+	SockOptSndTimeo:           {BindPost, false},
+	SockOptRcvTimeo:           {BindPost, false},
 }
 
-// ConnState represents the state of an SRT connection.
-// Values start at 1.
+// ConnState represents the state of an SRT connection. Values start at 1.
 type ConnState int
 
 const (
-	StateInit       ConnState = 1 // initial, unbound
-	StateOpened     ConnState = 2 // bound but not listening/connecting
-	StateListening  ConnState = 3 // listening for connections
-	StateConnecting ConnState = 4 // connection in progress
-	StateConnected  ConnState = 5 // established
-	StateBroken     ConnState = 6 // broken (timeout, error)
-	StateClosing    ConnState = 7 // draining
-	StateClosed     ConnState = 8 // cleanly closed
-	StateNonExist   ConnState = 9 // socket removed
+	StateInit       ConnState = 1
+	StateOpened     ConnState = 2
+	StateListening  ConnState = 3
+	StateConnecting ConnState = 4
+	StateConnected  ConnState = 5
+	StateBroken     ConnState = 6
+	StateClosing    ConnState = 7
+	StateClosed     ConnState = 8
+	StateNonExist   ConnState = 9
 )
 
-// String returns a human-readable name for the connection state.
 func (s ConnState) String() string {
 	switch s {
 	case StateInit:
@@ -346,399 +186,241 @@ var ErrReadOnlyOption = errors.New("srt: socket option is read-only")
 // ErrPreConnectOnly is returned when trying to Set a pre-connect-only option on a live connection.
 var ErrPreConnectOnly = errors.New("srt: socket option can only be set before connecting")
 
-// GetOption retrieves the current value of a runtime socket option.
-// The returned value type depends on the option (see SockOpt documentation).
+// GetOption retrieves the current value of a socket option. The returned type
+// depends on the option (see the SockOpt constants).
 func (c *Conn) GetOption(opt SockOpt) (any, error) {
-	select {
-	case <-c.done:
-		// SockOptState is allowed even after close
-		if opt == SockOptState {
-			return c.connState(), nil
-		}
-		return nil, c.getShutdownErr()
-	default:
-	}
-
+	st, statsErr := c.s.Stats()
 	switch opt {
-	case SockOptMaxBW:
-		return c.sendCC.MaxBandwidth(), nil
-
-	case SockOptPayloadSize:
-		return c.payloadSize, nil
-
-	case SockOptRcvLatency:
-		return c.tsbpdDelay.Duration(), nil
-
-	case SockOptSndLatency:
-		return c.peerTsbpdDelay.Duration(), nil
-
 	case SockOptState:
-		return c.connState(), nil
-
-	case SockOptPeerVersion:
-		return c.peerSRTVersion, nil
-
-	case SockOptStreamID:
-		return c.streamID, nil
-
-	case SockOptMSS:
-		return c.payloadSize + headerOverhead, nil
-
-	case SockOptFC:
-		return c.fc, nil
-
-	case SockOptInputBW:
-		return c.inputRateBps.Load(), nil
-
-	case SockOptISN:
-		return c.sendISN.Value(), nil
-
-	case SockOptPeerISN:
-		return c.recvISN.Value(), nil
-
-	case SockOptSndKmState:
-		return c.sndKmState.Load(), nil
-
-	case SockOptRcvKmState:
-		return c.rcvKmState.Load(), nil
-
-	case SockOptKmState:
-		// For sender side, use sndKmState; for receiver side, use rcvKmState.
-		// By convention, server connections are typically receivers.
-		if c.isServer {
-			return c.rcvKmState.Load(), nil
+		if statsErr != nil {
+			return StateClosed, nil
 		}
-		return c.sndKmState.Load(), nil
-
-	case SockOptSndData:
-		return c.sendBuf.Size(), nil
-
-	case SockOptRcvData:
-		return c.recvBuf.Size(), nil
-
+		return StateConnected, nil
+	case SockOptStreamID:
+		return c.s.StreamID(), nil
+	case SockOptMaxBW:
+		return c.cfg.MaxBW, nil
+	case SockOptInputBW:
+		return c.cfg.InputBW, nil
+	case SockOptMinInputBW:
+		return c.cfg.MinInputBW, nil
+	case SockOptMaxRexmitBW:
+		return c.cfg.MaxRexmitBW, nil
+	case SockOptOverheadBW:
+		return c.cfg.OverheadBW, nil
+	case SockOptPayloadSize:
+		if c.cfg.PayloadSize > 0 {
+			return c.cfg.PayloadSize, nil
+		}
+		return c.cfg.MSS - 44, nil
+	case SockOptMSS:
+		return c.cfg.MSS, nil
 	case SockOptSndBuf:
-		return c.sendBuf.Capacity(), nil
-
+		return c.cfg.SendBufSize, nil
 	case SockOptRcvBuf:
-		return c.recvBuf.Capacity(), nil
-
-	case SockOptFlightSize:
-		return c.sendBuf.Size(), nil
-
-	case SockOptRTT:
-		return c.rtt.Load(), nil
-
-	case SockOptRTTVar:
-		return c.rttVar.Load(), nil
-
-	case SockOptVersion:
-		return handshake.SRTVersion, nil
-
+		return c.cfg.RecvBufSize, nil
+	case SockOptRcvLatency:
+		return c.cfg.RecvLatency, nil
+	case SockOptSndLatency:
+		return c.cfg.PeerLatency, nil
+	case SockOptPeerIdleTimeout:
+		return c.cfg.PeerIdleTimeout, nil
+	case SockOptLinger:
+		return c.cfg.Linger, nil
 	case SockOptCongestion:
-		return c.congestionType, nil
-
+		return string(c.cfg.Congestion), nil
 	case SockOptTransType:
-		if c.congestionType == "file" {
+		if c.cfg.Congestion == CongestionFile {
 			return TransTypeFile, nil
 		}
 		return TransTypeLive, nil
-
 	case SockOptMessageAPI:
-		return c.messageAPI, nil
-
+		return c.cfg.messageAPIEnabled(), nil
 	case SockOptTSBPDMode:
-		return c.tsbpdEnabled.Load(), nil
-
+		return c.cfg.tsbpdEnabled(), nil
 	case SockOptTLPktDrop:
-		return c.tlpktdropEnabled.Load(), nil
-
+		return c.cfg.tlpktdropEnabled(), nil
 	case SockOptNAKReport:
-		return c.periodicNAK, nil
-
+		return !c.cfg.nakReportOff(), nil
 	case SockOptRetransmitAlgo:
-		return c.retransmitAlgo, nil
-
-	case SockOptPBKeyLen:
-		if c.cryptoCtx != nil {
-			return c.cryptoCtx.KeyLength(), nil
-		}
-		return 0, nil
-
-	case SockOptCryptoMode:
-		if c.cryptoCtx != nil {
-			return int(c.cryptoCtx.Mode()), nil
-		}
-		return 0, nil
-
-	case SockOptPeerIdleTimeout:
-		return c.peerIdleTimeout, nil
-
-	case SockOptLinger:
-		return c.linger, nil
-
-	case SockOptEvent:
-		return c.pollEvents(), nil
-
+		return c.cfg.retransmitAlgo(), nil
 	case SockOptDriftTracer:
-		return c.driftTracer, nil
-
+		return c.cfg.driftTracerEnabled(), nil
 	case SockOptPacketFilter:
-		return c.packetFilter, nil
-
+		return c.cfg.PacketFilter, nil
 	case SockOptMinVersion:
-		return c.minVersion, nil
-
+		return c.cfg.MinVersion, nil
 	case SockOptEnforcedEncryption:
-		return c.enforcedEncryption, nil
-
+		return !c.cfg.enforcedEncryptionOff(), nil
 	case SockOptGroupConnect:
-		return c.groupConnect, nil
-
-	case SockOptMaxRexmitBW:
-		if c.rexmitShaper != nil {
-			return c.rexmitShaper.maxBytesPerSec, nil
-		}
-		return int64(0), nil
-
-	case SockOptOverheadBW:
-		return c.inputRateOverhead, nil
-
-	case SockOptMinInputBW:
-		return c.inputRateMinBW, nil
-
+		return c.cfg.GroupConnect, nil
 	case SockOptSndDropDelay:
-		return c.sndDropDelay, nil
-
+		return c.cfg.SndDropDelay, nil
 	case SockOptLossMaxTTL:
-		return int(c.lossMaxTTL.Load()), nil
-
+		return c.cfg.LossMaxTTL, nil
+	case SockOptCryptoMode:
+		return c.cfg.CryptoMode, nil
+	case SockOptPBKeyLen:
+		if c.cfg.Passphrase != "" {
+			return c.cfg.KeyLength, nil
+		}
+		return 0, nil
+	case SockOptVersion:
+		return uint32(handshake.SRTVersion), nil
 	case SockOptSndSyn:
-		return c.sndSynFlag.Load(), nil
-
+		return c.sndSyn, nil
 	case SockOptRcvSyn:
-		return c.rcvSynFlag.Load(), nil
-
+		return c.rcvSyn, nil
 	case SockOptSndTimeo:
-		ns := c.sndTimeout.Load()
-		return time.Duration(ns), nil
-
+		return c.sndTimeo, nil
 	case SockOptRcvTimeo:
-		ns := c.rcvTimeout.Load()
-		return time.Duration(ns), nil
-
-	default:
-		return nil, fmt.Errorf("%w: %d", ErrInvalidOption, opt)
+		return c.rcvTimeo, nil
+	case SockOptISN:
+		return c.s.SendISN(), nil
+	case SockOptPeerISN:
+		return c.s.RecvISN(), nil
+	case SockOptPeerVersion:
+		return c.s.PeerVersion(), nil
+	case SockOptEvent:
+		ev := 0
+		if c.s.ReadReady() {
+			ev |= EventIn
+		}
+		if c.s.WriteReady() {
+			ev |= EventOut
+		}
+		if !c.s.Alive() {
+			ev |= EventErr
+		}
+		return ev, nil
 	}
+
+	// Live values require a stats snapshot.
+	if statsErr != nil {
+		return nil, statsErr
+	}
+	switch opt {
+	case SockOptFC:
+		return st.FlowWindow, nil
+	case SockOptSndData:
+		return st.SendBufPackets, nil
+	case SockOptRcvData:
+		return st.RecvBufPackets, nil
+	case SockOptFlightSize:
+		return st.FlightSize, nil
+	case SockOptRTT:
+		return st.RTTMicros, nil
+	case SockOptRTTVar:
+		return st.RTTVarMicros, nil
+	case SockOptSndKmState:
+		return int32(st.SndKmState), nil
+	case SockOptRcvKmState:
+		return int32(st.RcvKmState), nil
+	case SockOptKmState:
+		if c.isServer {
+			return int32(st.RcvKmState), nil
+		}
+		return int32(st.SndKmState), nil
+	}
+	return nil, fmt.Errorf("%w: %d", ErrInvalidOption, opt)
 }
 
-// SetOption changes the value of a runtime socket option on a live connection.
-// Only certain options support runtime changes (see SockOpt documentation).
+// SetOption changes a writable socket option on a live connection. Read-only
+// options return ErrReadOnlyOption; unknown options return ErrInvalidOption.
+//
+// NOTE(cutover): the rate/CC knobs (MaxBW/InputBW/OverheadBW/MinInputBW/
+// SndDropDelay/LossMaxTTL) update the stored config so GetOption round-trips,
+// but runtime re-application to the running core is a follow-up (it needs a
+// loop control hook). Blocking modes and linger take effect immediately.
 func (c *Conn) SetOption(opt SockOpt, val any) error {
-	select {
-	case <-c.done:
-		return c.getShutdownErr()
-	default:
-	}
-
-	// Check metadata for read-only and binding restrictions
 	if meta, ok := optionTable[opt]; ok {
 		if meta.readonly {
 			return fmt.Errorf("%w: %d", ErrReadOnlyOption, opt)
 		}
+	} else {
+		return fmt.Errorf("%w: %d", ErrInvalidOption, opt)
 	}
 
 	switch opt {
 	case SockOptMaxBW:
-		bw, ok := val.(int64)
-		if !ok {
-			return fmt.Errorf("srt: SockOptMaxBW requires int64, got %T", val)
+		v, ok := val.(int64)
+		if !ok || v < 0 {
+			return fmt.Errorf("srt: SockOptMaxBW requires a non-negative int64, got %v", val)
 		}
-		if bw < 0 {
-			return fmt.Errorf("srt: SockOptMaxBW must be >= 0, got %d", bw)
-		}
-		if bw == 0 {
-			bw = DefaultMaxBW
-		}
-		c.sendCC.SetMaxBandwidth(bw)
-		return nil
-
+		c.cfg.MaxBW = v
+		c.s.SetMaxBW(v)
 	case SockOptInputBW:
-		bw, ok := val.(int64)
-		if !ok {
-			return fmt.Errorf("srt: SockOptInputBW requires int64, got %T", val)
+		v, ok := val.(int64)
+		if !ok || v < 0 {
+			return fmt.Errorf("srt: SockOptInputBW requires a non-negative int64, got %v", val)
 		}
-		if bw < 0 {
-			return fmt.Errorf("srt: SockOptInputBW must be >= 0, got %d", bw)
-		}
-		c.inputRateBps.Store(bw)
-		return nil
-
-	case SockOptOverheadBW:
-		pct, ok := val.(int)
-		if !ok {
-			return fmt.Errorf("srt: SockOptOverheadBW requires int, got %T", val)
-		}
-		if pct < 5 || pct > 100 {
-			return fmt.Errorf("srt: SockOptOverheadBW must be 5-100, got %d", pct)
-		}
-		c.inputRateOverhead = pct
-		c.sendCC.SetOverhead(pct)
-		return nil
-
+		c.cfg.InputBW = v
+		c.s.SetInputBW(v)
 	case SockOptMinInputBW:
-		bw, ok := val.(int64)
-		if !ok {
-			return fmt.Errorf("srt: SockOptMinInputBW requires int64, got %T", val)
+		v, ok := val.(int64)
+		if !ok || v < 0 {
+			return fmt.Errorf("srt: SockOptMinInputBW requires a non-negative int64, got %v", val)
 		}
-		if bw < 0 {
-			return fmt.Errorf("srt: SockOptMinInputBW must be >= 0, got %d", bw)
+		c.cfg.MinInputBW = v
+	case SockOptOverheadBW:
+		v, ok := val.(int)
+		if !ok || v < 5 || v > 100 {
+			return fmt.Errorf("srt: SockOptOverheadBW requires an int in 5..100, got %v", val)
 		}
-		c.inputRateMinBW = bw
-		return nil
-
+		c.cfg.OverheadBW = v
+		c.s.SetOverhead(v)
 	case SockOptSndDropDelay:
-		delay, ok := val.(int)
+		v, ok := val.(int)
 		if !ok {
-			return fmt.Errorf("srt: SockOptSndDropDelay requires int, got %T", val)
+			return fmt.Errorf("srt: SockOptSndDropDelay requires an int, got %v", val)
 		}
-		if delay < -1 {
-			delay = -1
-		}
-		c.sndDropDelay = delay
-		c.recomputeSendDropThresh()
-		return nil
-
+		c.cfg.SndDropDelay = v
+		c.s.SetSndDropDelay(v)
 	case SockOptLossMaxTTL:
-		ttl, ok := val.(int)
+		v, ok := val.(int)
+		if !ok || v < 0 {
+			return fmt.Errorf("srt: SockOptLossMaxTTL requires a non-negative int, got %v", val)
+		}
+		c.cfg.LossMaxTTL = v
+		c.s.SetReorderTolerance(v)
+	case SockOptLinger:
+		v, ok := val.(time.Duration)
 		if !ok {
-			return fmt.Errorf("srt: SockOptLossMaxTTL requires int, got %T", val)
+			return fmt.Errorf("srt: SockOptLinger requires a time.Duration, got %v", val)
 		}
-		if ttl < 0 {
-			ttl = 0
+		if v < 0 {
+			v = 0
 		}
-		c.lossMaxTTL.Store(int32(ttl))
-		return nil
-
+		c.cfg.Linger = v
+		c.s.SetLinger(v)
 	case SockOptSndSyn:
 		v, ok := val.(bool)
 		if !ok {
-			return fmt.Errorf("srt: SockOptSndSyn requires bool, got %T", val)
+			return fmt.Errorf("srt: SockOptSndSyn requires a bool, got %v", val)
 		}
-		c.sndSynFlag.Store(v)
-		return nil
-
+		c.sndSyn = v
+		c.s.SetWriteBlocking(v)
 	case SockOptRcvSyn:
 		v, ok := val.(bool)
 		if !ok {
-			return fmt.Errorf("srt: SockOptRcvSyn requires bool, got %T", val)
+			return fmt.Errorf("srt: SockOptRcvSyn requires a bool, got %v", val)
 		}
-		c.rcvSynFlag.Store(v)
-		return nil
-
-	case SockOptLinger:
-		d, ok := val.(time.Duration)
-		if !ok {
-			return fmt.Errorf("srt: SockOptLinger requires time.Duration, got %T", val)
-		}
-		if d < 0 {
-			d = 0
-		}
-		if d > MaxLinger {
-			d = MaxLinger
-		}
-		c.linger = d
-		return nil
-
+		c.rcvSyn = v
+		c.s.SetReadBlocking(v)
 	case SockOptSndTimeo:
-		d, ok := val.(time.Duration)
+		v, ok := val.(time.Duration)
 		if !ok {
-			return fmt.Errorf("srt: SockOptSndTimeo requires time.Duration, got %T", val)
+			return fmt.Errorf("srt: SockOptSndTimeo requires a time.Duration, got %v", val)
 		}
-		if d < 0 {
-			d = 0
-		}
-		c.sndTimeout.Store(int64(d))
-		return nil
-
+		c.sndTimeo = v
 	case SockOptRcvTimeo:
-		d, ok := val.(time.Duration)
+		v, ok := val.(time.Duration)
 		if !ok {
-			return fmt.Errorf("srt: SockOptRcvTimeo requires time.Duration, got %T", val)
+			return fmt.Errorf("srt: SockOptRcvTimeo requires a time.Duration, got %v", val)
 		}
-		if d < 0 {
-			d = 0
-		}
-		c.rcvTimeout.Store(int64(d))
-		return nil
-
+		c.rcvTimeo = v
 	default:
 		return fmt.Errorf("%w: %d", ErrInvalidOption, opt)
 	}
+	return nil
 }
-
-// pollEvents computes the current poll event flags.
-func (c *Conn) pollEvents() int {
-	var flags int
-
-	// Check for error/broken
-	select {
-	case <-c.done:
-		flags |= EventErr
-		return flags
-	default:
-	}
-
-	// Check for data available to read
-	if c.recvBuf.Size() > 0 {
-		flags |= EventIn
-	}
-
-	// Check for send buffer space
-	if c.sendBuf.Available() > 0 {
-		flags |= EventOut
-	}
-
-	return flags
-}
-
-// connState returns the current connection state.
-func (c *Conn) connState() ConnState {
-	select {
-	case <-c.done:
-		if err := c.getShutdownErr(); err != nil {
-			errMsg := err.Error()
-			if errMsg == "srt: connection timeout" ||
-				errMsg == "srt: connection broken" {
-				return StateBroken
-			}
-		}
-		return StateClosed
-	default:
-		return StateConnected
-	}
-}
-
-// recomputeSendDropThresh recalculates the sender drop threshold
-// from the current TSBPD delay and sndDropDelay values.
-func (c *Conn) recomputeSendDropThresh() {
-	if !c.tsbpdEnabled.Load() || c.sndDropDelay == -1 {
-		c.sendDropThresh = 0
-		return
-	}
-
-	peerDelay := c.peerTsbpdDelay
-	if peerDelay <= 0 {
-		peerDelay = c.tsbpdDelay
-	}
-
-	extraDelay := clock.Microseconds(c.sndDropDelay) * clock.Millisecond
-	thresh := peerDelay + extraDelay
-	if thresh < 1*clock.Second {
-		thresh = 1 * clock.Second
-	}
-	thresh += 20 * clock.Millisecond
-	c.sendDropThresh = thresh
-}
-
-// Ensure atomic.Bool satisfies what we need (compile-time check).
-var _ = (*atomic.Bool)(nil)

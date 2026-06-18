@@ -84,9 +84,9 @@ func (cc *LiveCC) PacketInterval() clock.Microseconds {
 }
 
 // OnACK processes an ACK from the receiver.
-func (cc *LiveCC) OnACK(ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
-	// Live mode doesn't adjust rate based on ACK, but we could
-	// use bandwidth estimation data here if needed.
+func (cc *LiveCC) OnACK(_ clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
+	// Live mode doesn't adjust rate based on ACK (and has no rate-control clock
+	// gate, so now is unused), but bandwidth estimation data could be used here.
 }
 
 // OnNAK processes a loss report from the receiver.

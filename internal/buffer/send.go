@@ -199,6 +199,22 @@ func (sb *SendBuffer) Size() int {
 	return sb.size
 }
 
+// OldestSentAt returns the send time of the oldest unacknowledged packet (the
+// head of the buffer), or zero if empty — used to report the send buffer age
+// (MsSndBuf).
+func (sb *SendBuffer) OldestSentAt() clock.Timestamp {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.size == 0 {
+		return 0
+	}
+	e := sb.entries[int(uint32(sb.startSeq))&sb.mask]
+	if !e.used {
+		return 0
+	}
+	return e.sentAt
+}
+
 // Capacity returns the total buffer capacity.
 func (sb *SendBuffer) Capacity() int {
 	return len(sb.entries)
@@ -310,6 +326,49 @@ func (sb *SendBuffer) GetAllUnacked() []packet.Packet {
 		s = s.Inc()
 	}
 	return pkts
+}
+
+// DropTooLateSend drops the contiguous run of packets at the head of the buffer
+// that the sender has given up retransmitting. A head packet is dropped when its
+// age (now - sentAt) exceeds the too-late threshold, or exceeds its own
+// per-message TTL (whichever deadline is smaller); dropping stops at the first
+// head packet still within its deadline. A thresh of 0 disables the age-based
+// drop, so only packets with an expired per-message TTL are dropped. Returns the
+// number dropped and the inclusive [first,last] dropped sequence range (the
+// range is meaningful only when dropped > 0). The caller reports the dropped
+// count to its stats and tells the peer to skip the range with a DROPREQ.
+func (sb *SendBuffer) DropTooLateSend(now clock.Timestamp, thresh clock.Microseconds) (dropped int, first, last seq.Number) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	first = sb.startSeq
+	for sb.size > 0 {
+		idx := int(uint32(sb.startSeq)) & sb.mask
+		e := &sb.entries[idx]
+		if !e.used {
+			break // defensive: head should be populated while size > 0
+		}
+		eff := int64(thresh)
+		if e.msgTTL > 0 {
+			ttlUs := e.msgTTL / 1000 // msgTTL is nanoseconds; ages are microseconds
+			if eff == 0 || ttlUs < eff {
+				eff = ttlUs
+			}
+		}
+		if eff <= 0 {
+			break // nothing to enforce for this packet
+		}
+		if int64(now)-int64(e.sentAt) <= eff {
+			break // head still within its deadline
+		}
+		last = sb.startSeq
+		e.pkt.Release()
+		*e = sendEntry{}
+		sb.size--
+		sb.startSeq = sb.startSeq.Inc()
+		dropped++
+	}
+	return dropped, first, last
 }
 
 // DropExpiredTTL drops packets whose per-message TTL has expired.

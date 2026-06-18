@@ -271,6 +271,7 @@ type FECReceiver struct {
 	colGroups  []rcvGroup // deque of column groups: [series0_col0..colN-1, series1_col0..colN-1, ...]
 	colSeries  int        // number of column series currently tracked
 	colBaseISN uint32     // ISN for computing column series offsets
+	colBaseOff []int      // staircase base offset of each column within a series (from colBaseISN)
 
 	cells    map[uint32]bool // received packet tracking
 	cellBase uint32          // lowest tracked seqno
@@ -306,11 +307,37 @@ func NewFECReceiver(cfg Config, payloadSize int, isn uint32) *FECReceiver {
 	// Initialize column groups if 2D
 	if cfg.Rows > 1 {
 		r.colBaseISN = isn
+		r.colBaseOff = columnBaseOffsets(cfg)
 		r.colGroups = make([]rcvGroup, 0, cfg.Cols*2)
 		r.extendColumnSeries(isn)
 	}
 
 	return r
+}
+
+// columnBaseOffsets returns the per-column base offset (from the series base)
+// for the configured layout. For the staircase layout each column starts on a
+// later row, so a column's members span across the matrix boundary — which the
+// series math in getColumnGroupIndex must account for. Mirrors the sender's
+// configureColumns and the receiver's extendColumnSeries.
+func columnBaseOffsets(cfg Config) []int {
+	offs := make([]int, cfg.Cols)
+	if cfg.Layout == LayoutEven {
+		for i := range offs {
+			offs[i] = i
+		}
+		return offs
+	}
+	offset := 0
+	for i := range offs {
+		offs[i] = offset
+		if i%cfg.Rows == cfg.Rows-1 {
+			offset = i + 1
+		} else {
+			offset += 1 + cfg.Cols
+		}
+	}
+	return offs
 }
 
 // extendColumnSeries appends a new column series starting at seriesBase.
@@ -477,6 +504,15 @@ func (r *FECReceiver) hangVerticalData(seqNo, timestamp uint32, encFlag uint8, p
 	}
 
 	g := &r.colGroups[colIdx]
+	// Only clip true members of this column group. With the staircase layout the
+	// column bases are staggered, so a packet whose (off % cols) matches the
+	// column index can still fall before the column's base (a "ramp-up" packet)
+	// or land off the column's stride; clipping it would corrupt the XOR and
+	// inflate collected, causing phantom recovery. The sender applies the same
+	// vertOff >= 0 guard when feeding columns.
+	if !r.isColumnMember(g, seqNo) {
+		return false
+	}
 	g.clipPacket(len(payload), encFlag, timestamp, payload)
 	g.collected++
 
@@ -584,6 +620,9 @@ func (r *FECReceiver) crossRebuildVertical(seqNo uint32, rp RecoveredPacket) {
 	}
 
 	g := &r.colGroups[colIdx]
+	if !r.isColumnMember(g, seqNo) {
+		return
+	}
 	g.clipPacket(len(rp.Payload), rp.EncFlag, rp.Timestamp, rp.Payload)
 	g.collected++
 
@@ -593,6 +632,15 @@ func (r *FECReceiver) crossRebuildVertical(seqNo uint32, rp RecoveredPacket) {
 			r.rebuild(g, uint32(lostSeq), groupVert)
 		}
 	}
+}
+
+// isColumnMember reports whether seqNo is a data member of column group g: it
+// must be at or after the column base and on the column's stride within the
+// sizeCol members. (Staircase columns are staggered, so off % cols matching the
+// column index is necessary but not sufficient.)
+func (r *FECReceiver) isColumnMember(g *rcvGroup, seqNo uint32) bool {
+	off := seqDiff(g.base, seqNo)
+	return off >= 0 && off%r.sizeRow() == 0 && off/r.sizeRow() < r.sizeCol()
 }
 
 // getRowGroupIndex returns the index into r.rowGroups for a given seqNo, or -1.
@@ -642,8 +690,15 @@ func (r *FECReceiver) getColumnGroupIndex(seqNo uint32) int {
 		return -1
 	}
 
-	// Compute which series this packet belongs to.
-	series := off / r.matrixSize()
+	// Compute which series this column belongs to, measured from the column's
+	// own staircase base offset (not the raw matrix offset): staircase columns
+	// are staggered and span the matrix boundary, so a later member can have a
+	// raw offset in the next matrix while still belonging to this column's series.
+	adj := off - r.colBaseOff[colIdx]
+	if adj < 0 {
+		return -1 // ramp-up packet: before this column's first base
+	}
+	series := adj / r.matrixSize()
 	if series < 0 {
 		return -1
 	}

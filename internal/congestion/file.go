@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/rand"
 	"sync"
-	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/packet"
@@ -36,8 +35,9 @@ type FileCC struct {
 	slowStart bool    // true during slow start phase
 
 	// ACK tracking
-	lastAck    uint32    // last ACK'd sequence number (initialized to ISN)
-	lastRCTime time.Time // last rate control time for 10ms gate
+	lastAck    uint32          // last ACK'd sequence number (initialized to ISN)
+	lastRCTime clock.Timestamp // last rate-control time for the 10ms gate
+	rcInit     bool            // lastRCTime has been seeded (lazily, on first ACK)
 
 	// Loss handling
 	loss          bool    // loss occurred since last rate increase
@@ -88,10 +88,11 @@ func NewFileCC(maxBW int64, packetSize int, fc int, isn uint32) *FileCC {
 		lastDecSeq:    seq.Number(isn).Dec().Dec().Value(), // ISN-2 (one before lastAck)
 		lastDecPeriod: fileCCInitialPeriod,
 		decRandom:     1,
-		lastRCTime:    time.Now(),
-		maxBW:         maxBW,
-		overhead:      DefaultOverhead,
-		packetSize:    packetSize,
+		// lastRCTime is seeded lazily on the first ACK (from the injected clock the
+		// caller passes to OnACK), so it matches whatever clock epoch is in use.
+		maxBW:      maxBW,
+		overhead:   DefaultOverhead,
+		packetSize: packetSize,
 	}
 	cc.probe.initProbeWindow(packetSize)
 	cc.delivery.initDeliveryWindow(packetSize)
@@ -110,10 +111,12 @@ func (cc *FileCC) PacketInterval() clock.Microseconds {
 	return clock.Microseconds(period)
 }
 
-// OnACK processes an ACK from the receiver.
-// In slow start: CWND grows by acked packet count, exits when CWND > maxCWND.
-// In congestion avoidance: adjusts CWND and sndPeriod based on delivery rate.
-func (cc *FileCC) OnACK(ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
+// OnACK processes an ACK from the receiver, using the injected clock (the host
+// loop's now) for the rate-control gate so rate control is a deterministic
+// function of its inputs. In slow start CWND grows by the acked packet count,
+// exiting when CWND > maxCWND; in congestion avoidance CWND and sndPeriod adjust
+// from the delivery rate.
+func (cc *FileCC) OnACK(now clock.Timestamp, ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint32, deliveryRate uint32) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
@@ -128,9 +131,15 @@ func (cc *FileCC) OnACK(ackSeqNo uint32, rtt clock.Microseconds, bandwidth uint3
 		cc.deliveryRate = float64(deliveryRate)
 	}
 
-	// Rate control interval gate: only adjust rates every 10ms.
-	now := time.Now()
-	if now.Sub(cc.lastRCTime).Microseconds() < fileCCRCInterval {
+	// Rate control interval gate: only adjust rates every 10ms. The first ACK
+	// seeds the baseline (in whatever clock epoch the caller uses) and is itself
+	// rate-limited, matching the prior construction-time seeding.
+	if !cc.rcInit {
+		cc.rcInit = true
+		cc.lastRCTime = now
+		return
+	}
+	if now.Sub(cc.lastRCTime) < clock.Microseconds(fileCCRCInterval) {
 		return
 	}
 	cc.lastRCTime = now

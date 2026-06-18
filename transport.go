@@ -2,42 +2,46 @@ package srt
 
 import (
 	"net"
+
+	"github.com/zsiec/srtgo/internal/session"
 )
 
-// DialPacketConn connects to an SRT listener using an existing PacketConn.
-// This enables custom transports (WebRTC DataChannels, QUIC, etc.)
-// instead of the default UDP socket created by Dial.
-//
-// The remoteAddr specifies the address of the SRT listener.
-// The caller is responsible for creating and managing the PacketConn lifetime
-// until the SRT connection is established; after that, closing the SRT Conn
-// will close the underlying PacketConn.
+// udpNetwork picks the UDP network for a local/remote address: udp4 for an IPv4
+// address, udp6 for IPv6, and the unspecified "udp" for a wildcard (nil IP) so
+// the OS chooses (typically dual-stack).
+func udpNetwork(a *net.UDPAddr) string {
+	if a == nil || a.IP == nil {
+		return "udp"
+	}
+	if a.IP.To4() != nil {
+		return "udp4"
+	}
+	return "udp6"
+}
+
+// DialPacketConn dials an SRT listener over a caller-supplied net.PacketConn
+// (e.g. a QUIC/WebRTC datagram channel) instead of a UDP socket. The session
+// takes ownership of conn.
 func DialPacketConn(conn net.PacketConn, remoteAddr net.Addr, cfg Config) (*Conn, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	return dial(conn, remoteAddr, cfg, nil)
+	s, err := session.Dial(conn, remoteAddr, cfg.dialConfig(), nil, cfg.ConnTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return newConn(s, cfg, false), nil
 }
 
-// ListenPacketConn creates an SRT listener on an existing PacketConn.
-// This enables custom transports (WebRTC DataChannels, QUIC, etc.)
-// instead of the default UDP socket created by Listen.
-//
-// The caller is responsible for creating and managing the PacketConn;
-// closing the Listener will close the underlying PacketConn.
+// ListenPacketConn creates an SRT listener over a caller-supplied
+// net.PacketConn instead of a UDP socket.
 func ListenPacketConn(conn net.PacketConn, cfg Config) (*Listener, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	return newListener(conn, cfg, nil)
-}
-
-// DialRendezvousPacketConn connects to a peer using rendezvous mode over
-// an existing PacketConn. Both peers call this with the other's address.
-// This enables custom transports instead of the default UDP socket.
-func DialRendezvousPacketConn(conn net.PacketConn, remoteAddr net.Addr, cfg Config) (*Conn, error) {
-	if err := cfg.validate(); err != nil {
+	sl, err := session.Listen(conn, cfg.listenerConfig(), nil)
+	if err != nil {
 		return nil, err
 	}
-	return dialRendezvous(conn, remoteAddr, cfg, nil)
+	return &Listener{l: sl, cfg: cfg}, nil
 }

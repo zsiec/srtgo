@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/zsiec/srtgo/internal/packet"
+	"github.com/zsiec/srtgo/internal/session"
 )
 
 // Rejection reasons for handshake failures.
@@ -58,20 +59,15 @@ const (
 	PeerErrorFileSystem uint32 = 4000
 )
 
-// RejectReason is a type alias for rejection codes used in AcceptRejectFunc.
+// RejectReason is a type alias for rejection codes used in accept gating.
 type RejectReason = packet.HandshakeType
-
-// AcceptRejectFunc is called for each incoming connection during the handshake.
-// It receives the connection request and returns a rejection reason.
-// Return 0 to accept the connection. Return any non-zero HandshakeType to reject
-// with that code (e.g., RejPeer, or user-defined codes >= RejUserDefined).
-type AcceptRejectFunc func(req ConnRequest) RejectReason
 
 // Sentinel errors for common conditions.
 var (
 	// ErrWouldBlock is returned when a non-blocking send or receive cannot complete
-	// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false).
-	ErrWouldBlock = errors.New("srt: operation would block")
+	// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false). It aliases the host's
+	// sentinel so the error returned by Read/Write matches under errors.Is.
+	ErrWouldBlock = session.ErrWouldBlock
 
 	// ErrGroupClosed is returned when operating on a closed Group.
 	ErrGroupClosed = errors.New("srt: group closed")
