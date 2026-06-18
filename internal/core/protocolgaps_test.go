@@ -84,6 +84,25 @@ func TestPeriodicNAKModeGating(t *testing.T) {
 	}
 }
 
+// TestNAKReportDisableLiveMode proves SRTO_NAKREPORT=false (DisableNAKReport)
+// suppresses periodic loss reporting even in live mode, where it is on by default.
+func TestNAKReportDisableLiveMode(t *testing.T) {
+	base := clock.Timestamp(1_000_000)
+	on := core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: 1200, SendISN: 100, RecvISN: 5000, MaxBW: 1 << 34, Live: true,
+	}, base)
+	if !armsNAKTimer(on) {
+		t.Fatal("live mode should arm the periodic-NAK timer by default")
+	}
+	off := core.NewEstablished(core.Config{
+		PeerSocketID: 1, PayloadSize: 1200, SendISN: 100, RecvISN: 5000, MaxBW: 1 << 34,
+		Live: true, DisableNAKReport: true,
+	}, base)
+	if armsNAKTimer(off) {
+		t.Fatal("DisableNAKReport should suppress the periodic-NAK timer in live mode")
+	}
+}
+
 // concludeFlags drives a caller through induction so it emits its CONCLUSION,
 // then returns the advertised SRT feature flags.
 func concludeFlags(t *testing.T, dc core.DialConfig) uint32 {

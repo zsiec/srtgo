@@ -50,16 +50,18 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
-		PeerSocketID:    peerID,
-		PayloadSize:     d.payloadSize,
-		SendISN:         d.isn,
-		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
-		FlowWindow:      fc,
-		BufferCapacity:  d.bufferCapacity,
-		MaxBW:           d.maxBW,
-		Live:            false, // HSv4: no TSBPD until the post-handshake HSREQ
-		Message:         true,  // UDT_DGRAM message framing
-		PeerIdleTimeout: d.peerIdleTimeout,
+		PeerSocketID:     peerID,
+		PayloadSize:      d.payloadSize,
+		SendISN:          d.isn,
+		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:       fc,
+		BufferCapacity:   d.bufferCapacity,
+		MaxBW:            d.maxBW,
+		Live:             false, // HSv4: no TSBPD until the post-handshake HSREQ
+		Message:          true,  // UDT_DGRAM message framing
+		DisableNAKReport: d.disableNAKReport,
+		PeerNakReport:    true, // HSv4 CONCLUSION carries no SRT flags; assume yes (EXP covers us)
+		PeerIdleTimeout:  d.peerIdleTimeout,
 	})
 
 	// Initiator (sender): advertise our SRT version/flags/latency so the peer can

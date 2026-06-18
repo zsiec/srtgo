@@ -18,19 +18,20 @@ type PeerID = string
 
 // ListenerConfig parameters accepted connections.
 type ListenerConfig struct {
-	RecvLatencyMS   uint16
-	SendLatencyMS   uint16
-	Congestion      string             // "live" or "file" (empty -> "live")
-	Live            bool               // TSBPD playout on accepted connections
-	Message         bool               // message-mode framing on accepted connections (ignored when Live)
-	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
-	SndDropDelay    int                // extra ms added to the sender drop threshold
-	LossMaxTTL      int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
-	PeerIdleTimeout clock.Microseconds // dead-peer timeout on accepted connections (0 = disabled)
-	MaxBW           int64
-	PayloadSize     int
-	BufferCapacity  int
-	Passphrase      string // if set, accept encrypted callers (unwrap their KMREQ)
+	RecvLatencyMS    uint16
+	SendLatencyMS    uint16
+	Congestion       string             // "live" or "file" (empty -> "live")
+	Live             bool               // TSBPD playout on accepted connections
+	Message          bool               // message-mode framing on accepted connections (ignored when Live)
+	TLPktDrop        bool               // sender-side too-late packet drop (ignored unless Live)
+	SndDropDelay     int                // extra ms added to the sender drop threshold
+	LossMaxTTL       int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
+	DisableNAKReport bool               // suppress periodic NAK in live mode (SRTO_NAKREPORT=false)
+	PeerIdleTimeout  clock.Microseconds // dead-peer timeout on accepted connections (0 = disabled)
+	MaxBW            int64
+	PayloadSize      int
+	BufferCapacity   int
+	Passphrase       string // if set, accept encrypted callers (unwrap their KMREQ)
 	// AllowUnencryptedFallback accepts a connection unencrypted on a crypto
 	// mismatch (passphrase set but caller offered none, or vice versa) instead of
 	// rejecting — the SRTO_ENFORCEDENCRYPTION=false behavior. A wrong passphrase
@@ -288,32 +289,41 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 
 	conn := &Conn{}
 	conn.establish(now, establishParams{
-		PeerSocketID:    hs.SRTSocketID,
-		PayloadSize:     l.cfg.PayloadSize,
-		SendISN:         a.isn,
-		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
-		FlowWindow:      int(a.fc),
-		BufferCapacity:  l.cfg.BufferCapacity,
-		MaxBW:           l.cfg.MaxBW,
-		Live:            l.cfg.Live,
-		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
-		Congestion:      l.cfg.Congestion,
-		Message:         l.cfg.Message,
-		TLPktDrop:       l.cfg.TLPktDrop,
-		SndDropDelay:    l.cfg.SndDropDelay,
-		LossMaxTTL:      l.cfg.LossMaxTTL,
-		PeerIdleTimeout: l.cfg.PeerIdleTimeout,
-		CryptoCtx:       cryptoCtx,
-		ActiveKey:       packet.EncryptionEven,
-		Passphrase:      l.cfg.Passphrase,
-		KMRefreshRate:   l.cfg.KMRefreshRate,
-		KMPreAnnounce:   l.cfg.KMPreAnnounce,
-		FilterConfig:    filterCfg,
+		PeerSocketID:     hs.SRTSocketID,
+		PayloadSize:      l.cfg.PayloadSize,
+		SendISN:          a.isn,
+		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:       int(a.fc),
+		BufferCapacity:   l.cfg.BufferCapacity,
+		MaxBW:            l.cfg.MaxBW,
+		Live:             l.cfg.Live,
+		TsbpdDelay:       clock.Microseconds(recvLat) * 1000,
+		Congestion:       l.cfg.Congestion,
+		Message:          l.cfg.Message,
+		TLPktDrop:        l.cfg.TLPktDrop,
+		SndDropDelay:     l.cfg.SndDropDelay,
+		LossMaxTTL:       l.cfg.LossMaxTTL,
+		DisableNAKReport: l.cfg.DisableNAKReport,
+		PeerNakReport:    peerNakReportFromHS(hs),
+		PeerIdleTimeout:  l.cfg.PeerIdleTimeout,
+		CryptoCtx:        cryptoCtx,
+		ActiveKey:        packet.EncryptionEven,
+		Passphrase:       l.cfg.Passphrase,
+		KMRefreshRate:    l.cfg.KMRefreshRate,
+		KMPreAnnounce:    l.cfg.KMPreAnnounce,
+		FilterConfig:     filterCfg,
 	})
 	l.events.push(Accepted{
 		Conn: conn, Peer: peer, SocketID: a.socketID, StreamID: hs.StreamID,
 		GroupID: a.groupID, GroupType: a.groupType, GroupWeight: a.groupWeight, SharedISN: a.isn,
 	})
+}
+
+// srtFlags computes the SRT feature flags this listener advertises in its
+// CONCLUSION response, reflecting its configuration (see srtFeatureFlags).
+func (l *Listener) srtFlags(encrypted bool) uint32 {
+	return srtFeatureFlags(l.cfg.Live, encrypted, l.cfg.TLPktDrop,
+		l.cfg.Congestion != "file" && !l.cfg.DisableNAKReport, !l.cfg.Live && !l.cfg.Message)
 }
 
 func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32) packet.Packet {
@@ -329,7 +339,7 @@ func (l *Listener) buildConclusionResponse(a acceptedConn, callerSocketID uint32
 		a.mss, a.fc,
 		callerSocketID,
 		a.recvLat, a.sendLat,
-		0, // srtFlags 0 -> handshake defaults
+		l.srtFlags(a.cryptoCtx != nil), // advertise our negotiated feature set
 		l.cfg.Congestion,
 		a.filterCfg, // echo negotiated FEC filter
 		0, 0, 0,     // no group

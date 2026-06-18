@@ -76,6 +76,11 @@ type Config struct {
 	// reports every gap immediately.
 	LossMaxTTL int
 
+	// DisableNAKReport turns off periodic loss reporting in live mode
+	// (SRTO_NAKREPORT=false). The default (false) keeps periodic NAK on in live
+	// mode; file mode never sends periodic NAKs regardless.
+	DisableNAKReport bool
+
 	// PeerIdleTimeout declares the peer dead (a Failed event) if no packet at all
 	// arrives for this long (SRTO_PEERIDLETIMEO). While it is set, the connection
 	// also emits periodic keepalives so an otherwise-idle peer stays alive. 0
@@ -150,7 +155,13 @@ type Conn struct {
 	tsbpdBaseSet bool         // time base initialized from the first data packet
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
 	messageMode  bool         // message-mode framing: fragment on send, reassemble on receive
-	periodicNAK  bool         // send periodic loss reports (live mode; off in file mode)
+	periodicNAK  bool         // send periodic loss reports (live mode; off in file mode / NAKREPORT=false)
+
+	// peerNakReport is whether the peer advertised periodic NAK reporting. When
+	// false the peer only NAKs reactively, so the RTO blind-retransmit (handleEXP)
+	// is the sole backstop for a lost reactive NAK — which it already provides
+	// unconditionally (a unified, more-robust FASTREXMIT/LATEREXMIT).
+	peerNakReport bool
 
 	// Reorder tolerance (SRTO_LOSSMAXTTL). A gap within reorderTolerance packets of
 	// the newest received packet is not NAKed immediately; deferredLoss holds those
@@ -309,6 +320,7 @@ type Stats struct {
 	PktSndPeriodMicros int64              // current inter-packet send period (microseconds)
 	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
 	DriftMicros        clock.Microseconds // TSBPD clock-drift correction (live mode; from ACKACK/keepalive)
+	PeerNakReport      bool               // peer advertised periodic NAK reporting in the handshake
 }
 
 // Stats returns a snapshot of the connection's counters and live levels. Call it
@@ -349,6 +361,7 @@ func (c *Conn) Stats() Stats {
 		RTTVarMicros:      int64(c.rttVar),
 		FlowWindow:        c.flowWindow,
 		NegotiatedLatency: c.negotiatedLatency,
+		PeerNakReport:     c.peerNakReport,
 	}
 	if c.sendBuf != nil {
 		s.FlightSize = c.sendBuf.Size()
@@ -384,27 +397,29 @@ type ackSlot struct {
 // into the connected state, whether built directly (NewEstablished) or produced
 // by a completed handshake (see handshake.go).
 type establishParams struct {
-	PeerSocketID    uint32
-	PayloadSize     int
-	SendISN         seq.Number
-	RecvISN         seq.Number
-	FlowWindow      int
-	BufferCapacity  int
-	MaxBW           int64
-	Live            bool
-	TsbpdDelay      clock.Microseconds
-	Congestion      string
-	Message         bool
-	TLPktDrop       bool
-	SndDropDelay    int
-	LossMaxTTL      int
-	PeerIdleTimeout clock.Microseconds
-	CryptoCtx       *crypto.Context
-	ActiveKey       packet.PacketEncryption
-	Passphrase      string
-	KMRefreshRate   uint64
-	KMPreAnnounce   uint64
-	FilterConfig    string
+	PeerSocketID     uint32
+	PayloadSize      int
+	SendISN          seq.Number
+	RecvISN          seq.Number
+	FlowWindow       int
+	BufferCapacity   int
+	MaxBW            int64
+	Live             bool
+	TsbpdDelay       clock.Microseconds
+	Congestion       string
+	Message          bool
+	TLPktDrop        bool
+	SndDropDelay     int
+	LossMaxTTL       int
+	DisableNAKReport bool // suppress periodic NAK in live mode (SRTO_NAKREPORT=false)
+	PeerNakReport    bool // the peer advertised periodic NAK reporting in its handshake
+	PeerIdleTimeout  clock.Microseconds
+	CryptoCtx        *crypto.Context
+	ActiveKey        packet.PacketEncryption
+	Passphrase       string
+	KMRefreshRate    uint64
+	KMPreAnnounce    uint64
+	FilterConfig     string
 }
 
 // NewEstablished builds a connection already in the connected state and arms
@@ -412,27 +427,29 @@ type establishParams struct {
 func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 	c := &Conn{}
 	c.establish(now, establishParams{
-		PeerSocketID:    cfg.PeerSocketID,
-		PayloadSize:     cfg.PayloadSize,
-		SendISN:         cfg.SendISN,
-		RecvISN:         cfg.RecvISN,
-		FlowWindow:      cfg.FlowWindow,
-		BufferCapacity:  cfg.BufferCapacity,
-		MaxBW:           cfg.MaxBW,
-		Live:            cfg.Live,
-		TsbpdDelay:      cfg.TsbpdDelay,
-		Congestion:      cfg.Congestion,
-		Message:         cfg.Message,
-		TLPktDrop:       cfg.TLPktDrop,
-		SndDropDelay:    cfg.SndDropDelay,
-		LossMaxTTL:      cfg.LossMaxTTL,
-		PeerIdleTimeout: cfg.PeerIdleTimeout,
-		CryptoCtx:       cfg.CryptoCtx,
-		ActiveKey:       cfg.ActiveKey,
-		Passphrase:      cfg.Passphrase,
-		KMRefreshRate:   cfg.KMRefreshRate,
-		KMPreAnnounce:   cfg.KMPreAnnounce,
-		FilterConfig:    cfg.FilterConfig,
+		PeerSocketID:     cfg.PeerSocketID,
+		PayloadSize:      cfg.PayloadSize,
+		SendISN:          cfg.SendISN,
+		RecvISN:          cfg.RecvISN,
+		FlowWindow:       cfg.FlowWindow,
+		BufferCapacity:   cfg.BufferCapacity,
+		MaxBW:            cfg.MaxBW,
+		Live:             cfg.Live,
+		TsbpdDelay:       cfg.TsbpdDelay,
+		Congestion:       cfg.Congestion,
+		Message:          cfg.Message,
+		TLPktDrop:        cfg.TLPktDrop,
+		SndDropDelay:     cfg.SndDropDelay,
+		LossMaxTTL:       cfg.LossMaxTTL,
+		DisableNAKReport: cfg.DisableNAKReport,
+		PeerNakReport:    true, // no handshake here; assume the peer reports (conservative)
+		PeerIdleTimeout:  cfg.PeerIdleTimeout,
+		CryptoCtx:        cfg.CryptoCtx,
+		ActiveKey:        cfg.ActiveKey,
+		Passphrase:       cfg.Passphrase,
+		KMRefreshRate:    cfg.KMRefreshRate,
+		KMPreAnnounce:    cfg.KMPreAnnounce,
+		FilterConfig:     cfg.FilterConfig,
 	})
 	return c
 }
@@ -525,7 +542,9 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	c.lastACKTime = now
 	// Periodic loss reporting is a live-mode feature; file mode relies on reactive
 	// (immediate) NAK plus the RTO blind-retransmit, so it suppresses periodic NAK.
-	c.periodicNAK = ep.Congestion != "file"
+	// SRTO_NAKREPORT=false also disables it in live mode.
+	c.periodicNAK = ep.Congestion != "file" && !ep.DisableNAKReport
+	c.peerNakReport = ep.PeerNakReport
 	if ep.LossMaxTTL > 0 {
 		c.reorderTolerance = ep.LossMaxTTL
 		c.deferredLoss = make(map[uint32]struct{})

@@ -71,15 +71,16 @@ type DialConfig struct {
 	AllowUnencryptedFallback bool
 
 	// Applied once the handshake completes.
-	PayloadSize     int                // data payload per packet (0 -> MSS-44)
-	BufferCapacity  int                // send/recv ring capacity (0 -> default)
-	MaxBW           int64              // max send bandwidth bytes/sec (0 -> LiveCC default)
-	Live            bool               // TSBPD playout (live mode)
-	Message         bool               // message-mode framing (file API; ignored when Live)
-	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
-	SndDropDelay    int                // extra ms added to the sender drop threshold
-	LossMaxTTL      int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
-	PeerIdleTimeout clock.Microseconds // dead-peer timeout (0 = disabled)
+	PayloadSize      int                // data payload per packet (0 -> MSS-44)
+	BufferCapacity   int                // send/recv ring capacity (0 -> default)
+	MaxBW            int64              // max send bandwidth bytes/sec (0 -> LiveCC default)
+	Live             bool               // TSBPD playout (live mode)
+	Message          bool               // message-mode framing (file API; ignored when Live)
+	TLPktDrop        bool               // sender-side too-late packet drop (ignored unless Live)
+	SndDropDelay     int                // extra ms added to the sender drop threshold
+	LossMaxTTL       int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
+	DisableNAKReport bool               // suppress periodic NAK in live mode (SRTO_NAKREPORT=false)
+	PeerIdleTimeout  clock.Microseconds // dead-peer timeout (0 = disabled)
 
 	// ForceHSv4 makes the caller use the legacy HSv4 handshake (UDT_DGRAM
 	// CONCLUSION + post-handshake HSREQ/HSRSP over UMSG_EXT) regardless of the
@@ -117,15 +118,16 @@ type dialState struct {
 	kmPreAnnounce      uint64
 	allowUnencFallback bool
 
-	payloadSize     int
-	bufferCapacity  int
-	maxBW           int64
-	live            bool
-	message         bool
-	tlPktDrop       bool
-	sndDropDelay    int
-	lossMaxTTL      int
-	peerIdleTimeout clock.Microseconds
+	payloadSize      int
+	bufferCapacity   int
+	maxBW            int64
+	live             bool
+	message          bool
+	tlPktDrop        bool
+	sndDropDelay     int
+	lossMaxTTL       int
+	disableNAKReport bool
+	peerIdleTimeout  clock.Microseconds
 
 	forceHSv4 bool // caller: force the legacy HSv4 handshake
 	hsv4      bool // caller: HSv4 negotiated (forced or peer answered v4)
@@ -184,6 +186,7 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			tlPktDrop:          dc.TLPktDrop,
 			sndDropDelay:       dc.SndDropDelay,
 			lossMaxTTL:         dc.LossMaxTTL,
+			disableNAKReport:   dc.DisableNAKReport,
 			peerIdleTimeout:    dc.PeerIdleTimeout,
 			forceHSv4:          dc.ForceHSv4,
 			groupID:            dc.GroupID,
@@ -230,29 +233,46 @@ func (c *Conn) sendConclusion(now clock.Timestamp) {
 	c.outputs.push(SetTimer{ID: TimerHandshake, Deadline: now.Add(handshakeRetryInterval)})
 }
 
-// srtFlags computes the SRT feature flags this caller advertises in its
-// CONCLUSION, reflecting the actual configuration rather than a fixed default:
+// srtFeatureFlags builds the SRT feature-flag word a side advertises in its
+// handshake, reflecting the actual configuration rather than a fixed default:
 // TSBPD in live mode, Crypt when encrypted, TLPKTDROP when enabled, periodic NAK
-// except in file mode, retransmit always, and the byte-stream flag for stream
-// mode (non-live, non-message).
-func (d *dialState) srtFlags() uint32 {
+// when periodicNAK, retransmit always, and the byte-stream flag for stream mode.
+func srtFeatureFlags(live, encrypted, tlPktDrop, periodicNAK, byteStream bool) uint32 {
 	f := packet.FlagRexmit
-	if d.live {
+	if live {
 		f |= packet.FlagTSBPDSend | packet.FlagTSBPDRecv
 	}
-	if d.cryptoCtx != nil {
+	if encrypted {
 		f |= packet.FlagCrypt
 	}
-	if d.tlPktDrop {
+	if tlPktDrop {
 		f |= packet.FlagTLPktDrop
 	}
-	if d.cong != "file" {
+	if periodicNAK {
 		f |= packet.FlagPeriodicNAK
 	}
-	if !d.live && !d.message {
+	if byteStream {
 		f |= packet.FlagStream
 	}
 	return f
+}
+
+// peerNakReportFromHS reports whether the peer's handshake advertises periodic
+// NAK reporting. Absent SRT extension flags (e.g. a pre-SRT/UDT peer) we assume
+// it does (the conservative default — the RTO blind-retransmit covers us either
+// way).
+func peerNakReportFromHS(hs *packet.CIFHandshake) bool {
+	if !hs.HasHS || hs.SRTHS == nil {
+		return true
+	}
+	return hs.SRTHS.SRTFlags&packet.FlagPeriodicNAK != 0
+}
+
+// srtFlags computes the SRT feature flags this caller advertises in its
+// CONCLUSION (see srtFeatureFlags).
+func (d *dialState) srtFlags() uint32 {
+	return srtFeatureFlags(d.live, d.cryptoCtx != nil, d.tlPktDrop,
+		d.cong != "file" && !d.disableNAKReport, !d.live && !d.message)
 }
 
 // handleHandshake dispatches a received handshake packet by current state.
@@ -366,27 +386,29 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
-		PeerSocketID:    hs.SRTSocketID,
-		PayloadSize:     d.payloadSize,
-		SendISN:         d.isn,
-		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
-		FlowWindow:      fc,
-		BufferCapacity:  d.bufferCapacity,
-		MaxBW:           d.maxBW,
-		Live:            d.live,
-		TsbpdDelay:      clock.Microseconds(recvLatMS) * 1000, // ms -> us
-		Congestion:      d.cong,
-		Message:         d.message,
-		TLPktDrop:       d.tlPktDrop,
-		SndDropDelay:    d.sndDropDelay,
-		LossMaxTTL:      d.lossMaxTTL,
-		PeerIdleTimeout: d.peerIdleTimeout,
-		CryptoCtx:       d.cryptoCtx,
-		ActiveKey:       packet.EncryptionEven,
-		Passphrase:      d.passphrase,
-		KMRefreshRate:   d.kmRefreshRate,
-		KMPreAnnounce:   d.kmPreAnnounce,
-		FilterConfig:    filterCfg,
+		PeerSocketID:     hs.SRTSocketID,
+		PayloadSize:      d.payloadSize,
+		SendISN:          d.isn,
+		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
+		FlowWindow:       fc,
+		BufferCapacity:   d.bufferCapacity,
+		MaxBW:            d.maxBW,
+		Live:             d.live,
+		TsbpdDelay:       clock.Microseconds(recvLatMS) * 1000, // ms -> us
+		Congestion:       d.cong,
+		Message:          d.message,
+		TLPktDrop:        d.tlPktDrop,
+		SndDropDelay:     d.sndDropDelay,
+		LossMaxTTL:       d.lossMaxTTL,
+		DisableNAKReport: d.disableNAKReport,
+		PeerNakReport:    peerNakReportFromHS(hs),
+		PeerIdleTimeout:  d.peerIdleTimeout,
+		CryptoCtx:        d.cryptoCtx,
+		ActiveKey:        packet.EncryptionEven,
+		Passphrase:       d.passphrase,
+		KMRefreshRate:    d.kmRefreshRate,
+		KMPreAnnounce:    d.kmPreAnnounce,
+		FilterConfig:     filterCfg,
 	})
 	c.dial = nil
 	c.events.push(Connected{PeerSocketID: hs.SRTSocketID})
