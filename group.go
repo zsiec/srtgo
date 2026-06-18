@@ -164,6 +164,18 @@ type MemberInfo struct {
 	RTT         time.Duration
 }
 
+// GroupMemberData reports the status of one member in a bonded connection group
+// (libsrt's SRT_MEMBER_STATUS). It is the element type of MsgCtrl.GroupData,
+// populated by Group.ReadMsgCtrl.
+type GroupMemberData struct {
+	// State is the backup state of this member (e.g. BackupActiveStable, Standby).
+	State BackupState
+	// Weight is the member's priority weight (higher = preferred for backup).
+	Weight uint16
+	// RTT is the member's current smoothed round-trip time.
+	RTT time.Duration
+}
+
 // Group manages multiple SRT connections for link redundancy.
 // It provides a unified Read/Write interface that dispatches
 // across member connections based on the group mode.
@@ -543,6 +555,25 @@ func (g *Group) Read(b []byte) (int, error) {
 			return n, nil
 		}
 	}
+}
+
+// ReadMsgCtrl reads the next message from the group (like Read) and, when mc is
+// non-nil, fills mc.GroupData with a snapshot of every member's status
+// (libsrt's SRT_MSGCTRL.grpdata).
+func (g *Group) ReadMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
+	n, err := g.Read(b)
+	if err != nil {
+		return n, err
+	}
+	if mc != nil {
+		members := g.Members()
+		gd := make([]GroupMemberData, len(members))
+		for i, m := range members {
+			gd[i] = GroupMemberData{State: m.BackupState, Weight: m.Weight, RTT: m.RTT}
+		}
+		mc.GroupData = gd
+	}
+	return n, nil
 }
 
 // Close closes all member connections and stops the group.

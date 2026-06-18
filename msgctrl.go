@@ -30,6 +30,8 @@ type MsgCtrl struct {
 	// MsgNo is the message number (read only).
 	MsgNo uint32
 
-	// GroupData (per-member status when reading from a bonded group) is added with
-	// the public Group API.
+	// GroupData carries per-member status when the message was read from a bonded
+	// group via Group.ReadMsgCtrl (libsrt's SRT_MSGCTRL.grpdata). It is nil for a
+	// plain Conn read.
+	GroupData []GroupMemberData
 }

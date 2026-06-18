@@ -180,6 +180,77 @@ func TestFacadeGroupBalancing(t *testing.T) {
 	}
 }
 
+// TestFacadeGroupReadMsgCtrl proves Group.ReadMsgCtrl populates MsgCtrl.GroupData
+// with per-member status (one entry per group member).
+func TestFacadeGroupReadMsgCtrl(t *testing.T) {
+	cfg := srt.DefaultConfig()
+	cfg.Latency = 20 * time.Millisecond
+	cfg.ConnTimeout = 3 * time.Second
+
+	ln, err := srt.Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	lg := srt.NewGroup(srt.GroupBroadcast)
+	defer lg.Close()
+	accErr := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			c, err := ln.Accept()
+			if err != nil {
+				accErr <- err
+				return
+			}
+			if err := lg.AddConn(c, i, uint16(100+i)); err != nil {
+				accErr <- err
+				return
+			}
+		}
+		accErr <- nil
+	}()
+
+	cg := srt.NewGroup(srt.GroupBroadcast)
+	defer cg.Close()
+	for i := 0; i < 2; i++ {
+		if err := cg.Connect(ln.Addr().String(), cfg, i, uint16(100+i)); err != nil {
+			t.Fatalf("Connect %d: %v", i, err)
+		}
+	}
+	if err := <-accErr; err != nil {
+		t.Fatalf("listener accept/bond: %v", err)
+	}
+
+	go func() {
+		for i := 0; i < 20; i++ {
+			p := make([]byte, 100)
+			binary.BigEndian.PutUint32(p, uint32(i))
+			if _, err := cg.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, 1000)
+	var mc srt.MsgCtrl
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout reading from group")
+		}
+		if _, err := lg.ReadMsgCtrl(buf, &mc); err != nil {
+			t.Fatalf("ReadMsgCtrl: %v", err)
+		}
+		if len(mc.GroupData) > 0 {
+			break // members bonded and reported
+		}
+	}
+	if len(mc.GroupData) != 2 {
+		t.Fatalf("GroupData has %d members, want 2", len(mc.GroupData))
+	}
+}
+
 // TestFacadeGroupBackup exercises a backup-mode group: the active (higher-weight)
 // link carries the stream and the listener group delivers the merged stream.
 func TestFacadeGroupBackup(t *testing.T) {
