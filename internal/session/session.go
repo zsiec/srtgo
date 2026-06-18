@@ -84,6 +84,8 @@ type Session struct {
 	connected chan error           // receives nil on Connected, err on Failed (dial)
 	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
 	ctrl      chan func()          // runtime control closures, run on the loop goroutine
+	readable  chan struct{}        // buffered(1): poked when data becomes available (Watcher)
+	writable  chan struct{}        // buffered(1): poked when send-buffer space opens (Watcher)
 	quit      chan struct{}        // closed by Close to ask the loop to stop
 	loopDone  chan struct{}        // closed by the loop on exit
 
@@ -148,6 +150,8 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		connected:  make(chan error, 1),
 		statsReq:   make(chan chan core.Stats),
 		ctrl:       make(chan func(), 8),
+		readable:   make(chan struct{}, 1),
+		writable:   make(chan struct{}, 1),
 		quit:       make(chan struct{}),
 		loopDone:   make(chan struct{}),
 		timers:     make(map[core.TimerID]clock.Timestamp),
@@ -572,6 +576,31 @@ func (s *Session) SendKeepAlive() { s.control(func() { s.core.SendKeepAlive(s.cl
 // CurrentSRTTimestamp returns the current SRT wire timestamp from the clock.
 func (s *Session) CurrentSRTTimestamp() uint32 { return s.clk.Now().SRTTimestamp() }
 
+// signal does a non-blocking poke of a buffered(1) readiness channel.
+func signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// Readable is signaled (buffered, edge-ish) when delivered data becomes
+// available; the Watcher selects on it. Use len(readC)>0 / a non-blocking Read
+// to confirm.
+func (s *Session) Readable() <-chan struct{} { return s.readable }
+
+// Writable is signaled when a send-buffer slot frees up (Watcher).
+func (s *Session) Writable() <-chan struct{} { return s.writable }
+
+// Done is closed when the event loop exits (peer close, failure, or Close).
+func (s *Session) Done() <-chan struct{} { return s.loopDone }
+
+// ReadReady reports whether a delivered message is buffered for Read.
+func (s *Session) ReadReady() bool { return len(s.readC) > 0 }
+
+// WriteReady reports whether a Write can proceed without blocking.
+func (s *Session) WriteReady() bool { return len(s.writeC) < cap(s.writeC) }
+
 // PeerGroupID returns the negotiated bonding group ID (0 if not a group member).
 func (s *Session) PeerGroupID() uint32 { return s.groupID }
 
@@ -675,6 +704,7 @@ func (s *Session) loop() {
 			now := s.clk.Now()
 			s.core.WriteMsg(now, req.payload, req.opts)
 			backlog = s.drain(now, timer, backlog)
+			signal(s.writable) // a write slot just freed
 
 		case <-timer.C:
 			now := s.clk.Now()
@@ -759,6 +789,7 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delive
 			default:
 				backlog = append(backlog, d)
 			}
+			signal(s.readable)
 		case core.Connected:
 			select {
 			case s.connected <- nil:

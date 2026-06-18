@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -195,6 +196,23 @@ func (c *Conn) groupIdle() bool { return c.s.GroupIdle() }
 
 // peerIdleTimeout returns the configured dead-peer timeout.
 func (c *Conn) peerIdleTimeout() time.Duration { return c.cfg.PeerIdleTimeout }
+
+// --- Watcher readiness primitives ---
+
+// registerWatch returns the read-ready and write-ready signal channels.
+func (c *Conn) registerWatch() (readCh, writeCh <-chan struct{}) {
+	return c.s.Readable(), c.s.Writable()
+}
+
+// unregisterWatch stops watching this connection (the readiness channels are
+// shared and need no per-watch teardown).
+func (c *Conn) unregisterWatch() {}
+
+// done returns a channel closed when the connection's loop exits.
+func (c *Conn) done() <-chan struct{} { return c.s.Done() }
+
+// getShutdownErr returns the error to report once the connection has closed.
+func (c *Conn) getShutdownErr() error { return io.EOF }
 
 // SendRate returns the send rate (packets/sec, bytes/sec) measured since the
 // previous SendRate call. The first call returns (0, 0).
