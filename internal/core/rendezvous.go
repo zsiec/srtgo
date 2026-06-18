@@ -209,6 +209,7 @@ type RendezvousConfig struct {
 	CryptoCtx  *crypto.Context
 	Passphrase string
 	KeyLength  int // AES key bytes (advertised PBKEYLEN); 0 -> 16
+	CryptoMode int // 0/1 -> AES-CTR, 2 -> AES-GCM
 }
 
 // rdvDial holds rendezvous handshake state until the connection establishes.

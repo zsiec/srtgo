@@ -100,10 +100,23 @@ func TestSessionRendezvousUDP(t *testing.T) {
 }
 
 // TestSessionRendezvousEncryptedUDP connects two rendezvous peers that share a
-// passphrase and streams encrypted data BOTH ways. It proves the rendezvous KM
-// exchange (initiator generates the key in a KMREQ; responder adopts it) brings
-// up a working AES-CTR link, regardless of which peer wins the cookie contest.
+// passphrase and streams encrypted data BOTH ways, for both AES-CTR and AES-GCM.
+// It proves the rendezvous KM exchange (initiator generates the key in a KMREQ;
+// responder adopts it) brings up a working encrypted link in each cipher mode,
+// regardless of which peer wins the cookie contest.
 func TestSessionRendezvousEncryptedUDP(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode int
+	}{
+		{"AES-CTR", 0},
+		{"AES-GCM", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testRendezvousEncrypted(t, tc.mode) })
+	}
+}
+
+func testRendezvousEncrypted(t *testing.T, cryptoMode int) {
 	const (
 		N          = 100
 		payloadLen = 1000
@@ -125,7 +138,7 @@ func TestSessionRendezvousEncryptedUDP(t *testing.T) {
 		return core.RendezvousConfig{
 			MSS: 1500, FC: 8192, RecvLatencyMS: 120, SendLatencyMS: 120,
 			PayloadSize: payloadLen, MaxBW: maxBW, Live: true,
-			Passphrase: pass, KeyLength: 16,
+			Passphrase: pass, KeyLength: 16, CryptoMode: cryptoMode,
 		}
 	}
 	go func() {

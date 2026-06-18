@@ -300,7 +300,11 @@ func DialRendezvous(conn net.PacketConn, remoteAddr net.Addr, rc core.Rendezvous
 		if keyLen == 0 {
 			keyLen = 16
 		}
-		ctx, err := crypto.NewWithMode(keyLen, crypto.CipherCTR)
+		mode := crypto.CipherCTR
+		if rc.CryptoMode == 2 {
+			mode = crypto.CipherGCM
+		}
+		ctx, err := crypto.NewWithMode(keyLen, mode)
 		if err != nil {
 			return nil, err
 		}

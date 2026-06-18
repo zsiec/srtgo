@@ -111,6 +111,7 @@ func (cfg *Config) rendezvousConfig() core.RendezvousConfig {
 		PeerIdleTimeout: cfg.peerIdleMicros(),
 		Passphrase:      cfg.Passphrase,
 		KeyLength:       cfg.KeyLength,
+		CryptoMode:      cfg.CryptoMode,
 	}
 }
 
