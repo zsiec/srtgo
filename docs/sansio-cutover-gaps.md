@@ -1,5 +1,9 @@
 # Pre-cutover gap audit
 
+> **Status: HISTORICAL — all gaps below are closed.** The cutover is complete and merged to
+> `main`; this audit is retained only as a record of what was addressed. Public-API parity with
+> the prior implementation was verified (symbol diff) and wire interop confirmed against libsrt.
+
 Exhaustive audit of the legacy public `srt.*` surface + behavior vs. the new
 Sans-I/O stack (`internal/core` + `internal/session`), done before swapping the
 public API. Bottom line: **the cutover is materially bigger than "swap and

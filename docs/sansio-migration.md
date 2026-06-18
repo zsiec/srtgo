@@ -1,8 +1,13 @@
 # Sans‑I/O migration plan
 
-Status: **in progress** (branch `sansio-migration`). This document is the backbone for a
-multi‑session refactor. Each phase ends with `make test` green so the migration can pause and
-resume safely.
+Status: **COMPLETE** — the migration landed on `main`: the legacy implementation is deleted and
+the public `srt.*` API is a thin façade over the pure `internal/core` + the `internal/session`
+host. This document is retained as a historical record of the plan; it is no longer a live work
+tracker. For the current architecture see the README's Architecture section and
+`internal/core/doc.go`.
+
+(Originally the backbone for a multi‑session refactor — each phase ended with `make test` green so
+the migration could pause and resume safely.)
 
 ## Goal
 

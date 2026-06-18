@@ -14,7 +14,7 @@ A pure Go implementation of the [SRT (Secure Reliable Transport)](https://datatr
 - **AES-128/192/256 encryption** with CTR and GCM cipher modes
 - **Forward Error Correction** (row + column XOR-based FEC)
 - **Rendezvous mode** for peer-to-peer NAT traversal connections
-- **Connection bonding** with broadcast and backup failover groups
+- **Connection bonding** with broadcast, backup-failover, and balancing groups
 - **`net.Conn` compatible** interface for drop-in use with existing Go code
 - **Zero external dependencies** -- stdlib only (plus `golang.org/x/crypto` for PBKDF2)
 - **Server framework** with publish/subscribe routing and graceful shutdown
@@ -213,7 +213,7 @@ The handshake uses a cookie contest to assign INITIATOR/RESPONDER roles automati
 
 ### Connection Bonding
 
-Groups manage multiple SRT connections for link redundancy. Two modes are supported:
+Groups manage multiple SRT connections for link redundancy. Three modes are supported:
 
 **Broadcast** sends every packet on all links. The receiver deduplicates by sequence number:
 
@@ -240,6 +240,18 @@ g.Write(payload) // sent on active link only; buffered for failover
 ```
 
 When the active link becomes unstable, the highest-weight standby is promoted and recent packets are replayed for seamless continuity.
+
+**Balancing** distributes messages across links round-robin (each link carries part of the stream, with its own independent sequence space so per-link loss recovery still works), and the receiver reassembles the original order:
+
+```go
+g := srt.NewGroup(srt.GroupBalancing)
+g.Connect("link1:4200", cfg, 1, 100)
+g.Connect("link2:4200", cfg, 2, 100)
+defer g.Close()
+
+g.Write(payload) // sent on one link, chosen round-robin
+n, err := g.Read(buf) // reordered across links
+```
 
 ### Server Framework
 
@@ -313,20 +325,27 @@ The `ConnStats` struct includes counters for packets, bytes, loss, retransmits, 
 
 ## Architecture
 
-Each SRT connection runs exactly 3 goroutines:
+srtgo uses a **Sans-I/O** design: all protocol logic lives in a pure, deterministic core that performs no I/O, and a thin host layer drives it.
 
-| Goroutine | Role |
-|-----------|------|
-| **recvLoop** | Reads packets from the UDP mux, processes control packets (ACK, NAK, keepalive), inserts data packets into the receive buffer |
-| **timerLoop** | 10ms ticker drives periodic events: Full ACK, periodic NAK, keepalive, TSBPD delivery, EXP timeout |
-| **application** | User calls `Read` / `Write` on the connection |
+- **`internal/core`** is the protocol state machine. It never touches a socket, reads a clock, or spawns a goroutine — time enters only as explicit arguments (`HandlePacket`, `HandleTimer`, `Write`) and side effects leave through pulled queues (`PollOutput` for packets/timers, `PollEvent` for connection events). This makes the entire protocol testable under simulated time, deterministically and without flakiness.
+- **`internal/session`** is the I/O host. It owns the UDP socket, the real clock, and the timer wheel, and runs the event loop that feeds packets and timer fires into the core and executes the effects it returns.
+- The public **`srt.*`** API is a thin façade over `internal/session`.
 
-All connections sharing a listener multiplex over a single UDP socket. Packets are dispatched by `DestinationSocketID` in a single read goroutine.
+Goroutines:
+
+| Goroutine | Scope | Role |
+|-----------|-------|------|
+| **session loop** | one per connection | Owns the core: pulls from the UDP mux, the write queue, and the timer; calls `HandlePacket`/`HandleTimer`/`Write`; drains the core's output (`SendPacket`/`SetTimer`/`ClearTimer`) and event queues |
+| **mux read loop** | one per UDP socket | Reads datagrams and dispatches them to connections by `DestinationSocketID` |
+
+Application `Read`/`Write` calls hand off to the session loop over channels, so user code never races the protocol core. All connections sharing a listener multiplex over a single UDP socket.
 
 ### Internal Package Layout
 
 | Package | Description |
 |---------|-------------|
+| `internal/core` | **Pure Sans-I/O protocol state machine**: handshake, ACK/NAK/ACKACK, RTO/EXP retransmit, TSBPD, congestion gating, encryption, FEC, and connection groups. Forbidden from importing `net`/`time` (enforced by a build gate). |
+| `internal/session` | **I/O host**: owns the socket, real clock, and timers; runs the per-connection event loop that drives the core; backs the public `srt.*` API. |
 | `internal/seq` | 31-bit wrapping sequence numbers with comparison and arithmetic |
 | `internal/clock` | Type-safe `Microseconds` / `Timestamp` types, `Clock` interface (real + mock for testing) |
 | `internal/packet` | Concrete `Packet` struct, SRT header marshal/unmarshal, CIF types for all control packets |
@@ -335,7 +354,7 @@ All connections sharing a listener multiplex over a single UDP socket. Packets a
 | `internal/buffer` | O(1) sequence-indexed send/receive ring buffers using power-of-2 bitmask |
 | `internal/tsbpd` | Timestamp-Based Packet Delivery with drift compensation and group synchronization |
 | `internal/congestion` | LiveCC (fixed-rate pacer) and FileCC (AIMD adaptive congestion control) |
-| `internal/handshake` | SYN cookie generation/validation, 4-step and rendezvous handshake builders |
+| `internal/handshake` | SYN cookie generation/validation, HSv5/HSv4 and rendezvous handshake builders |
 | `internal/filter` | FEC packet filter with row/column XOR encoding and recovery |
 
 ## Performance
@@ -348,12 +367,11 @@ Benchmarks on Apple M1 Pro (single core):
 | Header marshal | 2.4 ns | 0 allocs |
 | Sequence ops | ~2 ns | 0 allocs |
 | Clock ops | ~2 ns | 0 allocs |
-| Buffer push | 72 ns | 0 allocs |
+| Buffer push | 71 ns | 0 allocs |
 | Buffer ACK | 14 ns | 0 allocs |
-| Write throughput | 164 MB/s | 5 allocs/op |
-| Dial + Accept | 523 us | 146 allocs |
-| AES encrypt | 293 ns | 0 allocs |
-| Key wrap | 352 ns | 0 allocs |
+| Core send path | 396 ns | 3 allocs |
+| AES encrypt | 299 ns | 0 allocs |
+| Key wrap | 350 ns | 0 allocs |
 
 Hot-path allocations are minimized through `sync.Pool` for packet buffers and concrete types (no interfaces on hot paths).
 
@@ -404,27 +422,28 @@ Transfer complete
 go test -race -count=1 -timeout 120s ./...
 ```
 
-### Interop Tests
+### Interop
 
-The interop test suite validates srtgo against the C++ reference implementation (`srt-live-transmit`). Tests cover live and file modes, encryption, FEC, stream IDs, payload sizes, statistics, and more across both Go-to-C++ and C++-to-Go directions.
+srtgo is verified wire-compatible with the C++ reference implementation
+(libsrt's `srt-live-transmit`). The [`cmd/interop`](cmd/interop) harness streams a
+numbered/byte-exact payload over a real SRT connection and verifies it; pointing
+it at `srt-live-transmit` confirms plaintext, AES-CTR (128/256), AES-GCM (128/256),
+and FEC all interoperate byte-for-byte against libsrt 1.5.4+.
 
-Requires `srt-tools` to be installed:
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install srt-tools
-
-# macOS
-brew install srt
-```
-
-Run the interop tests:
+Requires `srt-tools` for the libsrt side:
 
 ```bash
-go test -tags interop -run TestInterop -v -count=1 -timeout 600s
+sudo apt-get install srt-tools   # Ubuntu/Debian
+brew install srt                 # macOS
 ```
 
-Interop tests run automatically in CI on both Ubuntu and macOS.
+```bash
+# build the harness, then e.g. stream from srtgo to a libsrt listener:
+go build -o /tmp/interop ./cmd/interop
+srt-live-transmit "srt://:4200?latency=1500" "file://con" > out.bin &
+/tmp/interop -mode dial -addr 127.0.0.1:4200 -raw -latency 1500 < in.bin
+# compare in.bin and out.bin
+```
 
 ### Benchmarks
 
