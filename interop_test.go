@@ -18,6 +18,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -54,33 +56,61 @@ type interopCase struct {
 	name string
 	url  string // extra srt:// query params (begins with &)
 	cfg  func(*srt.Config)
+	// minVer is the minimum libsrt version required; the case is skipped on older
+	// peers. AES-GCM (and the cryptomode URL param) is reliable only on 1.5.4+;
+	// older libsrt rejects the GCM KMREQ ("NOSECRET").
+	minVer [3]int
 }
 
 func interopCases() []interopCase {
 	return []interopCase{
-		{"plaintext", "", nil},
-		{"aes-ctr-128", "&passphrase=" + interopPass + "&pbkeylen=16", func(c *srt.Config) {
+		{name: "plaintext"},
+		{name: "aes-ctr-128", url: "&passphrase=" + interopPass + "&pbkeylen=16", cfg: func(c *srt.Config) {
 			c.Passphrase = interopPass
 			c.KeyLength = 16
 		}},
-		{"aes-ctr-256", "&passphrase=" + interopPass + "&pbkeylen=32", func(c *srt.Config) {
+		{name: "aes-ctr-256", url: "&passphrase=" + interopPass + "&pbkeylen=32", cfg: func(c *srt.Config) {
 			c.Passphrase = interopPass
 			c.KeyLength = 32
 		}},
-		{"aes-gcm-128", "&passphrase=" + interopPass + "&pbkeylen=16&cryptomode=2", func(c *srt.Config) {
+		{name: "aes-gcm-128", url: "&passphrase=" + interopPass + "&pbkeylen=16&cryptomode=2", minVer: [3]int{1, 5, 4}, cfg: func(c *srt.Config) {
 			c.Passphrase = interopPass
 			c.KeyLength = 16
 			c.CryptoMode = 2
 		}},
-		{"aes-gcm-256", "&passphrase=" + interopPass + "&pbkeylen=32&cryptomode=2", func(c *srt.Config) {
+		{name: "aes-gcm-256", url: "&passphrase=" + interopPass + "&pbkeylen=32&cryptomode=2", minVer: [3]int{1, 5, 4}, cfg: func(c *srt.Config) {
 			c.Passphrase = interopPass
 			c.KeyLength = 32
 			c.CryptoMode = 2
 		}},
-		{"fec-cols10-rows5", "&packetfilter=fec,cols:10,rows:5", func(c *srt.Config) {
+		{name: "fec-cols10-rows5", url: "&packetfilter=fec,cols:10,rows:5", cfg: func(c *srt.Config) {
 			c.PacketFilter = "fec,cols:10,rows:5"
 		}},
 	}
+}
+
+// libsrtVersion parses "SRT Library version: X.Y.Z" from `srt-live-transmit
+// -version`. ok is false if it can't be determined.
+func libsrtVersion(bin string) (v [3]int, ok bool) {
+	out, _ := exec.Command(bin, "-version").CombinedOutput()
+	m := regexp.MustCompile(`SRT Library version:\s*(\d+)\.(\d+)\.(\d+)`).FindSubmatch(out)
+	if m == nil {
+		return v, false
+	}
+	for i := 0; i < 3; i++ {
+		v[i], _ = strconv.Atoi(string(m[i+1]))
+	}
+	return v, true
+}
+
+// atLeast reports whether version v is >= want.
+func atLeast(v, want [3]int) bool {
+	for i := 0; i < 3; i++ {
+		if v[i] != want[i] {
+			return v[i] > want[i]
+		}
+	}
+	return true
 }
 
 // TestInterop streams from the new srtgo stack to a real libsrt receiver and
@@ -90,9 +120,19 @@ func TestInterop(t *testing.T) {
 	if err != nil {
 		t.Skip("srt-live-transmit not found; install srt-tools to run interop tests")
 	}
+	ver, verOK := libsrtVersion(bin)
+	if verOK {
+		t.Logf("libsrt version %d.%d.%d", ver[0], ver[1], ver[2])
+	} else {
+		t.Logf("libsrt version: unknown")
+	}
 	for _, tc := range interopCases() {
 		tc := tc
 		t.Run("go-to-libsrt/"+tc.name, func(t *testing.T) {
+			if tc.minVer != [3]int{} && (!verOK || !atLeast(ver, tc.minVer)) {
+				t.Skipf("needs libsrt >= %d.%d.%d (have %v); the older CI/apt libsrt lacks GCM/cryptomode support",
+					tc.minVer[0], tc.minVer[1], tc.minVer[2], ver)
+			}
 			goToLibsrt(t, bin, tc)
 		})
 	}
@@ -111,7 +151,7 @@ func goToLibsrt(t *testing.T, bin string, tc interopCase) {
 
 	// libsrt SRT listener -> stdout.
 	url := fmt.Sprintf("srt://:%d?latency=%d%s", port, interopLatency, tc.url)
-	cmd := exec.CommandContext(ctx, bin, "-q", "-t", "8", url, "file://con")
+	cmd := exec.CommandContext(ctx, bin, "-q", "-ll", "error", "-t", "8", url, "file://con")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
