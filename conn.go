@@ -3,11 +3,14 @@ package srt
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zsiec/srtgo/internal/clock"
 	"github.com/zsiec/srtgo/internal/core"
+	"github.com/zsiec/srtgo/internal/seq"
 	"github.com/zsiec/srtgo/internal/session"
+	"github.com/zsiec/srtgo/internal/tsbpd"
 )
 
 // Conn is an established SRT connection. It implements net.Conn (Read/Write/
@@ -25,6 +28,9 @@ type Conn struct {
 	rcvSyn   bool
 	sndTimeo time.Duration
 	rcvTimeo time.Duration
+
+	logger       Logger        // diagnostic logger (nil = disabled); also read by Group
+	groupSrcTime atomic.Uint32 // pinned group source timestamp (0 = none)
 
 	// SendRate sampling state.
 	rateMu sync.Mutex
@@ -54,6 +60,7 @@ func newConn(s *session.Session, cfg Config, isServer bool) *Conn {
 		rcvSyn:    cfg.rcvSynEnabled(),
 		startTime: time.Now(),
 		clearAt:   time.Now(),
+		logger:    cfg.Logger,
 	}
 	s.SetReadBlocking(c.rcvSyn)
 	s.SetWriteBlocking(c.sndSyn)
@@ -123,6 +130,72 @@ func (c *Conn) SetMaxBW(bw int64) {
 	c.s.SetMaxBW(bw)
 }
 
+// ---- group bonding primitives (used by Group for sequence/time-base sync) ----
+
+// PeerGroupID returns the negotiated bonding group ID (0 if not a group member).
+func (c *Conn) PeerGroupID() uint32 { return c.s.PeerGroupID() }
+
+// SchedSeqNo returns the next send sequence number the connection will assign.
+func (c *Conn) SchedSeqNo() seq.Number { return c.s.SchedSeqNo() }
+
+// OverrideSndSeqNo forces the next send sequence number (group sequence sync).
+func (c *Conn) OverrideSndSeqNo(nextSeq seq.Number) bool { return c.s.OverrideSndSeqNo(nextSeq) }
+
+// LastMsgNo returns the most recently assigned message number.
+func (c *Conn) LastMsgNo() uint32 { return c.s.LastMsgNo() }
+
+// RcvBufEmpty reports whether the receive buffer has no available packets.
+func (c *Conn) RcvBufEmpty() bool { return c.s.RcvBufEmpty() }
+
+// RcvBufStartSeq returns the first sequence number in the receive buffer.
+func (c *Conn) RcvBufStartSeq() seq.Number { return c.s.RcvBufStartSeq() }
+
+// ResetRecvState realigns the receiver to nextSeq (group failover).
+func (c *Conn) ResetRecvState(nextSeq seq.Number) { c.s.ResetRecvState(nextSeq) }
+
+// TSBPDTimeBase returns the TSBPD time base for group drift sync (nil if not live).
+func (c *Conn) TSBPDTimeBase() *tsbpd.GroupTimeBase { return c.s.TSBPDTimeBase() }
+
+// ApplyGroupDrift applies a group-wide drift correction.
+func (c *Conn) ApplyGroupDrift(tb tsbpd.GroupTimeBase) { c.s.ApplyGroupDrift(tb) }
+
+// ApplyGroupTime applies a group-wide time base.
+func (c *Conn) ApplyGroupTime(tb tsbpd.GroupTimeBase) { c.s.ApplyGroupTime(tb) }
+
+// SendKeepAlive emits a KEEPALIVE immediately (group idle-link liveness).
+func (c *Conn) SendKeepAlive() { c.s.SendKeepAlive() }
+
+// CurrentSRTTimestamp returns the current SRT wire timestamp.
+func (c *Conn) CurrentSRTTimestamp() uint32 { return c.s.CurrentSRTTimestamp() }
+
+// --- group bookkeeping internals (used by Group) ---
+
+// setGroupSrcTime pins a source timestamp applied to subsequent group writes so
+// every member stamps a message identically; clearGroupSrcTime unpins it.
+func (c *Conn) setGroupSrcTime(ts uint32) { c.groupSrcTime.Store(ts) }
+func (c *Conn) clearGroupSrcTime()        { c.groupSrcTime.Store(0) }
+
+// getRateEstimate / setRateEstimate use the configured max bandwidth as the
+// group's per-link rate estimate (matches the legacy behavior).
+func (c *Conn) getRateEstimate() int64 { return c.cfg.MaxBW }
+func (c *Conn) setRateEstimate(rate int64) {
+	if rate > 0 {
+		c.SetMaxBW(rate)
+	}
+}
+
+// isConnected reports whether the connection's loop is still running.
+func (c *Conn) isConnected() bool { return c.s.Alive() }
+
+// loadLastACKSeq returns the receiver's ACK point (group backup progress).
+func (c *Conn) loadLastACKSeq() seq.Number { return c.s.AckSeqNo() }
+
+// groupIdle reports whether the link is alive but idle (keepalive, no data).
+func (c *Conn) groupIdle() bool { return c.s.GroupIdle() }
+
+// peerIdleTimeout returns the configured dead-peer timeout.
+func (c *Conn) peerIdleTimeout() time.Duration { return c.cfg.PeerIdleTimeout }
+
 // SendRate returns the send rate (packets/sec, bytes/sec) measured since the
 // previous SendRate call. The first call returns (0, 0).
 func (c *Conn) SendRate() (pktPerSec int64, bytesPerSec int64) {
@@ -169,6 +242,11 @@ func (c *Conn) WriteMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
 		if mc.MsgTTL > 0 {
 			opts.TTL = clock.Microseconds(mc.MsgTTL.Microseconds())
 		}
+	}
+	// A pinned group source timestamp makes every member stamp the message
+	// identically (TSBPD consistency across links).
+	if gst := c.groupSrcTime.Load(); gst != 0 {
+		opts.SrcTime = gst
 	}
 	if err := c.s.WriteMsg(b, opts); err != nil {
 		return 0, err

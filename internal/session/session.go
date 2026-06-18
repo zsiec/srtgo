@@ -26,6 +26,7 @@ import (
 	"github.com/zsiec/srtgo/internal/mux"
 	"github.com/zsiec/srtgo/internal/packet"
 	"github.com/zsiec/srtgo/internal/seq"
+	"github.com/zsiec/srtgo/internal/tsbpd"
 )
 
 // ErrClosed is returned by Read/Write after the session is closed.
@@ -492,6 +493,111 @@ func (s *Session) SetOverhead(pct int) { s.control(func() { s.core.SetOverhead(p
 
 // SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
 func (s *Session) SetReorderTolerance(n int) { s.control(func() { s.core.SetReorderTolerance(n) }) }
+
+// onLoop runs fn on the loop goroutine and waits for it (so reads of core state
+// are race-free). Returns immediately if the loop has exited.
+func (s *Session) onLoop(fn func()) {
+	done := make(chan struct{})
+	select {
+	case s.ctrl <- func() { fn(); close(done) }:
+	case <-s.loopDone:
+		return
+	}
+	select {
+	case <-done:
+	case <-s.loopDone:
+	}
+}
+
+// ---- group bonding primitives (used by the bonded Group host) ----
+
+// SchedSeqNo returns the next send sequence number the core will assign.
+func (s *Session) SchedSeqNo() seq.Number {
+	var v seq.Number
+	s.onLoop(func() { v = s.core.SchedSeqNo() })
+	return v
+}
+
+// OverrideSndSeqNo forces the next send sequence number (group sequence sync).
+func (s *Session) OverrideSndSeqNo(n seq.Number) bool {
+	var ok bool
+	s.onLoop(func() { ok = s.core.OverrideSndSeqNo(n) })
+	return ok
+}
+
+// LastMsgNo returns the most recently assigned message number.
+func (s *Session) LastMsgNo() uint32 {
+	var v uint32
+	s.onLoop(func() { v = s.core.LastMsgNo() })
+	return v
+}
+
+// RcvBufEmpty reports whether the receive buffer has no available packets.
+func (s *Session) RcvBufEmpty() bool {
+	var v bool
+	s.onLoop(func() { v = s.core.RcvBufEmpty() })
+	return v
+}
+
+// RcvBufStartSeq returns the first sequence number in the receive buffer.
+func (s *Session) RcvBufStartSeq() seq.Number {
+	var v seq.Number
+	s.onLoop(func() { v = s.core.RcvBufStartSeq() })
+	return v
+}
+
+// ResetRecvState realigns the receiver to nextSeq (group failover).
+func (s *Session) ResetRecvState(n seq.Number) { s.control(func() { s.core.ResetRecvState(n) }) }
+
+// TSBPDTimeBase returns the TSBPD time base for group drift sync (nil if not live).
+func (s *Session) TSBPDTimeBase() *tsbpd.GroupTimeBase {
+	var v *tsbpd.GroupTimeBase
+	s.onLoop(func() { v = s.core.TSBPDTimeBase() })
+	return v
+}
+
+// ApplyGroupDrift applies a group-wide drift correction.
+func (s *Session) ApplyGroupDrift(tb tsbpd.GroupTimeBase) {
+	s.control(func() { s.core.ApplyGroupDrift(tb) })
+}
+
+// ApplyGroupTime applies a group-wide time base.
+func (s *Session) ApplyGroupTime(tb tsbpd.GroupTimeBase) {
+	s.control(func() { s.core.ApplyGroupTime(tb) })
+}
+
+// SendKeepAlive emits a KEEPALIVE immediately.
+func (s *Session) SendKeepAlive() { s.control(func() { s.core.SendKeepAlive(s.clk.Now()) }) }
+
+// CurrentSRTTimestamp returns the current SRT wire timestamp from the clock.
+func (s *Session) CurrentSRTTimestamp() uint32 { return s.clk.Now().SRTTimestamp() }
+
+// PeerGroupID returns the negotiated bonding group ID (0 if not a group member).
+func (s *Session) PeerGroupID() uint32 { return s.groupID }
+
+// GroupIdle reports whether the link is alive but idle (group backup monitor).
+func (s *Session) GroupIdle() bool {
+	var v bool
+	s.onLoop(func() { v = s.core.GroupIdle() })
+	return v
+}
+
+// AckSeqNo returns the receiver's current ACK point (group backup progress).
+func (s *Session) AckSeqNo() seq.Number {
+	var v seq.Number
+	s.onLoop(func() { v = s.core.AckSeqNo() })
+	return v
+}
+
+// Alive reports whether the event loop is still running.
+func (s *Session) Alive() bool {
+	select {
+	case <-s.loopDone:
+		return false
+	default:
+		return true
+	}
+}
 
 // SetLinger sets how long Close drains in-flight data before sending SHUTDOWN.
 // Zero (the default) closes immediately (still sending SHUTDOWN). Call before

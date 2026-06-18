@@ -156,6 +156,7 @@ type Conn struct {
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
 	messageMode  bool         // message-mode framing: fragment on send, reassemble on receive
 	periodicNAK  bool         // send periodic loss reports (live mode; off in file mode / NAKREPORT=false)
+	groupIdle    bool         // peer alive (keepalive) but no data flowing (group idle-link signal)
 
 	// peerNakReport is whether the peer advertised periodic NAK reporting. When
 	// false the peer only NAKs reactively, so the RTO blind-retransmit (handleEXP)
@@ -613,6 +614,92 @@ func (c *Conn) SetReorderTolerance(n int) {
 	}
 }
 
+// ---- group bonding primitives (driven by the host's group loop) ----
+
+// SchedSeqNo returns the next sequence number the sender will assign.
+func (c *Conn) SchedSeqNo() seq.Number {
+	if c.sendBuf == nil {
+		return 0
+	}
+	return c.sendBuf.NextSeq()
+}
+
+// OverrideSndSeqNo forces the next send sequence number (group sequence sync).
+func (c *Conn) OverrideSndSeqNo(nextSeq seq.Number) bool {
+	if c.sendBuf == nil {
+		return false
+	}
+	return c.sendBuf.OverrideNextSeq(nextSeq)
+}
+
+// LastMsgNo returns the most recently assigned message number.
+func (c *Conn) LastMsgNo() uint32 { return c.msgNumber }
+
+// GroupIdle reports whether the link is alive (last heard a keepalive) but has
+// no data flowing — used by the group's backup monitor.
+func (c *Conn) GroupIdle() bool { return c.groupIdle }
+
+// AckSeqNo returns the receiver's current ACK point (next-expected sequence),
+// a monotonic progress indicator for the group's backup health checks.
+func (c *Conn) AckSeqNo() seq.Number {
+	if c.recvBuf == nil {
+		return 0
+	}
+	return c.recvBuf.ACKSequence()
+}
+
+// RcvBufEmpty reports whether the receive buffer has no available packets.
+func (c *Conn) RcvBufEmpty() bool { return c.recvBuf == nil || c.recvBuf.IsEmpty() }
+
+// RcvBufStartSeq returns the first sequence number in the receive buffer.
+func (c *Conn) RcvBufStartSeq() seq.Number {
+	if c.recvBuf == nil {
+		return 0
+	}
+	return c.recvBuf.StartSeq()
+}
+
+// ResetRecvState realigns the receiver to nextSeq (group failover), dropping any
+// buffered data; the TSBPD time base is left intact.
+func (c *Conn) ResetRecvState(nextSeq seq.Number) {
+	if c.recvBuf != nil {
+		c.resetRecvTo(nextSeq)
+	}
+}
+
+// TSBPDTimeBase returns this connection's TSBPD time base for group drift sync,
+// or nil if not in live mode.
+func (c *Conn) TSBPDTimeBase() *tsbpd.GroupTimeBase {
+	if c.tsbpdTimer == nil {
+		return nil
+	}
+	tb := c.tsbpdTimer.GetInternalTimeBase()
+	return &tb
+}
+
+// ApplyGroupDrift applies a group-wide drift correction to the TSBPD timer.
+func (c *Conn) ApplyGroupDrift(tb tsbpd.GroupTimeBase) {
+	if c.tsbpdTimer != nil {
+		c.tsbpdTimer.ApplyGroupDrift(tb)
+	}
+}
+
+// ApplyGroupTime applies a group-wide time base to the TSBPD timer.
+func (c *Conn) ApplyGroupTime(tb tsbpd.GroupTimeBase) {
+	if c.tsbpdTimer != nil {
+		c.tsbpdTimer.ApplyGroupTime(tb, c.tsbpdTimer.Delay())
+	}
+}
+
+// SendKeepAlive emits a KEEPALIVE immediately (group idle-link liveness).
+func (c *Conn) SendKeepAlive(now clock.Timestamp) {
+	if c.closed {
+		return
+	}
+	p := packet.NewControl(nil, packet.CtrlTypeKeepalive, c.peerSocketID, c.wireTS(now))
+	c.outputs.push(SendPacket{Packet: p, Owned: true})
+}
+
 // PendingSend returns the number of unacknowledged packets in the send buffer.
 // The host uses it to linger on close until in-flight data has drained.
 func (c *Conn) PendingSend() int {
@@ -735,6 +822,7 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 		case packet.CtrlTypeKeepalive:
 			// Liveness, plus a TSBPD drift sample from the sender's clock (no RTT
 			// sample available here) — useful during data pauses when no ACKACKs flow.
+			c.groupIdle = true // alive but no data flowing (group idle-link signal)
 			if c.tsbpdTimer != nil {
 				c.tsbpdTimer.UpdateWrap(p.Header.Timestamp)
 				c.tsbpdTimer.OnACK(p.Header.Timestamp, now, -1)
@@ -1147,6 +1235,7 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	if !res.Inserted {
 		return // duplicate or belated
 	}
+	c.groupIdle = false // data is flowing again (clears the group idle-link signal)
 	// Reorder tolerance: a packet we were holding off NAKing has now arrived (it
 	// was merely reordered, not lost) — cancel its deferred loss report.
 	if c.deferredLoss != nil {
