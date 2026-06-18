@@ -25,6 +25,7 @@ type ListenerConfig struct {
 	Message         bool               // message-mode framing on accepted connections (ignored when Live)
 	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
 	SndDropDelay    int                // extra ms added to the sender drop threshold
+	LossMaxTTL      int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
 	PeerIdleTimeout clock.Microseconds // dead-peer timeout on accepted connections (0 = disabled)
 	MaxBW           int64
 	PayloadSize     int
@@ -300,6 +301,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		Message:         l.cfg.Message,
 		TLPktDrop:       l.cfg.TLPktDrop,
 		SndDropDelay:    l.cfg.SndDropDelay,
+		LossMaxTTL:      l.cfg.LossMaxTTL,
 		PeerIdleTimeout: l.cfg.PeerIdleTimeout,
 		CryptoCtx:       cryptoCtx,
 		ActiveKey:       packet.EncryptionEven,

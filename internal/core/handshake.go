@@ -78,6 +78,7 @@ type DialConfig struct {
 	Message         bool               // message-mode framing (file API; ignored when Live)
 	TLPktDrop       bool               // sender-side too-late packet drop (ignored unless Live)
 	SndDropDelay    int                // extra ms added to the sender drop threshold
+	LossMaxTTL      int                // reorder tolerance in packets (SRTO_LOSSMAXTTL; 0 = NAK gaps immediately)
 	PeerIdleTimeout clock.Microseconds // dead-peer timeout (0 = disabled)
 
 	// ForceHSv4 makes the caller use the legacy HSv4 handshake (UDT_DGRAM
@@ -123,6 +124,7 @@ type dialState struct {
 	message         bool
 	tlPktDrop       bool
 	sndDropDelay    int
+	lossMaxTTL      int
 	peerIdleTimeout clock.Microseconds
 
 	forceHSv4 bool // caller: force the legacy HSv4 handshake
@@ -181,6 +183,7 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			message:            dc.Message,
 			tlPktDrop:          dc.TLPktDrop,
 			sndDropDelay:       dc.SndDropDelay,
+			lossMaxTTL:         dc.LossMaxTTL,
 			peerIdleTimeout:    dc.PeerIdleTimeout,
 			forceHSv4:          dc.ForceHSv4,
 			groupID:            dc.GroupID,
@@ -376,6 +379,7 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		Message:         d.message,
 		TLPktDrop:       d.tlPktDrop,
 		SndDropDelay:    d.sndDropDelay,
+		LossMaxTTL:      d.lossMaxTTL,
 		PeerIdleTimeout: d.peerIdleTimeout,
 		CryptoCtx:       d.cryptoCtx,
 		ActiveKey:       packet.EncryptionEven,

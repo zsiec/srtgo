@@ -70,6 +70,12 @@ type Config struct {
 	// unless TLPktDrop.
 	SndDropDelay int
 
+	// LossMaxTTL (SRTO_LOSSMAXTTL) is the reorder tolerance in packets: a sequence
+	// gap within this many packets of the most recently received packet is not
+	// NAKed immediately, giving a reordered packet time to arrive. 0 (default)
+	// reports every gap immediately.
+	LossMaxTTL int
+
 	// PeerIdleTimeout declares the peer dead (a Failed event) if no packet at all
 	// arrives for this long (SRTO_PEERIDLETIMEO). While it is set, the connection
 	// also emits periodic keepalives so an otherwise-idle peer stays alive. 0
@@ -145,6 +151,13 @@ type Conn struct {
 	recvDropped  uint64       // packets dropped too-late (TSBPD)
 	messageMode  bool         // message-mode framing: fragment on send, reassemble on receive
 	periodicNAK  bool         // send periodic loss reports (live mode; off in file mode)
+
+	// Reorder tolerance (SRTO_LOSSMAXTTL). A gap within reorderTolerance packets of
+	// the newest received packet is not NAKed immediately; deferredLoss holds those
+	// still-missing seqnos until a reordered packet fills them or they fall beyond
+	// the tolerance and are reported. Zero tolerance => NAK every gap immediately.
+	reorderTolerance int
+	deferredLoss     map[uint32]struct{}
 
 	// Liveness (0 timeout = disabled). lastRecvTime feeds dead-peer detection;
 	// lastSentDataTime feeds the idle keepalive.
@@ -384,6 +397,7 @@ type establishParams struct {
 	Message         bool
 	TLPktDrop       bool
 	SndDropDelay    int
+	LossMaxTTL      int
 	PeerIdleTimeout clock.Microseconds
 	CryptoCtx       *crypto.Context
 	ActiveKey       packet.PacketEncryption
@@ -411,6 +425,7 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		Message:         cfg.Message,
 		TLPktDrop:       cfg.TLPktDrop,
 		SndDropDelay:    cfg.SndDropDelay,
+		LossMaxTTL:      cfg.LossMaxTTL,
 		PeerIdleTimeout: cfg.PeerIdleTimeout,
 		CryptoCtx:       cfg.CryptoCtx,
 		ActiveKey:       cfg.ActiveKey,
@@ -511,6 +526,10 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	// Periodic loss reporting is a live-mode feature; file mode relies on reactive
 	// (immediate) NAK plus the RTO blind-retransmit, so it suppresses periodic NAK.
 	c.periodicNAK = ep.Congestion != "file"
+	if ep.LossMaxTTL > 0 {
+		c.reorderTolerance = ep.LossMaxTTL
+		c.deferredLoss = make(map[uint32]struct{})
+	}
 	c.state = stateConnected
 	c.outputs.push(SetTimer{ID: TimerACK, Deadline: now.Add(synInterval)})
 	if c.periodicNAK {
@@ -1075,6 +1094,11 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	if !res.Inserted {
 		return // duplicate or belated
 	}
+	// Reorder tolerance: a packet we were holding off NAKing has now arrived (it
+	// was merely reordered, not lost) — cancel its deferred loss report.
+	if c.deferredLoss != nil {
+		delete(c.deferredLoss, p.Header.SequenceNumber)
+	}
 	c.rcvPktCount++
 	c.recvPackets++
 	c.recvBytes += uint64(len(p.Data))
@@ -1120,8 +1144,13 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		// Suppress SRT's own NAK when FEC is expected to recover the loss; FEC
 		// reports irrecoverable losses itself (lossReport) when ARQ=onreq.
 		if c.fecReceiver == nil || c.fecARQLevel == filter.ARQAlways {
-			c.sendImmediateNAK(now, res.GapStart, res.GapEnd)
+			c.reportGap(now, res.GapStart, res.GapEnd, p.Header.SequenceNumber)
 		}
+	}
+	// As the received frontier advances, NAK any deferred losses that have now
+	// fallen beyond the reorder window (they were real losses, not reordering).
+	if len(c.deferredLoss) > 0 {
+		c.flushDeferredLoss(now, p.Header.SequenceNumber)
 	}
 
 	// Lite ACK escalation: every liteACKPeriod*lightACKCount packets.
@@ -1417,6 +1446,55 @@ func (c *Conn) handleACKACK(now clock.Timestamp, p packet.Packet) {
 }
 
 // ---- NAK ----
+
+// reportGap reports a newly detected loss range [gapStart, gapEnd], frontier
+// being the just-received sequence number (gapEnd+1). With reorder tolerance
+// disabled it NAKs the whole gap immediately. Otherwise it NAKs the part already
+// beyond the reorder window and defers the last reorderTolerance sequence numbers
+// (closest to the frontier) — a reordered packet still has time to arrive before
+// they are reported as lost.
+func (c *Conn) reportGap(now clock.Timestamp, gapStart, gapEnd, frontier uint32) {
+	if c.reorderTolerance == 0 || c.deferredLoss == nil {
+		c.sendImmediateNAK(now, gapStart, gapEnd)
+		return
+	}
+	startN, endN := seq.Number(gapStart), seq.Number(gapEnd)
+	gapSize := int(startN.Distance(endN)) + 1
+	if gapSize <= c.reorderTolerance {
+		c.deferGap(startN, endN) // whole gap is within the reorder window
+		return
+	}
+	// Defer the last reorderTolerance sequence numbers; NAK everything before them.
+	deferStart := endN
+	for i := 0; i < c.reorderTolerance-1; i++ {
+		deferStart = deferStart.Dec()
+	}
+	c.sendImmediateNAK(now, gapStart, deferStart.Dec().Value())
+	c.deferGap(deferStart, endN)
+}
+
+// deferGap records the inclusive sequence range [start, end] as deferred losses.
+func (c *Conn) deferGap(start, end seq.Number) {
+	for s := start; ; s = s.Inc() {
+		c.deferredLoss[s.Value()] = struct{}{}
+		if s == end {
+			break
+		}
+	}
+}
+
+// flushDeferredLoss NAKs any deferred loss that has fallen more than
+// reorderTolerance packets behind the received frontier — it was a genuine loss,
+// not reordering, so report it now.
+func (c *Conn) flushDeferredLoss(now clock.Timestamp, frontier uint32) {
+	fr := seq.Number(frontier)
+	for s := range c.deferredLoss {
+		if int(seq.Number(s).Distance(fr)) > c.reorderTolerance {
+			c.sendImmediateNAK(now, s, s)
+			delete(c.deferredLoss, s)
+		}
+	}
+}
 
 func (c *Conn) sendImmediateNAK(now clock.Timestamp, gapStart, gapEnd uint32) {
 	s, end := seq.Number(gapStart), seq.Number(gapEnd)
