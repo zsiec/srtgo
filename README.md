@@ -422,15 +422,14 @@ Transfer complete
 go test -race -count=1 -timeout 120s ./...
 ```
 
-### Interop
+### Interop Tests
 
-srtgo is verified wire-compatible with the C++ reference implementation
-(libsrt's `srt-live-transmit`). The [`cmd/interop`](cmd/interop) harness streams a
-numbered/byte-exact payload over a real SRT connection and verifies it; pointing
-it at `srt-live-transmit` confirms plaintext, AES-CTR (128/256), AES-GCM (128/256),
-and FEC all interoperate byte-for-byte against libsrt 1.5.4+.
+The `interop`-tagged suite verifies srtgo is wire-compatible with the C++
+reference implementation (libsrt's `srt-live-transmit`): it streams a byte-exact
+payload from srtgo to a real libsrt receiver and checks it arrives intact, across
+plaintext, AES-CTR (128/256), AES-GCM (128/256), and FEC.
 
-Requires `srt-tools` for the libsrt side:
+Requires `srt-tools`:
 
 ```bash
 sudo apt-get install srt-tools   # Ubuntu/Debian
@@ -438,12 +437,12 @@ brew install srt                 # macOS
 ```
 
 ```bash
-# build the harness, then e.g. stream from srtgo to a libsrt listener:
-go build -o /tmp/interop ./cmd/interop
-srt-live-transmit "srt://:4200?latency=1500" "file://con" > out.bin &
-/tmp/interop -mode dial -addr 127.0.0.1:4200 -raw -latency 1500 < in.bin
-# compare in.bin and out.bin
+go test -tags interop -run TestInterop -v -count=1 -timeout 600s
 ```
+
+The suite skips automatically if `srt-live-transmit` is not on `PATH`, and runs in
+CI on Ubuntu and macOS. For ad-hoc/manual interop (FFmpeg, VLC, other SRT tools)
+there is also the [`cmd/interop`](cmd/interop) harness.
 
 ### Benchmarks
 
