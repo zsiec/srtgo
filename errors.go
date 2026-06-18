@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/zsiec/srtgo/internal/packet"
+	"github.com/zsiec/srtgo/internal/session"
 )
 
 // Rejection reasons for handshake failures.
@@ -64,8 +65,9 @@ type RejectReason = packet.HandshakeType
 // Sentinel errors for common conditions.
 var (
 	// ErrWouldBlock is returned when a non-blocking send or receive cannot complete
-	// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false).
-	ErrWouldBlock = errors.New("srt: operation would block")
+	// immediately (SRTO_SNDSYN=false or SRTO_RCVSYN=false). It aliases the host's
+	// sentinel so the error returned by Read/Write matches under errors.Is.
+	ErrWouldBlock = session.ErrWouldBlock
 
 	// ErrGroupClosed is returned when operating on a closed Group.
 	ErrGroupClosed = errors.New("srt: group closed")

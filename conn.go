@@ -16,17 +16,33 @@ import (
 type Conn struct {
 	s   *session.Session
 	cfg Config
+
+	// Runtime option state (GetOption/SetOption). cfg holds the configured/
+	// updated values; these track live blocking/timeout state and the role.
+	isServer bool
+	sndSyn   bool
+	rcvSyn   bool
+	sndTimeo time.Duration
+	rcvTimeo time.Duration
 }
 
 // newConn wraps an established session, applying the blocking-mode and linger
-// configuration the public Config selected.
-func newConn(s *session.Session, cfg Config) *Conn {
-	s.SetReadBlocking(cfg.rcvSynEnabled())
-	s.SetWriteBlocking(cfg.sndSynEnabled())
+// configuration the public Config selected. isServer marks accepted (listener-
+// side) connections.
+func newConn(s *session.Session, cfg Config, isServer bool) *Conn {
+	c := &Conn{
+		s:        s,
+		cfg:      cfg,
+		isServer: isServer,
+		sndSyn:   cfg.sndSynEnabled(),
+		rcvSyn:   cfg.rcvSynEnabled(),
+	}
+	s.SetReadBlocking(c.rcvSyn)
+	s.SetWriteBlocking(c.sndSyn)
 	if cfg.Linger > 0 {
 		s.SetLinger(cfg.Linger)
 	}
-	return &Conn{s: s, cfg: cfg}
+	return c
 }
 
 // Read reads the next available data into b (net.Conn semantics). In blocking

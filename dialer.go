@@ -28,5 +28,5 @@ func Dial(addr string, cfg Config) (*Conn, error) {
 		pc.Close()
 		return nil, err
 	}
-	return newConn(s, cfg), nil
+	return newConn(s, cfg, false), nil
 }

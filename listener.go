@@ -41,7 +41,7 @@ func (l *Listener) Accept() (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newConn(s, l.cfg), nil
+	return newConn(s, l.cfg, true), nil
 }
 
 // Close stops the listener and releases its socket.

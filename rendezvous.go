@@ -32,7 +32,7 @@ func DialRendezvous(localAddr, remoteAddr string, cfg Config) (*Conn, error) {
 		pc.Close()
 		return nil, err
 	}
-	return newConn(s, cfg), nil
+	return newConn(s, cfg, false), nil
 }
 
 // DialRendezvousPacketConn is DialRendezvous over a caller-supplied
@@ -45,5 +45,5 @@ func DialRendezvousPacketConn(conn net.PacketConn, remoteAddr net.Addr, cfg Conf
 	if err != nil {
 		return nil, err
 	}
-	return newConn(s, cfg), nil
+	return newConn(s, cfg, false), nil
 }

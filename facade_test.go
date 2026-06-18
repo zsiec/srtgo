@@ -269,6 +269,62 @@ func TestFacadeParseStreamID(t *testing.T) {
 	}
 }
 
+// TestFacadeSocketOptions exercises GetOption/SetOption: read-side values,
+// round-tripping writable options, blocking-mode changes, and error contracts.
+func TestFacadeSocketOptions(t *testing.T) {
+	cfg := srt.DefaultConfig()
+	cfg.StreamID = "opt/test"
+	caller, server, ln := dialAccept(t, srt.DefaultConfig(), cfg)
+	defer ln.Close()
+	defer caller.Close()
+	defer server.Close()
+
+	// Read-side.
+	if v, err := caller.GetOption(srt.SockOptState); err != nil || v.(srt.ConnState) != srt.StateConnected {
+		t.Errorf("GetOption(State) = %v, %v; want StateConnected", v, err)
+	}
+	if v, err := caller.GetOption(srt.SockOptStreamID); err != nil || v.(string) != "opt/test" {
+		t.Errorf("GetOption(StreamID) = %v, %v; want opt/test", v, err)
+	}
+	if v, err := caller.GetOption(srt.SockOptMSS); err != nil || v.(int) != cfg.MSS {
+		t.Errorf("GetOption(MSS) = %v, %v; want %d", v, err, cfg.MSS)
+	}
+	if v, err := caller.GetOption(srt.SockOptRTT); err != nil || v.(int64) < 0 {
+		t.Errorf("GetOption(RTT) = %v, %v; want >= 0 int64", v, err)
+	}
+
+	// Writable round-trip.
+	if err := caller.SetOption(srt.SockOptMaxBW, int64(5_000_000)); err != nil {
+		t.Fatalf("SetOption(MaxBW): %v", err)
+	}
+	if v, _ := caller.GetOption(srt.SockOptMaxBW); v.(int64) != 5_000_000 {
+		t.Errorf("GetOption(MaxBW) after set = %v, want 5000000", v)
+	}
+
+	// Blocking-mode change takes effect: non-blocking Read returns ErrWouldBlock.
+	if err := server.SetOption(srt.SockOptRcvSyn, false); err != nil {
+		t.Fatalf("SetOption(RcvSyn,false): %v", err)
+	}
+	if v, _ := server.GetOption(srt.SockOptRcvSyn); v.(bool) != false {
+		t.Errorf("GetOption(RcvSyn) = %v, want false", v)
+	}
+	buf := make([]byte, 100)
+	if _, err := server.Read(buf); !errors.Is(err, srt.ErrWouldBlock) {
+		t.Errorf("non-blocking Read = %v, want ErrWouldBlock", err)
+	}
+
+	// Error contracts.
+	if err := caller.SetOption(srt.SockOptMSS, 1316); !errors.Is(err, srt.ErrReadOnlyOption) {
+		t.Errorf("SetOption(MSS) = %v, want ErrReadOnlyOption", err)
+	}
+	if err := caller.SetOption(srt.SockOptMaxBW, "not-an-int64"); err == nil {
+		t.Error("SetOption(MaxBW, string) should error on type mismatch")
+	}
+	if _, err := caller.GetOption(srt.SockOpt(9999)); !errors.Is(err, srt.ErrInvalidOption) {
+		t.Errorf("GetOption(bogus) = %v, want ErrInvalidOption", err)
+	}
+}
+
 // TestFacadeMessageAPI proves WriteMessage/ReadMsgCtrl carry message boundaries
 // and metadata through the façade.
 func TestFacadeMessageAPI(t *testing.T) {

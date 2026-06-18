@@ -30,7 +30,7 @@ func DialPacketConn(conn net.PacketConn, remoteAddr net.Addr, cfg Config) (*Conn
 	if err != nil {
 		return nil, err
 	}
-	return newConn(s, cfg), nil
+	return newConn(s, cfg, false), nil
 }
 
 // ListenPacketConn creates an SRT listener over a caller-supplied
