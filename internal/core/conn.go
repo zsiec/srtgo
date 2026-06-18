@@ -537,6 +537,28 @@ func (c *Conn) Write(now clock.Timestamp, payload []byte) {
 	c.WriteMsg(now, payload, MsgOptions{InOrder: true})
 }
 
+// PendingSend returns the number of unacknowledged packets in the send buffer.
+// The host uses it to linger on close until in-flight data has drained.
+func (c *Conn) PendingSend() int {
+	if c.sendBuf == nil {
+		return 0
+	}
+	return c.sendBuf.Size()
+}
+
+// Shutdown emits a SHUTDOWN control packet telling the peer the connection is
+// closing (so its Read returns EOF promptly instead of waiting for an idle
+// timeout) and marks the connection closed. Idempotent.
+func (c *Conn) Shutdown(now clock.Timestamp) {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	p := packet.NewControl(nil, packet.CtrlTypeShutdown, c.peerSocketID, c.wireTS(now))
+	p.SetData([]byte{0, 0, 0, 0}) // libsrt requires a non-empty CIF
+	c.outputs.push(SendPacket{Packet: p, Owned: true})
+}
+
 // WriteMsg enqueues an application payload as one message with per-message
 // options (source timestamp override, in-order bit). In message mode a payload
 // larger than one packet is fragmented into PB_FIRST..PB_LAST sharing a single

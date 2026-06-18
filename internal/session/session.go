@@ -92,9 +92,12 @@ type Session struct {
 	rcvSyn        atomic.Bool  // true = blocking Read (default)
 	sndSyn        atomic.Bool  // true = blocking Write (default)
 
-	timers    map[core.TimerID]clock.Timestamp
-	closeOnce sync.Once
-	dead      bool // set on the loop goroutine when the core fails mid-stream
+	timers        map[core.TimerID]clock.Timestamp
+	closeOnce     sync.Once
+	dead          bool          // set on the loop goroutine when the core fails / the peer closes
+	linger        time.Duration // on Close, drain in-flight data up to this long before SHUTDOWN (0 = none)
+	closing       bool          // Close requested; the loop is flushing/draining before SHUTDOWN
+	closeDeadline time.Time     // linger cutoff once closing
 
 	// Group membership negotiated in the handshake (0 GroupID = not a member).
 	// Set at construction; read-only thereafter.
@@ -455,6 +458,11 @@ func (s *Session) SetDeadline(t time.Time) error {
 	return nil
 }
 
+// SetLinger sets how long Close drains in-flight data before sending SHUTDOWN.
+// Zero (the default) closes immediately (still sending SHUTDOWN). Call before
+// Close. Not safe to call concurrently with the event loop after Close begins.
+func (s *Session) SetLinger(d time.Duration) { s.linger = d }
+
 // SetReadBlocking sets blocking (SRTO_RCVSYN) for Read; non-blocking Read
 // returns ErrWouldBlock when no data is ready.
 func (s *Session) SetReadBlocking(blocking bool) { s.rcvSyn.Store(blocking) }
@@ -487,6 +495,7 @@ func (s *Session) loop() {
 	defer timer.Stop()
 
 	var backlog []delivery
+	quit := s.quit // nil'd once closing so the closed channel stops re-selecting
 
 	// Drain the effects the constructor queued (initial ACK/NAK timers).
 	backlog = s.drain(s.clk.Now(), timer, backlog)
@@ -496,10 +505,22 @@ func (s *Session) loop() {
 		if s.dead {
 			return // core failed mid-stream (e.g. peer idle timeout)
 		}
+		if s.closeFinished() {
+			// Drained (or lingered out): tell the peer and exit.
+			now := s.clk.Now()
+			s.core.Shutdown(now)
+			s.drain(now, timer, nil)
+			return
+		}
 
 		select {
-		case <-s.quit:
-			return
+		case <-quit:
+			// Begin graceful close: keep running so the loop flushes queued
+			// writes and drains in-flight data; closeFinished() ends it.
+			s.closing = true
+			s.closeDeadline = time.Now().Add(s.linger)
+			quit = nil
+			s.rearm(timer, s.clk.Now()) // ensure a wakeup to re-check drain state
 
 		case p, ok := <-s.recvC:
 			if !ok {
@@ -523,6 +544,26 @@ func (s *Session) loop() {
 			resp <- s.core.Stats()
 		}
 	}
+}
+
+// closeFinished reports whether a closing session has finished draining and
+// should send SHUTDOWN and exit: when queued writes are flushed and either the
+// send buffer is empty (or no linger was requested), or the linger deadline has
+// passed.
+func (s *Session) closeFinished() bool {
+	if !s.closing {
+		return false
+	}
+	if len(s.writeC) > 0 {
+		return false // always flush queued writes into the core first
+	}
+	if s.linger <= 0 {
+		return true // no linger: SHUTDOWN once the queued writes are sent
+	}
+	if s.core.PendingSend() == 0 {
+		return true // everything acknowledged
+	}
+	return time.Now().After(s.closeDeadline) // lingered out
 }
 
 // fireTimers delivers every timer whose deadline has passed to the core. The
@@ -587,7 +628,9 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delive
 			}
 			s.dead = true
 		case core.Closed:
-			// Peer closed; the loop exits on the next quit or EOF.
+			// Peer sent SHUTDOWN. Tear down the loop so Read drains any buffered
+			// deliveries and then returns io.EOF, and Write returns ErrClosed.
+			s.dead = true
 		}
 	}
 	s.rearm(timer, now)
