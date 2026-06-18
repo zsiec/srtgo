@@ -26,7 +26,7 @@ import (
 
 // SRT protocol constants
 const (
-	SRTVersion  uint32 = 0x010503 // SRT v1.5.3
+	SRTVersion  uint32 = 0x010504 // SRT v1.5.4 (implements the 1.5.4 AES-GCM nonce + GCM153 back-compat)
 	SRTMagic    uint16 = 0x4A17   // Magic number in listener INDUCTION response
 	UDTV4Marker uint16 = 2        // ExtensionField value for UDT v4 DGRAM
 )
