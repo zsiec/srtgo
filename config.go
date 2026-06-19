@@ -19,6 +19,7 @@ const (
 	DefaultOverheadBW      = 25                       // 25% overhead for retransmissions
 	DefaultConnTimeout     = 3 * time.Second          // handshake timeout
 	DefaultPeerIdleTimeout = 5 * time.Second          // peer inactivity timeout
+	DefaultLiveLinger      = 1 * time.Second          // live mode: flush send buffer up to 1s on Close
 	MaxLinger              = 180 * time.Second        // maximum linger duration (3 minutes)
 
 	DefaultKMRefreshRate = uint64(1 << 24) // 16.7M packets before key switch
@@ -144,9 +145,11 @@ type Config struct {
 	// Default: 3s.
 	ConnTimeout time.Duration
 
-	// Linger is the maximum time Close() will wait for the send buffer
-	// to drain before shutting down. Default: 0 (immediate close).
-	// Maximum: 3s.
+	// Linger is the maximum time Close() will wait for the send buffer to
+	// drain before sending SHUTDOWN. Zero (unset) selects the mode default:
+	// DefaultLiveLinger (1s) for live, 180s for file (lossless). A negative
+	// value disables lingering (prompt, lossy close). Values above MaxLinger
+	// (180s) are clamped.
 	Linger time.Duration
 
 	// PeerIdleTimeout is the duration of peer inactivity (no packets received)
@@ -421,9 +424,18 @@ func (cfg *Config) validate() error {
 		cfg.ConnTimeout = DefaultConnTimeout
 	}
 
-	// File mode defaults Linger to 180s
-	if cfg.Linger == 0 && cfg.Congestion == CongestionFile {
-		cfg.Linger = 180 * time.Second
+	// Linger defaults: an unset (zero) Linger selects a mode-appropriate value so
+	// that a Write() followed promptly by Close() does not silently drop the tail
+	// of the send buffer. File mode is lossless and drains for up to 180s; live
+	// mode flushes briefly (DefaultLiveLinger) to stay bounded for latency-
+	// sensitive teardown. A negative Linger opts out (prompt, lossy close); values
+	// above MaxLinger are clamped.
+	if cfg.Linger == 0 {
+		if cfg.Congestion == CongestionFile {
+			cfg.Linger = 180 * time.Second
+		} else {
+			cfg.Linger = DefaultLiveLinger
+		}
 	}
 	if cfg.Linger < 0 {
 		cfg.Linger = 0

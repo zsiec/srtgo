@@ -96,8 +96,10 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Close shuts the connection down. With a positive Linger it drains the send
-// buffer (up to Linger) before sending SHUTDOWN; otherwise it closes promptly.
+// Close shuts the connection down. With the default (or any positive) Linger it
+// drains the send buffer (up to Linger) before sending SHUTDOWN so a preceding
+// Write is delivered; a negative Config.Linger closes promptly and may drop the
+// undrained tail.
 func (c *Conn) Close() error {
 	c.statsMu.Lock()
 	if c.onStatsStop != nil {

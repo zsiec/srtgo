@@ -225,6 +225,10 @@ func testHSv4Encrypted(t *testing.T, cryptoMode, keyLen int) {
 				return
 			}
 		}
+		// Linger on Close so the encrypted replies flush to the caller before
+		// SHUTDOWN; without it the listener's defer Close() can race ahead of the
+		// still-draining send buffer and the caller's Read sees a mid-stream EOF.
+		s.SetLinger(2 * time.Second)
 		// Bidirectional: reply encrypted with the adopted key (keys are installed
 		// by now, since the inbound data above was gated until they were).
 		for i := 0; i < replyN; i++ {
