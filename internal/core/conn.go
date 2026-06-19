@@ -834,7 +834,26 @@ func (c *Conn) Shutdown(now clock.Timestamp) {
 // payloads upstream in the host). The core takes ownership of payload; packet
 // construction copies each fragment into a pooled buffer at send time.
 func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
+	c.writeMsg(now, payload, opts, false)
+}
+
+// WriteMsgOwned is WriteMsg where payload is a pooled send buffer (from
+// packet.GetSendBuffer) whose ownership transfers to the core. A single-packet
+// message takes the buffer over directly (zero extra copy) and returns it to the
+// pool on Release; a fragmented message falls back to copying and lets the
+// buffer be reclaimed by GC. The caller must not reuse payload after this call.
+func (c *Conn) WriteMsgOwned(now clock.Timestamp, payload []byte, opts MsgOptions) {
+	c.writeMsg(now, payload, opts, true)
+}
+
+func (c *Conn) writeMsg(now clock.Timestamp, payload []byte, opts MsgOptions, owned bool) {
 	if c.closed || c.state != stateConnected {
+		// Ownership was transferred (WriteMsgOwned) but the message is dropped
+		// before any frame/packet references it, so the pooled buffer is dead —
+		// return it to the pool instead of leaking it to GC.
+		if owned {
+			packet.PutSendBuffer(payload)
+		}
 		return
 	}
 	if opts.ForceMsgNo {
@@ -856,7 +875,7 @@ func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
 		// packet per Write and rejects oversize payloads at the public API, so it
 		// never fragments here. A zero srcTime defers to the live wire time at
 		// send, preserving the single-packet behavior of stamping at transmission.
-		c.sendQueue.push(frame{payload: payload, msgNo: msgNo, pos: packet.PositionSingle, order: opts.InOrder, srcTime: opts.SrcTime, ttlNs: ttlNs})
+		c.sendQueue.push(frame{payload: payload, msgNo: msgNo, pos: packet.PositionSingle, order: opts.InOrder, srcTime: opts.SrcTime, ttlNs: ttlNs, pooled: owned})
 		c.pump(now)
 		return
 	}
@@ -871,7 +890,12 @@ func (c *Conn) WriteMsg(now clock.Timestamp, payload []byte, opts MsgOptions) {
 
 	// Fragment into First/Middle/Last sharing msgNo. Each fragment is queued
 	// independently and sent under its own flow-control/pacing step; the receiver
-	// only delivers the message once every fragment has arrived.
+	// only delivers the message once every fragment has arrived. Fragments carry
+	// payload[off:end] sub-slices (pooled=false → NewData copies them at send
+	// time). If owned, the pooled buffer is intentionally left to GC here: it
+	// must NOT be returned to the pool after this loop, because pump may stall
+	// (flow-control/pacing) with fragment sub-slices of it still queued and not
+	// yet copied — recycling it then would be a use-after-recycle.
 	for off := 0; off < len(payload); off += ps {
 		end := off + ps
 		if end > len(payload) {
@@ -1069,6 +1093,7 @@ type frame struct {
 	order   bool
 	srcTime uint32
 	ttlNs   int64 // per-message TTL in nanoseconds (0 = none); tags the send buffer entry
+	pooled  bool  // payload is a pooled send buffer this packet may own (single-packet only)
 }
 
 // pump sends queued payloads while the flow-control window has room and pacing
@@ -1127,7 +1152,15 @@ func (c *Conn) sendOne(now clock.Timestamp, f frame) clock.Microseconds {
 // the group-coordinated send path (WriteCoordinated). The message number is
 // assigned by the caller (WriteMsg / WriteCoordinated) and carried on the frame.
 func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, f frame) {
-	p := packet.NewData(nil, seqNo.Value(), ts, c.peerSocketID, f.payload)
+	var p packet.Packet
+	if f.pooled && f.pos == packet.PositionSingle {
+		// Whole single-packet message backed by a pooled send buffer: take it over
+		// directly. pos==Single guarantees the buffer is not a fragment sub-slice,
+		// so no aliasing/double-free; Release returns it to the pool on ACK/drop.
+		p = packet.NewDataOwned(nil, seqNo.Value(), ts, c.peerSocketID, f.payload)
+	} else {
+		p = packet.NewData(nil, seqNo.Value(), ts, c.peerSocketID, f.payload)
+	}
 	p.Header.MessageNumber = f.msgNo
 	p.Header.PacketPosition = f.pos
 	p.Header.Order = f.order
@@ -1548,7 +1581,7 @@ func (c *Conn) deliverTSBPD(now clock.Timestamp) {
 // queues it as a DataReceived event (with its sequence number for bonding dedup
 // and per-message metadata), releasing the pooled packet buffer.
 func (c *Conn) emitData(p packet.Packet) {
-	data := make([]byte, len(p.Data))
+	data := getPayload(len(p.Data)) // pooled; returned by the reader after copy-out
 	copy(data, p.Data)
 	c.events.push(DataReceived{
 		Data:     data,

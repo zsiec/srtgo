@@ -60,6 +60,7 @@ type MsgMetadata struct {
 type writeReq struct {
 	payload []byte
 	opts    core.MsgOptions
+	pooled  bool // payload is a pooled send buffer (ownership transfers to the core)
 }
 
 // delivery is one received message handed from the loop to Read/ReadMsg.
@@ -375,23 +376,44 @@ func (s *Session) Write(p []byte) error {
 // override, in-order bit) — the send half of the public WriteMsgCtrl. Blocking
 // and deadline behavior matches Write.
 func (s *Session) WriteMsg(p []byte, opts core.MsgOptions) error {
-	cp := make([]byte, len(p))
-	copy(cp, p)
-	req := writeReq{payload: cp, opts: opts}
+	// Snapshot the caller's payload (it may be reused after Write returns). For a
+	// single-packet-sized payload the snapshot comes from the packet pool and its
+	// ownership transfers to the core, which hands it to the send buffer with no
+	// further copy (zero-copy send path). Larger payloads (which the core will
+	// fragment) use a plain allocation. On any path that does not reach the core,
+	// the pooled buffer is returned here.
+	var cp []byte
+	pooled := false
+	if len(p) <= packet.MaxPayloadSize {
+		cp = append(packet.GetSendBuffer(), p...)
+		pooled = true
+	} else {
+		cp = make([]byte, len(p))
+		copy(cp, p)
+	}
+	req := writeReq{payload: cp, opts: opts, pooled: pooled}
+	recycle := func() {
+		if pooled {
+			packet.PutSendBuffer(cp)
+		}
+	}
 
 	if !s.sndSyn.Load() {
 		select {
 		case s.writeC <- req:
 			return nil
 		case <-s.loopDone:
+			recycle()
 			return ErrClosed
 		default:
+			recycle()
 			return ErrWouldBlock
 		}
 	}
 
 	timeout, stop, expired := s.deadlineChan(&s.writeDeadline)
 	if expired {
+		recycle()
 		return ErrTimeout
 	}
 	if stop != nil {
@@ -401,8 +423,10 @@ func (s *Session) WriteMsg(p []byte, opts core.MsgOptions) error {
 	case s.writeC <- req:
 		return nil
 	case <-timeout:
+		recycle()
 		return ErrTimeout
 	case <-s.loopDone:
+		recycle()
 		return ErrClosed
 	}
 }
@@ -422,7 +446,9 @@ func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
 	if !s.rcvSyn.Load() {
 		select {
 		case d := <-s.readC:
-			return copy(b, d.data), d.meta, nil
+			n := copy(b, d.data)
+			core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
+			return n, d.meta, nil
 		case <-s.loopDone:
 			return s.drainRead(b)
 		default:
@@ -439,7 +465,9 @@ func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
 	}
 	select {
 	case d := <-s.readC:
-		return copy(b, d.data), d.meta, nil
+		n := copy(b, d.data)
+		core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
+		return n, d.meta, nil
 	case <-timeout:
 		return 0, MsgMetadata{}, ErrTimeout
 	case <-s.loopDone:
@@ -451,7 +479,9 @@ func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
 func (s *Session) drainRead(b []byte) (int, MsgMetadata, error) {
 	select {
 	case d := <-s.readC:
-		return copy(b, d.data), d.meta, nil
+		n := copy(b, d.data)
+		core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
+		return n, d.meta, nil
 	default:
 		return 0, MsgMetadata{}, io.EOF
 	}
@@ -744,7 +774,11 @@ func (s *Session) loop() {
 
 		case req := <-s.writeC:
 			now := s.clk.Now()
-			s.core.WriteMsg(now, req.payload, req.opts)
+			if req.pooled {
+				s.core.WriteMsgOwned(now, req.payload, req.opts) // transfer the pooled buffer
+			} else {
+				s.core.WriteMsg(now, req.payload, req.opts)
+			}
 			backlog = s.drain(now, timer, backlog)
 			signal(s.writable) // a write slot just freed
 

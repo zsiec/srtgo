@@ -345,7 +345,11 @@ func (g *Group) RouteMember(c *Conn) {
 			return
 		}
 		if d, ok := ev.(DataReceived); ok {
+			// filterDelivery deep-copies the payload, so the pooled emitData slice
+			// is dead once it returns and can be recycled here (the group loop
+			// owns this consumer; the slice never reaches the session readC).
 			g.filterDelivery(seq.Number(d.Seq), d.Data)
+			PutPayload(d.Data)
 		}
 	}
 }
