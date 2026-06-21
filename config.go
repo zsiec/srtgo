@@ -22,8 +22,8 @@ const (
 	DefaultLiveLinger      = 1 * time.Second          // live mode: flush send buffer up to 1s on Close
 	MaxLinger              = 180 * time.Second        // maximum linger duration (3 minutes)
 
-	DefaultKMRefreshRate = uint64(1 << 24) // 16.7M packets before key switch
-	DefaultKMPreAnnounce = uint64(1 << 16) // 64K packets before refresh to announce new key
+	DefaultKMRefreshRate = uint64(1 << 24) // 16.7M packets before key switch (libsrt HAICRYPT_DEF_KM_REFRESH_RATE)
+	DefaultKMPreAnnounce = uint64(1 << 12) // 4096 packets before refresh to announce new key (libsrt HAICRYPT_DEF_KM_PRE_ANNOUNCE)
 
 	MinMSS     = 76 // minimum MSS (IP header + UDP header + SRT header)
 	MaxMSS     = 1500

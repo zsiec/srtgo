@@ -155,17 +155,21 @@ func (cc *LiveCC) SetMaxBandwidth(bw int64) {
 	cc.atomicMaxBW.Store(bw)
 }
 
-// UpdateBandwidth updates bandwidth.
-// If maxBW > 0 (explicit SRTO_MAXBW), use it directly with no overhead.
-// If maxBW == 0 and inputBW > 0, use inputBW (caller should apply overhead).
-// If both are 0, no change.
+// UpdateBandwidth updates the pacing bandwidth, matching libsrt's
+// updateBandwidth(maxbw, bw): an explicit SRTO_MAXBW is used verbatim; otherwise
+// the estimated/declared input rate is scaled by the overhead headroom
+// (SRTO_OHEADBW, default 25%) — inputBW * (1 + oheadbw/100) — so retransmissions
+// have bandwidth above the media rate. Both 0 leaves the rate unchanged.
 func (cc *LiveCC) UpdateBandwidth(maxBW, inputBW int64) {
 	if maxBW > 0 {
 		cc.atomicMaxBW.Store(maxBW)
 		return
 	}
 	if inputBW > 0 {
-		cc.atomicMaxBW.Store(inputBW)
+		cc.mu.Lock()
+		ohead := cc.overhead
+		cc.mu.Unlock()
+		cc.atomicMaxBW.Store(inputBW * int64(100+ohead) / 100)
 	}
 }
 

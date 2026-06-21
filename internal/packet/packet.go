@@ -377,27 +377,31 @@ func (c *CIFShutdown) UnmarshalCIF([]byte) error   { return nil }
 
 // ---- Drop Request CIF ----
 
-// CIFDropReq represents a Drop Request Control Information Field.
+// CIFDropReq represents a Drop Request Control Information Field: the inclusive
+// sequence range [FirstSeqNo, LastSeqNo] the sender has abandoned. The CIF body
+// is exactly two 32-bit words, matching libsrt's UMSG_DROPREQ wire layout
+// (pack(UMSG_DROPREQ, &msgno, seqpair, 8) — an 8-byte [first, last] body). The
+// dropped message number is NOT in the CIF; it travels in the control header's
+// type-specific word (see Conn.emitDropReq), so a 12-byte body with msgno first
+// — as an earlier version of this codec produced — corrupts the range against a
+// real libsrt peer (it would read msgno as firstSeq).
 type CIFDropReq struct {
-	MsgID      uint32
 	FirstSeqNo uint32
 	LastSeqNo  uint32
 }
 
 func (c *CIFDropReq) MarshalCIF() ([]byte, error) {
-	buf := make([]byte, 12)
-	binary.BigEndian.PutUint32(buf[0:], c.MsgID)
-	binary.BigEndian.PutUint32(buf[4:], c.FirstSeqNo)
-	binary.BigEndian.PutUint32(buf[8:], c.LastSeqNo)
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint32(buf[0:], c.FirstSeqNo)
+	binary.BigEndian.PutUint32(buf[4:], c.LastSeqNo)
 	return buf, nil
 }
 
 func (c *CIFDropReq) UnmarshalCIF(data []byte) error {
-	if len(data) < 12 {
+	if len(data) < 8 {
 		return fmt.Errorf("packet: DropReq CIF too short (%d bytes)", len(data))
 	}
-	c.MsgID = binary.BigEndian.Uint32(data[0:])
-	c.FirstSeqNo = binary.BigEndian.Uint32(data[4:])
-	c.LastSeqNo = binary.BigEndian.Uint32(data[8:])
+	c.FirstSeqNo = binary.BigEndian.Uint32(data[0:])
+	c.LastSeqNo = binary.BigEndian.Uint32(data[4:])
 	return nil
 }

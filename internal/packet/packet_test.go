@@ -737,7 +737,6 @@ func TestCIFHandshakeExtensionFieldBitmask(t *testing.T) {
 
 func TestCIFDropReqRoundtrip(t *testing.T) {
 	original := &CIFDropReq{
-		MsgID:      42,
 		FirstSeqNo: 1000,
 		LastSeqNo:  1005,
 	}
@@ -746,13 +745,20 @@ func TestCIFDropReqRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalCIF failed: %v", err)
 	}
+	// libsrt wire layout: an 8-byte [firstSeq, lastSeq] body, no message number.
+	if len(data) != 8 {
+		t.Fatalf("DropReq CIF = %d bytes, want 8 (libsrt seqpair layout)", len(data))
+	}
+	if binary.BigEndian.Uint32(data[0:]) != 1000 || binary.BigEndian.Uint32(data[4:]) != 1005 {
+		t.Fatalf("DropReq CIF bytes = %x, want first=1000 at [0:4], last=1005 at [4:8]", data)
+	}
 
 	parsed := &CIFDropReq{}
 	if err := parsed.UnmarshalCIF(data); err != nil {
 		t.Fatalf("UnmarshalCIF failed: %v", err)
 	}
 
-	if parsed.MsgID != 42 || parsed.FirstSeqNo != 1000 || parsed.LastSeqNo != 1005 {
+	if parsed.FirstSeqNo != 1000 || parsed.LastSeqNo != 1005 {
 		t.Errorf("DropReq mismatch: got %+v, want %+v", parsed, original)
 	}
 }
@@ -1131,7 +1137,7 @@ func TestPacketMarshalCIFShutdown(t *testing.T) {
 
 func TestPacketUnmarshalCIFDropReq(t *testing.T) {
 	// Create a DropReq packet manually
-	cif := &CIFDropReq{MsgID: 7, FirstSeqNo: 100, LastSeqNo: 105}
+	cif := &CIFDropReq{FirstSeqNo: 100, LastSeqNo: 105}
 	data, _ := cif.MarshalCIF()
 
 	p := NewControl(nil, CtrlTypeDropReq, 42, 1000)
@@ -1143,7 +1149,7 @@ func TestPacketUnmarshalCIFDropReq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalCIF: %v", err)
 	}
-	if parsed.MsgID != 7 || parsed.FirstSeqNo != 100 || parsed.LastSeqNo != 105 {
+	if parsed.FirstSeqNo != 100 || parsed.LastSeqNo != 105 {
 		t.Errorf("DropReq mismatch: %+v", parsed)
 	}
 }
@@ -1183,20 +1189,20 @@ func TestPacketMarshalCIFACK(t *testing.T) {
 // --- CIFDropReq edge cases ---
 
 func TestCIFDropReqMarshalRoundtrip(t *testing.T) {
-	original := &CIFDropReq{MsgID: 99, FirstSeqNo: 200, LastSeqNo: 210}
+	original := &CIFDropReq{FirstSeqNo: 200, LastSeqNo: 210}
 	data, err := original.MarshalCIF()
 	if err != nil {
 		t.Fatalf("MarshalCIF: %v", err)
 	}
-	if len(data) != 12 {
-		t.Fatalf("expected 12 bytes, got %d", len(data))
+	if len(data) != 8 {
+		t.Fatalf("expected 8 bytes, got %d", len(data))
 	}
 
 	parsed := &CIFDropReq{}
 	if err := parsed.UnmarshalCIF(data); err != nil {
 		t.Fatalf("UnmarshalCIF: %v", err)
 	}
-	if parsed.MsgID != 99 || parsed.FirstSeqNo != 200 || parsed.LastSeqNo != 210 {
+	if parsed.FirstSeqNo != 200 || parsed.LastSeqNo != 210 {
 		t.Errorf("mismatch: %+v", parsed)
 	}
 }

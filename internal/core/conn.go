@@ -18,15 +18,16 @@ import (
 const (
 	ackTimeSlots = 64 // circular buffer matching ACK -> ACKACK for RTT
 
-	synInterval    = 10 * clock.Millisecond  // Full ACK period / SYN
-	liteACKPeriod  = 64                      // packets before a lite ACK
-	initialRTT     = 100 * clock.Millisecond // startup RTT estimate
-	minNAKInterval = 20 * clock.Millisecond  // live-CC NAK floor
-	rttSanityCap   = 10 * clock.Second       // reject RTT samples >= this
-	maxPacingBurst = 10 * clock.Millisecond  // cap on accumulated pacing credit
+	synInterval           = 10 * clock.Millisecond  // Full ACK period / SYN
+	liteACKPeriod         = 64                      // packets before a lite ACK
+	initialRTT            = 100 * clock.Millisecond // startup RTT estimate
+	defaultMinNAKInterval = 300 * clock.Millisecond // libsrt m_tdMinNakInterval; LiveCC overrides to 20ms
+	rttSanityCap          = 10 * clock.Second       // reject RTT samples >= this
+	maxPacingBurst        = 10 * clock.Millisecond  // cap on accumulated pacing credit
 
-	defaultTsbpdDelay = 120 * clock.Millisecond // default playout latency
-	keepaliveInterval = 1 * clock.Second        // idle keepalive cadence
+	liveDefaultPayloadSize = 1316                    // SRT_LIVE_DEF_PLSIZE (7*188 MPEG-TS)
+	defaultTsbpdDelay      = 120 * clock.Millisecond // default playout latency
+	keepaliveInterval      = 1 * clock.Second        // idle keepalive cadence
 )
 
 // ErrPeerIdle is the Failed-event error when no packet arrives from the peer
@@ -506,7 +507,16 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 // state. Shared by NewEstablished and the handshake completion path.
 func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	if ep.PayloadSize <= 0 {
-		ep.PayloadSize = packet.MaxPayloadSize
+		// libsrt defaults SRTO_PAYLOADSIZE to SRT_LIVE_DEF_PLSIZE (1316 = 7*188
+		// MPEG-TS) in live mode and to the full MSS payload in file/stream mode.
+		// (Previously this always used the MSS max, so live pacing/fragmentation
+		// sized to 1456 — defeating LiveCC's own 1316 default and diverging from
+		// libsrt's live wire sizing.)
+		if ep.Congestion == "file" {
+			ep.PayloadSize = packet.MaxPayloadSize
+		} else {
+			ep.PayloadSize = liveDefaultPayloadSize
+		}
 	}
 	if ep.BufferCapacity <= 0 {
 		ep.BufferCapacity = 8192
@@ -1229,6 +1239,11 @@ func (c *Conn) emitDropReq(now clock.Timestamp, firstSeq, lastSeq uint32) {
 		return
 	}
 	p := packet.NewControl(nil, packet.CtrlTypeDropReq, c.peerSocketID, c.wireTS(now))
+	// The dropped message number rides in the control header's type-specific word
+	// (libsrt pack(UMSG_DROPREQ, &msgno, seqpair, 8)). This is a pure
+	// sequence-range drop, so msgno is 0 ("we don't know"), matching libsrt's
+	// no_msgno seqpair path; the receiver drops by the seq range in the CIF.
+	p.Header.TypeSpecific = 0
 	p.SetData(data)
 	c.outputs.push(SendPacket{Packet: p, Owned: true})
 }
@@ -1864,14 +1879,20 @@ func (c *Conn) handleNAK(now clock.Timestamp, p packet.Packet) {
 	}
 }
 
-// nakInterval returns the periodic-NAK report interval: max(RTT+4*RTTVar, floor).
+// nakInterval returns the periodic-NAK report interval, matching libsrt's
+// per-congestion-controller derivation: base = RTT+4*RTTVar, transformed by the
+// CC's updateNAKInterval (LiveCC divides by 2 — NakReportAccel, "send a periodic
+// NAK every RTT/2"; FileCC leaves it unchanged), then floored at the CC's minimum
+// (LiveCC 20ms to keep live latency low) or libsrt's 300ms default when the CC
+// defines none (FileCC's m_tdMinNakInterval).
 func (c *Conn) nakInterval() clock.Microseconds {
-	base := c.rtt + 4*c.rttVar
-	if m := c.sendCC.MinNAKInterval(); base < m {
-		base = m
+	base := clock.Microseconds(c.sendCC.UpdateNAKInterval(int64(c.rtt+4*c.rttVar), 0, 0))
+	minNak := c.sendCC.MinNAKInterval()
+	if minNak == 0 {
+		minNak = defaultMinNAKInterval
 	}
-	if base < minNAKInterval {
-		base = minNAKInterval
+	if base < minNak {
+		base = minNak
 	}
 	return base
 }
