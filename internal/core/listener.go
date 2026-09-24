@@ -258,13 +258,8 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		}
 	}
 
-	recvLat, sendLat := l.cfg.RecvLatencyMS, l.cfg.SendLatencyMS
-	if hs.SRTHS.RecvTSBPDDelay > recvLat { // negotiated latency = max of both sides
-		recvLat = hs.SRTHS.RecvTSBPDDelay
-	}
-	if hs.SRTHS.SendTSBPDDelay > sendLat {
-		sendLat = hs.SRTHS.SendTSBPDDelay
-	}
+	recvLat, sendLat := handshake.NegotiateLatency(
+		l.cfg.RecvLatencyMS, l.cfg.SendLatencyMS, hs.SRTHS.RecvTSBPDDelay, hs.SRTHS.SendTSBPDDelay)
 
 	// Encryption negotiation. Reject mismatches with the appropriate code.
 	var cryptoCtx *crypto.Context
@@ -355,6 +350,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		MaxBW:            l.cfg.MaxBW,
 		Live:             l.cfg.Live,
 		TsbpdDelay:       clock.Microseconds(recvLat) * 1000,
+		PeerTsbpdDelay:   clock.Microseconds(sendLat) * 1000,
 		Congestion:       l.cfg.Congestion,
 		Message:          l.cfg.Message,
 		TLPktDrop:        l.cfg.TLPktDrop,

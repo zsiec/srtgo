@@ -112,3 +112,58 @@ func TestInteropListener(t *testing.T) {
 		}
 	}
 }
+
+func TestInteropListenerLatency(t *testing.T) {
+	bin := buildLibsrtCaller(t)
+	cfg := srt.DefaultConfig()
+	cfg.RecvLatency = 200 * time.Millisecond
+	cfg.PeerLatency = 150 * time.Millisecond
+	ln, err := srt.Listen("127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer c.Close()
+		st := c.Stats(false)
+		if st.NegotiatedLatency != 200*time.Millisecond || st.PeerLatency != 300*time.Millisecond {
+			done <- fmt.Errorf("Go latency %v/%v", st.NegotiatedLatency, st.PeerLatency)
+			return
+		}
+		_ = c.SetWriteDeadline(time.Now().Add(4 * time.Second))
+		for i := 0; i < 20; i++ {
+			data := make([]byte, 1316)
+			for j := range data {
+				data[j] = byte(i + j)
+			}
+			if _, err = c.Write(data); err != nil {
+				done <- err
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(500 * time.Millisecond)
+		done <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	port := strconv.Itoa(ln.Addr().(*net.UDPAddr).Port)
+	out, err := exec.CommandContext(ctx, bin, port, "sync", "recv", "", "0", "300", "100", "300", "200").CombinedOutput()
+	if err != nil {
+		t.Fatalf("libsrt latency: %v\n%s", err, out)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("server did not finish")
+	}
+}

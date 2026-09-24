@@ -74,6 +74,7 @@ type ConnStats struct {
 	RecvBufBytes     int
 
 	// Instantaneous measurements
+	PeerLatency        time.Duration // negotiated minimum receive latency at the peer
 	NegotiatedLatency  time.Duration
 	PacketReceiveRate  uint32
 	EstimatedBandwidth uint32
@@ -312,6 +313,7 @@ func statsFromCore(s core.Stats, cfg Config) ConnStats {
 		CongestionWindow: s.CongestionWindow,
 
 		NegotiatedLatency:  time.Duration(s.NegotiatedLatency) * time.Microsecond,
+		PeerLatency:        time.Duration(s.PeerLatency) * time.Microsecond,
 		PacketReceiveRate:  s.PacketRecvRate,
 		EstimatedBandwidth: s.EstimatedBandwidth,
 		UsPktSndPeriod:     float64(s.PktSndPeriodMicros),

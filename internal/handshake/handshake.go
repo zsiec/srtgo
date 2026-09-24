@@ -344,18 +344,10 @@ func BuildConclusionResponseV4(
 	return p
 }
 
-// NegotiateLatency returns the negotiated latency values.
-// SRT uses the maximum of both sides' requested latencies.
-func NegotiateLatency(callerRecv, callerSend, listenerRecv, listenerSend uint16) (recv, send uint16) {
-	recv = callerRecv
-	if listenerRecv > recv {
-		recv = listenerRecv
-	}
-	send = callerSend
-	if listenerSend > send {
-		send = listenerSend
-	}
-	return recv, send
+// NegotiateLatency returns local receive and peer receive delays. Each receive
+// direction combines its local minimum with the opposite endpoint's send offer.
+func NegotiateLatency(localRecv, localSend, peerRecv, peerSend uint16) (recv, send uint16) {
+	return max(localRecv, peerSend), max(localSend, peerRecv)
 }
 
 // NegotiateMSS returns the smaller of the two MSS values.

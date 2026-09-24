@@ -15,7 +15,7 @@ static void option(SRTSOCKET s, SRT_SOCKOPT key, const void *value, int len) {
     if (srt_setsockflag(s, key, value, len) < 0) fail("setsockflag");
 }
 int main(int argc, char **argv) {
-    if (argc != 6) return 2; /* port, sync/async, send/recv, passphrase, key bytes */
+    if (argc != 6 && argc != 10) return 2; /* port, sync/async, send/recv, passphrase, key bytes */
     srt_startup();
     SRTSOCKET s = srt_create_socket();
     int timeout = 4000;
@@ -26,6 +26,11 @@ int main(int argc, char **argv) {
         int keylen = atoi(argv[5]);
         option(s, SRTO_PASSPHRASE, argv[4], (int)strlen(argv[4]));
         option(s, SRTO_PBKEYLEN, &keylen, sizeof keylen);
+    }
+    if (argc == 10) {
+        int recv = atoi(argv[6]), peer = atoi(argv[7]);
+        option(s, SRTO_RCVLATENCY, &recv, sizeof recv);
+        option(s, SRTO_PEERLATENCY, &peer, sizeof peer);
     }
     bool async = strcmp(argv[2], "async") == 0;
     int eid = -1;
@@ -48,6 +53,16 @@ int main(int argc, char **argv) {
         bool yes = true;
         option(s, SRTO_RCVSYN, &yes, sizeof yes);
         srt_epoll_release(eid);
+    }
+    if (argc == 10) {
+        int recv = 0, peer = 0, len = sizeof(int);
+        if (srt_getsockflag(s, SRTO_RCVLATENCY, &recv, &len) < 0) fail("get rcvlatency");
+        len = sizeof(int);
+        if (srt_getsockflag(s, SRTO_PEERLATENCY, &peer, &len) < 0) fail("get peerlatency");
+        if (recv != atoi(argv[8]) || peer != atoi(argv[9])) {
+            fprintf(stderr, "negotiated local/peer latency %d/%d, expected %s/%s\n", recv, peer, argv[8], argv[9]);
+            return 1;
+        }
     }
     bool send = strcmp(argv[3], "send") == 0;
     unsigned char buf[1500];

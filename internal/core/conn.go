@@ -46,8 +46,9 @@ type Config struct {
 	BufferCapacity int        // send/recv ring capacity in packets (0 -> default)
 	MaxBW          int64      // max send bandwidth bytes/sec (0 -> LiveCC default)
 
-	Live       bool               // true -> TSBPD playout + too-late drop (live mode)
-	TsbpdDelay clock.Microseconds // playout latency when Live (0 -> default 120ms)
+	Live           bool               // true -> TSBPD playout + too-late drop (live mode)
+	TsbpdDelay     clock.Microseconds // local playout latency when Live (0 -> default 120ms)
+	PeerTsbpdDelay clock.Microseconds // peer playout latency (0 -> local delay)
 
 	// Congestion selects the congestion controller: "file" -> window-based AIMD
 	// (FileCC); anything else (incl. "") -> the fixed-rate live pacer (LiveCC).
@@ -268,7 +269,8 @@ type Conn struct {
 	sentFEC          uint64 // FEC repair packets sent
 	recvFECRecov     uint64 // packets reconstructed by FEC
 
-	negotiatedLatency clock.Microseconds // TSBPD delay agreed for this connection (live)
+	negotiatedPeerLatency clock.Microseconds
+	negotiatedLatency     clock.Microseconds // TSBPD delay agreed for this connection (live)
 
 	state  connState  // handshake progress / connected / failed
 	dial   *dialState // caller handshake parameters (nil once established or for NewEstablished)
@@ -339,6 +341,7 @@ type Stats struct {
 	PacketRecvRate     uint32             // receiver-estimated arrival rate (packets/sec)
 	EstimatedBandwidth uint32             // probe-estimated link capacity (packets/sec)
 	PktSndPeriodMicros int64              // current inter-packet send period (microseconds)
+	PeerLatency        clock.Microseconds // negotiated peer receive delay
 	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
 	DriftMicros        clock.Microseconds // TSBPD clock-drift correction (live mode; from ACKACK/keepalive)
 	PeerNakReport      bool               // peer advertised periodic NAK reporting in the handshake
@@ -392,6 +395,7 @@ func (c *Conn) Stats() Stats {
 		RTTVarMicros:      int64(c.rttVar),
 		FlowWindow:        c.flowWindow,
 		NegotiatedLatency: c.negotiatedLatency,
+		PeerLatency:       c.negotiatedPeerLatency,
 		PeerNakReport:     c.peerNakReport,
 		RecvBelated:       c.recvBelated,
 		RecvBelatedBytes:  c.recvBelatedBytes,
@@ -451,6 +455,7 @@ type establishParams struct {
 	MaxBW            int64
 	Live             bool
 	TsbpdDelay       clock.Microseconds
+	PeerTsbpdDelay   clock.Microseconds
 	Congestion       string
 	Message          bool
 	TLPktDrop        bool
@@ -486,6 +491,7 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		MaxBW:            cfg.MaxBW,
 		Live:             cfg.Live,
 		TsbpdDelay:       cfg.TsbpdDelay,
+		PeerTsbpdDelay:   cfg.PeerTsbpdDelay,
 		Congestion:       cfg.Congestion,
 		Message:          cfg.Message,
 		TLPktDrop:        cfg.TLPktDrop,
@@ -578,15 +584,19 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 		// time base once per 1000 packets.
 		c.tsbpdTimer = tsbpd.New(delay, 0)
 		c.negotiatedLatency = delay
+		peerDelay := ep.PeerTsbpdDelay
+		if peerDelay <= 0 {
+			peerDelay = delay
+		}
+		c.negotiatedPeerLatency = peerDelay
 		c.recvBuf.SetOnRead(c.tsbpdTimer.UpdateWrap)
 		c.recvBuf.SetOnDrop(c.tsbpdTimer.UpdateWrap)
 		// Sender too-late drop threshold: max(peer playout delay, 1s) + 2*SYN,
-		// plus the configured extra. (The negotiated live latency is symmetric,
-		// so the local delay stands in for the peer's.)
+		// plus the configured extra. Use the peer delay, not our receive delay.
 		if ep.TLPktDrop {
 			c.tlPktDrop = true
-			c.dropBaseUS = delay
-			thr := delay + clock.Microseconds(ep.SndDropDelay)*clock.Millisecond
+			c.dropBaseUS = peerDelay
+			thr := peerDelay + clock.Microseconds(ep.SndDropDelay)*clock.Millisecond
 			if thr < 1*clock.Second {
 				thr = 1 * clock.Second
 			}

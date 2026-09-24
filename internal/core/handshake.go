@@ -396,9 +396,10 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		c.fail(RejectError{Code: rejCongestion})
 		return
 	}
-	recvLatMS := d.recvLatMS
+	recvLatMS, sendLatMS := d.recvLatMS, d.sendLatMS
 	if hs.HasHS && hs.SRTHS != nil {
-		recvLatMS = hs.SRTHS.RecvTSBPDDelay // negotiated value from HSRSP
+		recvLatMS, sendLatMS = handshake.NegotiateLatency(d.recvLatMS, d.sendLatMS,
+			hs.SRTHS.RecvTSBPDDelay, hs.SRTHS.SendTSBPDDelay)
 	}
 	fc := int(d.fc)
 	if int(hs.MaxFlowWindowSize) < fc {
@@ -434,6 +435,7 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		MaxBW:            d.maxBW,
 		Live:             d.live,
 		TsbpdDelay:       clock.Microseconds(recvLatMS) * 1000, // ms -> us
+		PeerTsbpdDelay:   clock.Microseconds(sendLatMS) * 1000,
 		Congestion:       d.cong,
 		Message:          d.message,
 		TLPktDrop:        d.tlPktDrop,

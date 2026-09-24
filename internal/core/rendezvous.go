@@ -438,6 +438,10 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 	if recvLat == 0 {
 		recvLat = d.recvLatMS
 	}
+	sendLat := d.negSend
+	if sendLat == 0 {
+		sendLat = d.sendLatMS
+	}
 	fc := int(d.fc)
 	if d.peerFC > 0 && int(d.peerFC) < fc {
 		fc = int(d.peerFC)
@@ -457,6 +461,7 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		MaxBW:           d.maxBW,
 		Live:            d.live,
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
+		PeerTsbpdDelay:  clock.Microseconds(sendLat) * 1000,
 		Message:         d.message,
 		Congestion:      d.cong,
 		PeerIdleTimeout: d.peerIdleTimeout,

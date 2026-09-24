@@ -220,9 +220,9 @@ func (c *Conn) GetOption(opt SockOpt) (any, error) {
 	case SockOptRcvBuf:
 		return c.cfg.RecvBufSize, nil
 	case SockOptRcvLatency:
-		return c.cfg.RecvLatency, nil
+		return time.Duration(st.NegotiatedLatency) * time.Microsecond, statsErr
 	case SockOptSndLatency:
-		return c.cfg.PeerLatency, nil
+		return time.Duration(st.PeerLatency) * time.Microsecond, statsErr
 	case SockOptPeerIdleTimeout:
 		return c.cfg.PeerIdleTimeout, nil
 	case SockOptLinger:
