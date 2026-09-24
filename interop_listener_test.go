@@ -82,7 +82,7 @@ func TestInteropListener(t *testing.T) {
 									return
 								}
 								if !bytes.Equal(got[:n], want) {
-									serverDone <- fmt.Errorf("message %d mismatch (len=%d)", i, n)
+									serverDone <- fmt.Errorf("message %d mismatch (len=%d first=%x want=%x dropped=%d)", i, n, got[:min(n, 8)], want[:8], c.Stats(false).RecvDropped)
 									return
 								}
 							}
