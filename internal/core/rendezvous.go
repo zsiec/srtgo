@@ -332,6 +332,10 @@ func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ 
 	}
 
 	hasExtFlags := hs.HandshakeType == packet.HandshakeTypeConclusion && hs.ExtensionField != 0
+	if hasExtFlags && !matchingCongestion(d.cong, hs) {
+		c.fail(RejectError{Code: rejCongestion})
+		return
+	}
 	if hasExtFlags && hs.HasHS && hs.SRTHS != nil && !d.negotiated {
 		d.negRecv, d.negSend = handshake.NegotiateLatency(
 			d.recvLatMS, d.sendLatMS, hs.SRTHS.RecvTSBPDDelay, hs.SRTHS.SendTSBPDDelay)
@@ -447,6 +451,7 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		Live:            d.live,
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
 		Message:         d.message,
+		Congestion:      d.cong,
 		PeerIdleTimeout: d.peerIdleTimeout,
 		CryptoCtx:       d.cryptoCtx, // nil = unencrypted
 		ActiveKey:       activeKey,

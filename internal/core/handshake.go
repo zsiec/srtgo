@@ -27,10 +27,11 @@ const handshakeRetryInterval = 250 * clock.Millisecond
 
 // SRT rejection codes (subset; mirror the public srt package's Rej* values).
 const (
-	rejPeer      = 1002 // rejected by the host accept gate (default)
-	rejRogue     = 1004 // incorrect data in handshake
-	rejBadSecret = 1010 // wrong passphrase
-	rejUnsecure  = 1011 // passphrase required or unexpected
+	rejCongestion = 1013 // incompatible congestion controller
+	rejPeer       = 1002 // rejected by the host accept gate (default)
+	rejRogue      = 1004 // incorrect data in handshake
+	rejBadSecret  = 1010 // wrong passphrase
+	rejUnsecure   = 1011 // passphrase required or unexpected
 )
 
 // RejectError is the error surfaced (via a Failed event) when the peer rejects
@@ -275,6 +276,18 @@ func peerNakReportFromHS(hs *packet.CIFHandshake) bool {
 	return hs.SRTHS.SRTFlags&packet.FlagPeriodicNAK != 0
 }
 
+// matchingCongestion applies the HSv5 default when the peer omits its CC name.
+func matchingCongestion(local string, hs *packet.CIFHandshake) bool {
+	if local == "" {
+		local = "live"
+	}
+	peer := "live"
+	if hs.HasCongestion {
+		peer = hs.CongestionType
+	}
+	return local == peer
+}
+
 // peerVersionFromHS returns the peer's SRT version from the handshake (0 if the
 // SRT extension is absent).
 func peerVersionFromHS(hs *packet.CIFHandshake) uint32 {
@@ -379,6 +392,10 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 	}
 
 	d := c.dial
+	if !matchingCongestion(d.cong, hs) {
+		c.fail(RejectError{Code: rejCongestion})
+		return
+	}
 	recvLatMS := d.recvLatMS
 	if hs.HasHS && hs.SRTHS != nil {
 		recvLatMS = hs.SRTHS.RecvTSBPDDelay // negotiated value from HSRSP
