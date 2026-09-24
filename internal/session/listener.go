@@ -10,6 +10,7 @@ import (
 	"github.com/zsiec/srtgo/internal/core"
 	"github.com/zsiec/srtgo/internal/crypto"
 	"github.com/zsiec/srtgo/internal/mux"
+	"github.com/zsiec/srtgo/internal/packet"
 )
 
 // Listener is the I/O host for a core.Listener. It owns the mux, feeds inbound
@@ -174,6 +175,24 @@ func (l *Listener) loop() {
 }
 
 func (l *Listener) drain(now clock.Timestamp) {
+	// Register routing before publishing the final handshake response: a caller
+	// may send data as soon as that response reaches the wire. Start sessions and
+	// expose them to Accept only after responses have been sent.
+	type pendingAccept struct {
+		event core.Accepted
+		recvC <-chan packet.Packet
+	}
+	var pending []pendingAccept
+	for {
+		ev, ok := l.core.PollEvent()
+		if !ok {
+			break
+		}
+		if a, ok := ev.(core.Accepted); ok {
+			pending = append(pending, pendingAccept{a, l.mux.Register(a.SocketID)})
+		}
+	}
+
 	for {
 		out, ok := l.core.PollOutput()
 		if !ok {
@@ -185,18 +204,8 @@ func (l *Listener) drain(now clock.Timestamp) {
 			s.Packet.Release()
 		}
 	}
-	for {
-		ev, ok := l.core.PollEvent()
-		if !ok {
-			break
-		}
-		a, ok := ev.(core.Accepted)
-		if !ok {
-			continue
-		}
-		// Route this connection's data packets (DestinationSocketID == a.SocketID)
-		// to its own registered channel on the shared mux.
-		recvC := l.mux.Register(a.SocketID)
+	for _, entry := range pending {
+		a, recvC := entry.event, entry.recvC
 
 		// A group member is collected (not returned as a standalone session) until
 		// AcceptGroup assembles the group; all members share the listener's mux.

@@ -41,6 +41,10 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 		c.fail(fmt.Errorf("core: peer ISN %d out of range (v4)", hs.InitialPacketSequenceNumber))
 		return
 	}
+	if hs.InitialPacketSequenceNumber != c.dial.isn.Value() {
+		c.fail(fmt.Errorf("core: listener did not echo caller ISN: got %d, want %d", hs.InitialPacketSequenceNumber, c.dial.isn.Value()))
+		return
+	}
 	if hs.MaxFlowWindowSize < 2 {
 		c.fail(fmt.Errorf("core: peer flow window %d too small (v4)", hs.MaxFlowWindowSize))
 		return
