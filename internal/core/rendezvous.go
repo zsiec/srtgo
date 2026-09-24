@@ -316,6 +316,13 @@ func (c *Conn) sendWavehand() {
 func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ uint32) {
 	d := c.rdv
 
+	// A delayed/retransmitted WAVEHAND can arrive after a CONCLUSION has
+	// advanced the exchange. Reply with our current step without rewinding it.
+	if hs.HandshakeType == packet.HandshakeTypeWavehand && (d.rstate == rdvFine || d.rstate == rdvInitiated) {
+		c.rendezvousRetransmit(now)
+		return
+	}
+
 	if d.peerSocketID == 0 && hs.SRTSocketID != 0 {
 		d.peerSocketID = hs.SRTSocketID
 		d.peerISN = hs.InitialPacketSequenceNumber

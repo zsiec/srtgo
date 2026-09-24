@@ -77,3 +77,18 @@ func TestRendezvousUsesNegotiatedController(t *testing.T) {
 		t.Fatalf("file rendezvous installed %T", c.sendCC)
 	}
 }
+
+func TestRendezvousDelayedWavehand(t *testing.T) {
+	for _, state := range []rdvState{rdvFine, rdvInitiated} {
+		c := DialRendezvous(RendezvousConfig{SocketID: 7, ISN: 100, Cookie: 10}, 1)
+		c.rdv.rstate = state
+		c.rdv.peerSocketID = 8
+		c.rdv.side = rdvResponder
+		c.rdv.haveTrans = true
+		c.rdv.lastTrans = rdvTransition{newState: state, rspType: packet.HandshakeTypeConclusion, needsExt: true, needsHSRSP: true}
+		c.handleRendezvous(2, &packet.CIFHandshake{SRTSocketID: 8, HandshakeType: packet.HandshakeTypeWavehand, SynCookie: 20}, 0)
+		if c.state == stateFailed || c.rdv.rstate != state {
+			t.Fatalf("delayed wavehand changed state %d", state)
+		}
+	}
+}
