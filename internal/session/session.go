@@ -72,11 +72,15 @@ type delivery struct {
 // Session drives one core.Conn over a mux. Construct it with NewEstablished or
 // Dial; Write/Read/Close are safe to call from other goroutines.
 type Session struct {
-	mux        *mux.Mux
-	ownsMux    bool
-	remoteAddr net.Addr
-	clk        clock.Clock
-	core       *core.Conn
+	readMu        sync.Mutex // serializes readers and owns the partially consumed delivery
+	pending       delivery
+	pendingOffset int
+	pendingReady  atomic.Bool
+	mux           *mux.Mux
+	ownsMux       bool
+	remoteAddr    net.Addr
+	clk           clock.Clock
+	core          *core.Conn
 
 	recvC      <-chan packet.Packet
 	writeC     chan writeReq
@@ -436,24 +440,83 @@ func (s *Session) WriteMsg(p []byte, opts core.MsgOptions) error {
 // waits for data, honoring the read deadline; in non-blocking mode it returns
 // ErrWouldBlock if none is ready. It returns io.EOF once the session is closed
 // and drained.
+// Read preserves bytes when the destination is smaller than a delivery.
 func (s *Session) Read(b []byte) (int, error) {
-	n, _, err := s.ReadMsg(b)
+	n, _, err := s.readInto(b, false, false)
 	return n, err
 }
 
-// ReadMsg reads the next message into b and returns its metadata — the read half
-// of the public ReadMsgCtrl. Blocking, deadline, and EOF behavior match Read.
+// ReadBatch waits for the first payload, then copies any immediately available
+// payloads into b. It never waits to fill b after making progress. A payload
+// split across calls stays owned by the reader until all bytes are consumed.
+func (s *Session) ReadBatch(b []byte) (int, error) {
+	n, _, err := s.readInto(b, true, false)
+	return n, err
+}
+
+// ReadMsg reads one complete remaining message and its metadata. An undersized
+// buffer returns io.ErrShortBuffer without consuming that message.
 func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
+	return s.readInto(b, false, true)
+}
+
+func (s *Session) readInto(b []byte, batch, message bool) (int, MsgMetadata, error) {
 	if len(b) == 0 {
 		return 0, MsgMetadata{}, nil
 	}
-	d, err := s.nextDelivery()
-	if err != nil {
-		return 0, MsgMetadata{}, err
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.rcvSyn.Load() {
+		if v := s.readDeadline.Load(); v != nil {
+			deadline := v.(time.Time)
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				return 0, MsgMetadata{}, ErrTimeout
+			}
+		}
 	}
-	n := copy(b, d.data)
-	core.PutPayload(d.data)
-	return n, d.meta, nil
+
+	n := 0
+	var meta MsgMetadata
+	for {
+		if !s.pendingReady.Load() {
+			var d delivery
+			if n == 0 {
+				var err error
+				d, err = s.nextDelivery()
+				if err != nil {
+					return 0, MsgMetadata{}, err
+				}
+			} else {
+				var ok bool
+				d, ok, _ = s.deliveries.pop()
+				if !ok {
+					return n, meta, nil
+				}
+			}
+			s.pending = d
+			s.pendingOffset = 0
+			s.pendingReady.Store(true)
+		}
+		if n == 0 {
+			meta = s.pending.meta
+		}
+		remaining := s.pending.data[s.pendingOffset:]
+		if message && len(b) < len(remaining) {
+			return 0, meta, io.ErrShortBuffer
+		}
+		copied := copy(b[n:], remaining)
+		n += copied
+		s.pendingOffset += copied
+		if s.pendingOffset == len(s.pending.data) {
+			core.PutPayload(s.pending.data)
+			s.pending = delivery{}
+			s.pendingOffset = 0
+			s.pendingReady.Store(false)
+		}
+		if !batch || n == len(b) || len(remaining) == 0 {
+			return n, meta, nil
+		}
+	}
 }
 
 // nextDelivery waits without blocking the protocol loop. Queue mutations signal a
@@ -679,7 +742,7 @@ func (s *Session) Writable() <-chan struct{} { return s.writable }
 func (s *Session) Done() <-chan struct{} { return s.loopDone }
 
 // ReadReady reports whether a delivered message is buffered for Read.
-func (s *Session) ReadReady() bool { return s.deliveries.ready() }
+func (s *Session) ReadReady() bool { return s.pendingReady.Load() || s.deliveries.ready() }
 
 // WriteReady reports whether a Write can proceed without blocking.
 func (s *Session) WriteReady() bool { return len(s.writeC) < cap(s.writeC) }
