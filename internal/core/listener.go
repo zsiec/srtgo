@@ -311,7 +311,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 
 	a := acceptedConn{
 		socketID:  l.randUint32() | 1, // nonzero
-		isn:       seq.Number(l.randUint32() & uint32(seq.Max)),
+		isn:       seq.Number(hs.InitialPacketSequenceNumber),
 		mss:       hs.MaxTransmissionUnitSize,
 		fc:        hs.MaxFlowWindowSize,
 		recvLat:   recvLat,
@@ -320,6 +320,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		cryptoCtx: cryptoCtx,
 		kmKey:     kmKey,
 	}
+	// The listener echoes the caller ISN; blocking libsrt callers validate it.
 	// Group bonding: all members sharing a GroupID also share the send sequence
 	// space (so the receiver can deduplicate across links). The first member of a
 	// group fixes the group's send ISN; later members adopt it.
@@ -429,7 +430,7 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 
 	a := acceptedConn{
 		socketID: l.randUint32() | 1, // nonzero
-		isn:      seq.Number(l.randUint32() & uint32(seq.Max)),
+		isn:      seq.Number(hs.InitialPacketSequenceNumber),
 		mss:      hs.MaxTransmissionUnitSize,
 		fc:       hs.MaxFlowWindowSize,
 		recvLat:  l.cfg.RecvLatencyMS,
