@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/zsiec/srtgo/internal/clock"
@@ -135,6 +136,44 @@ func TestSimLossRecovery(t *testing.T) {
 	dropOnce := map[uint32]bool{150: true, 151: true, 152: true, 207: true, 333: true}
 
 	runStream(t, sender, receiver, base, numPayloads, dropOnce)
+}
+
+func TestSimSeededLossRecoveryMatrix(t *testing.T) {
+	const (
+		sndISN      = 100
+		rcvISN      = 5000
+		numPayloads = 600
+	)
+	for _, seed := range []uint64{1001, 2002, 3003, 0x7fffffff} {
+		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
+			base := clock.Timestamp(1_000_000)
+			sender := newSimHost(core.NewEstablished(core.Config{
+				PeerSocketID: 2, PayloadSize: simPayload, SendISN: sndISN, RecvISN: rcvISN, MaxBW: 1 << 34,
+			}, base))
+			receiver := newSimHost(core.NewEstablished(core.Config{
+				PeerSocketID: 1, PayloadSize: simPayload, SendISN: rcvISN, RecvISN: sndISN, MaxBW: 1 << 34,
+			}, base))
+			drops := make(map[uint32]bool, 24)
+			state := seed
+			for len(drops) < 24 {
+				state = splitMix64(state)
+				sequence := uint32(sndISN + 4 + int(state%uint64(numPayloads-8)))
+				drops[sequence] = true
+			}
+			runStream(t, sender, receiver, base, numPayloads, drops)
+			stats := receiver.c.Stats()
+			if stats.SentNAKs == 0 || stats.RecvLoss == 0 {
+				t.Fatalf("seeded loss did not exercise recovery: %+v", stats)
+			}
+		})
+	}
+}
+
+func splitMix64(value uint64) uint64 {
+	value += 0x9e3779b97f4a7c15
+	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
+	value = (value ^ (value >> 27)) * 0x94d049bb133111eb
+	return value ^ (value >> 31)
 }
 
 // dropOnce returns a forward-loss predicate that drops each listed data sequence

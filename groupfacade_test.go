@@ -89,7 +89,13 @@ func TestFacadeGroupBroadcast(t *testing.T) {
 	}
 	wg.Wait()
 
+	// The second UDP link can lag behind the first link's final delivery.
+	// Wait for its first duplicate instead of relying on goroutine scheduling.
 	gs := lg.Stats()
+	for deadline := time.Now().Add(3 * time.Second); gs.RecvDedups == 0 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+		gs = lg.Stats()
+	}
 	t.Logf("group stats: members=%d active=%d recv=%d dedups=%d", gs.Members, gs.ActiveMembers, gs.RecvPackets, gs.RecvDedups)
 	if gs.RecvDedups == 0 {
 		t.Error("expected some deduplicated duplicates across the two broadcast links")
