@@ -97,6 +97,11 @@ func newConn(s *session.Session, cfg Config, isServer bool) *Conn {
 // the connection is closed and drained.
 func (c *Conn) Read(b []byte) (int, error) { return c.s.Read(b) }
 
+// ReadBatch waits for data, then coalesces immediately available payloads into b.
+// It does not preserve message boundaries. Short buffers preserve unread bytes
+// for a later Read or ReadBatch. Deadlines and non-blocking mode match Read.
+func (c *Conn) ReadBatch(b []byte) (int, error) { return c.s.ReadBatch(b) }
+
 // Write sends b on the connection (net.Conn semantics), returning len(b) on
 // success. In blocking mode it waits for send-buffer space honoring the write
 // deadline; in non-blocking mode (SndSyn=false) it returns ErrWouldBlock when
@@ -270,7 +275,8 @@ func (c *Conn) WriteMessage(b []byte) (int, error) {
 	return c.WriteMsgCtrl(b, nil)
 }
 
-// ReadMessage reads the next complete message into b.
+// ReadMessage reads the next complete message into b. If b is too small, it
+// returns io.ErrShortBuffer without consuming the message.
 func (c *Conn) ReadMessage(b []byte) (int, error) {
 	return c.ReadMsgCtrl(b, nil)
 }
