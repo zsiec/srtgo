@@ -120,7 +120,8 @@ type Config struct {
 	RecvBufSize int
 
 	// PayloadSize is the maximum payload size per packet (SRTO_PAYLOADSIZE).
-	// When 0 (default), derived from MSS: MSS - 44 (IP 20 + UDP 8 + SRT 16).
+	// When 0, live mode uses 1316 bytes and file mode uses MSS - 44.
+	// Both defaults and explicit sizes are capped by the negotiated MSS - 44.
 	// When set, must be <= MSS - 44. Used for CC pacing and fragmentation limit.
 	PayloadSize int
 

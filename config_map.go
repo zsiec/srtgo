@@ -68,6 +68,7 @@ func (cfg *Config) dialConfig() core.DialConfig {
 // listenerConfig builds the core.ListenerConfig applied to accepted connections.
 func (cfg *Config) listenerConfig() core.ListenerConfig {
 	return core.ListenerConfig{
+		MSS:                      uint32(cfg.MSS),
 		RecvLatencyMS:            cfg.recvLatencyMS(),
 		SendLatencyMS:            cfg.peerLatencyMS(),
 		Congestion:               cfg.congestionString(),

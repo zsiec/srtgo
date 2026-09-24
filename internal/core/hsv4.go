@@ -50,7 +50,12 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 		return
 	}
 
+	if hs.MaxTransmissionUnitSize < 76 {
+		c.fail(RejectError{Code: rejRogue})
+		return
+	}
 	d := c.dial
+	d.mss = min(d.mss, hs.MaxTransmissionUnitSize)
 	fc := int(d.fc)
 	if int(hs.MaxFlowWindowSize) < fc {
 		fc = int(hs.MaxFlowWindowSize)
@@ -62,7 +67,8 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
 		PeerSocketID:     peerID,
-		PayloadSize:      d.payloadSize,
+		PayloadSize:      negotiatedPayloadSize(d.payloadSize, d.mss, d.cong),
+		MSS:              d.mss,
 		SendISN:          d.isn,
 		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:       fc,

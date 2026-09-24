@@ -38,6 +38,7 @@ var ErrPeerIdle = errors.New("srt: peer idle timeout")
 // caller handshake (Dial, see handshake.go) produces the equivalent parameters
 // itself; this is used when the connection is set up out of band.
 type Config struct {
+	MSS            uint32     // negotiated maximum segment size (0 -> 1500)
 	PeerSocketID   uint32     // destination socket ID on outgoing packets
 	PayloadSize    int        // max data payload per packet (0 -> MaxPayloadSize)
 	SendISN        seq.Number // initial send sequence number
@@ -140,6 +141,7 @@ type MsgOptions struct {
 type Conn struct {
 	peerSocketID     uint32
 	payloadSize      int
+	negotiatedMSS    uint32
 	sndTSBase        uint32             // SRT wire-timestamp epoch (captured at construction)
 	lastNow          clock.Timestamp    // most recent loop time seen (for time-relative stats)
 	sndISN           seq.Number         // local initial send sequence number
@@ -341,6 +343,8 @@ type Stats struct {
 	PacketRecvRate     uint32             // receiver-estimated arrival rate (packets/sec)
 	EstimatedBandwidth uint32             // probe-estimated link capacity (packets/sec)
 	PktSndPeriodMicros int64              // current inter-packet send period (microseconds)
+	PayloadSize        int                // effective maximum packet payload
+	NegotiatedMSS      uint32             // maximum segment size agreed in the handshake
 	PeerLatency        clock.Microseconds // negotiated peer receive delay
 	NegotiatedLatency  clock.Microseconds // negotiated TSBPD delay (live mode)
 	DriftMicros        clock.Microseconds // TSBPD clock-drift correction (live mode; from ACKACK/keepalive)
@@ -396,6 +400,8 @@ func (c *Conn) Stats() Stats {
 		FlowWindow:        c.flowWindow,
 		NegotiatedLatency: c.negotiatedLatency,
 		PeerLatency:       c.negotiatedPeerLatency,
+		NegotiatedMSS:     c.negotiatedMSS,
+		PayloadSize:       c.payloadSize,
 		PeerNakReport:     c.peerNakReport,
 		RecvBelated:       c.recvBelated,
 		RecvBelatedBytes:  c.recvBelatedBytes,
@@ -443,6 +449,7 @@ type ackSlot struct {
 // into the connected state, whether built directly (NewEstablished) or produced
 // by a completed handshake (see handshake.go).
 type establishParams struct {
+	MSS              uint32
 	PeerSocketID     uint32
 	PayloadSize      int
 	SendISN          seq.Number
@@ -483,6 +490,7 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 	c := &Conn{}
 	c.establish(now, establishParams{
 		PeerSocketID:     cfg.PeerSocketID,
+		MSS:              cfg.MSS,
 		PayloadSize:      cfg.PayloadSize,
 		SendISN:          cfg.SendISN,
 		RecvISN:          cfg.RecvISN,
@@ -553,6 +561,10 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	}
 	c.peerSocketID = ep.PeerSocketID
 	c.payloadSize = ep.PayloadSize
+	c.negotiatedMSS = ep.MSS
+	if c.negotiatedMSS == 0 {
+		c.negotiatedMSS = 1500
+	}
 	c.sndTSBase = now.SRTTimestamp()
 	c.lastNow = now
 	c.sndISN = ep.SendISN

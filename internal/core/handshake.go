@@ -73,7 +73,7 @@ type DialConfig struct {
 	AllowUnencryptedFallback bool
 
 	// Applied once the handshake completes.
-	PayloadSize      int                // data payload per packet (0 -> MSS-44)
+	PayloadSize      int                // data payload per packet (0 -> mode default, capped by MSS)
 	BufferCapacity   int                // send/recv ring capacity (0 -> default)
 	SendBufCapacity  int                // send ring capacity (0 -> BufferCapacity)
 	RecvBufCapacity  int                // recv ring capacity (0 -> BufferCapacity)
@@ -164,9 +164,6 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 		dc.Congestion = "live"
 	}
 	payloadSize := dc.PayloadSize
-	if payloadSize <= 0 {
-		payloadSize = int(dc.MSS) - 44 // SRT (16) + IPv4/UDP (28) overhead
-	}
 	c := &Conn{
 		state: stateInduction,
 		dial: &dialState{
@@ -391,7 +388,12 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		return
 	}
 
+	if hs.MaxTransmissionUnitSize < 76 {
+		c.fail(RejectError{Code: rejRogue})
+		return
+	}
 	d := c.dial
+	d.mss = min(d.mss, hs.MaxTransmissionUnitSize)
 	if !matchingCongestion(d.cong, hs) {
 		c.fail(RejectError{Code: rejCongestion})
 		return
@@ -425,7 +427,8 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 	c.outputs.push(ClearTimer{ID: TimerHandshake})
 	c.establish(now, establishParams{
 		PeerSocketID:     hs.SRTSocketID,
-		PayloadSize:      d.payloadSize,
+		PayloadSize:      negotiatedPayloadSize(d.payloadSize, d.mss, d.cong),
+		MSS:              d.mss,
 		SendISN:          d.isn,
 		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:       fc,

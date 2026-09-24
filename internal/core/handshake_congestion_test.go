@@ -64,7 +64,7 @@ func TestCallerChecksCongestionResponse(t *testing.T) {
 
 func TestRendezvousChecksCongestion(t *testing.T) {
 	c := DialRendezvous(RendezvousConfig{SocketID: 7, ISN: 100, Cookie: 10, Congestion: "file"}, 1)
-	c.handleRendezvous(2, &packet.CIFHandshake{SRTSocketID: 8, HandshakeType: packet.HandshakeTypeConclusion, ExtensionField: 1}, 0)
+	c.handleRendezvous(2, &packet.CIFHandshake{SRTSocketID: 8, MaxTransmissionUnitSize: 1500, HandshakeType: packet.HandshakeTypeConclusion, ExtensionField: 1}, 0)
 	requireCongestionRejection(t, c) // absent CC extension means live
 }
 

@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -61,6 +62,10 @@ type Conn struct {
 // configuration the public Config selected. isServer marks accepted (listener-
 // side) connections.
 func newConn(s *session.Session, cfg Config, isServer bool) *Conn {
+	if st, err := s.Stats(); err == nil {
+		cfg.MSS = int(st.NegotiatedMSS)
+		cfg.PayloadSize = st.PayloadSize
+	}
 	c := &Conn{
 		s:         s,
 		cfg:       cfg,
@@ -90,6 +95,9 @@ func (c *Conn) Read(b []byte) (int, error) { return c.s.Read(b) }
 // deadline; in non-blocking mode (SndSyn=false) it returns ErrWouldBlock when
 // the buffer is full.
 func (c *Conn) Write(b []byte) (int, error) {
+	if err := c.checkPayloadSize(b); err != nil {
+		return 0, err
+	}
 	if err := c.s.Write(b); err != nil {
 		return 0, err
 	}
@@ -264,6 +272,9 @@ func (c *Conn) ReadMessage(b []byte) (int, error) {
 // WriteMsgCtrl sends b as one message with the per-message options in mc (nil
 // means defaults: in-order, no TTL, current source time). Returns len(b).
 func (c *Conn) WriteMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
+	if err := c.checkPayloadSize(b); err != nil {
+		return 0, err
+	}
 	opts := core.MsgOptions{InOrder: true}
 	if mc != nil {
 		opts.InOrder = mc.InOrder
@@ -291,6 +302,9 @@ func (c *Conn) WriteMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
 // number msgNo (so a balancing group's receiver can reorder across independent
 // member links). Used by Group.writeBalancing.
 func (c *Conn) writeBalanced(b []byte, msgNo uint32) (int, error) {
+	if err := c.checkPayloadSize(b); err != nil {
+		return 0, err
+	}
 	if err := c.s.WriteMsg(b, core.MsgOptions{InOrder: true, MsgNo: msgNo, ForceMsgNo: true}); err != nil {
 		return 0, err
 	}
@@ -310,4 +324,13 @@ func (c *Conn) ReadMsgCtrl(b []byte, mc *MsgCtrl) (int, error) {
 		mc.MsgNo = meta.MsgNo
 	}
 	return n, nil
+}
+
+// checkPayloadSize enforces the single-packet live message limit. File-mode
+// messages may span multiple packets and are fragmented by the core.
+func (c *Conn) checkPayloadSize(b []byte) error {
+	if c.cfg.congestionString() != "file" && len(b) > c.cfg.PayloadSize {
+		return fmt.Errorf("srt: payload size %d exceeds maximum %d for live mode", len(b), c.cfg.PayloadSize)
+	}
+	return nil
 }

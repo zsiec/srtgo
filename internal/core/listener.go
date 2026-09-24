@@ -18,6 +18,7 @@ type PeerID = string
 
 // ListenerConfig parameters accepted connections.
 type ListenerConfig struct {
+	MSS              uint32 // maximum packet size (0 -> 1500)
 	RecvLatencyMS    uint16
 	SendLatencyMS    uint16
 	Congestion       string             // "live" or "file" (empty -> "live")
@@ -142,6 +143,9 @@ func (l *Listener) SetAcceptGate(fn func(AcceptRequest) (accept bool, rejectCode
 // immediately overwritten by the caller's unwrapped key material, so the result
 // is a deterministic function of the KMREQ and passphrase.
 func NewListener(cfg ListenerConfig, cookieSecret uint64, rng func([]byte), newCtx func(keyLen int, mode crypto.CipherMode) (*crypto.Context, error)) *Listener {
+	if cfg.MSS == 0 {
+		cfg.MSS = 1500
+	}
 	if cfg.RecvLatencyMS == 0 {
 		cfg.RecvLatencyMS = 120
 	}
@@ -210,6 +214,10 @@ func (l *Listener) handleInduction(peer PeerID, hs *packet.CIFHandshake) {
 func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet.CIFHandshake) {
 	if hs.SynCookie != l.cookie(peer) {
 		return // missing/invalid cookie: drop silently (likely stale or spoofed)
+	}
+	if hs.MaxTransmissionUnitSize < 76 {
+		l.reject(peer, hs.SRTSocketID, rejRogue)
+		return
 	}
 	// Legacy HSv4 (UDT_DGRAM) caller: no SRT extensions in the CONCLUSION.
 	if hs.Version == 4 {
@@ -312,7 +320,7 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 	a := acceptedConn{
 		socketID:  l.randUint32() | 1, // nonzero
 		isn:       seq.Number(hs.InitialPacketSequenceNumber),
-		mss:       hs.MaxTransmissionUnitSize,
+		mss:       min(l.cfg.MSS, hs.MaxTransmissionUnitSize),
 		fc:        hs.MaxFlowWindowSize,
 		recvLat:   recvLat,
 		sendLat:   sendLat,
@@ -340,7 +348,8 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 	conn := &Conn{}
 	conn.establish(now, establishParams{
 		PeerSocketID:     hs.SRTSocketID,
-		PayloadSize:      l.cfg.PayloadSize,
+		PayloadSize:      negotiatedPayloadSize(l.cfg.PayloadSize, a.mss, l.cfg.Congestion),
+		MSS:              a.mss,
 		SendISN:          a.isn,
 		RecvISN:          seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:       int(a.fc),
@@ -432,7 +441,7 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 	a := acceptedConn{
 		socketID: l.randUint32() | 1, // nonzero
 		isn:      seq.Number(hs.InitialPacketSequenceNumber),
-		mss:      hs.MaxTransmissionUnitSize,
+		mss:      min(l.cfg.MSS, hs.MaxTransmissionUnitSize),
 		fc:       hs.MaxFlowWindowSize,
 		recvLat:  l.cfg.RecvLatencyMS,
 		sendLat:  l.cfg.SendLatencyMS,
@@ -444,7 +453,8 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 	conn := &Conn{}
 	conn.establish(now, establishParams{
 		PeerSocketID:    hs.SRTSocketID,
-		PayloadSize:     l.cfg.PayloadSize,
+		PayloadSize:     negotiatedPayloadSize(l.cfg.PayloadSize, a.mss, l.cfg.Congestion),
+		MSS:             a.mss,
 		SendISN:         a.isn,
 		RecvISN:         seq.Number(hs.InitialPacketSequenceNumber),
 		FlowWindow:      int(a.fc),
