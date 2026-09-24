@@ -316,6 +316,13 @@ func (c *Conn) sendWavehand() {
 func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ uint32) {
 	d := c.rdv
 
+	// A delayed/retransmitted WAVEHAND can arrive after a CONCLUSION has
+	// advanced the exchange. Reply with our current step without rewinding it.
+	if hs.HandshakeType == packet.HandshakeTypeWavehand && (d.rstate == rdvFine || d.rstate == rdvInitiated) {
+		c.rendezvousRetransmit(now)
+		return
+	}
+
 	if d.peerSocketID == 0 && hs.SRTSocketID != 0 {
 		d.peerSocketID = hs.SRTSocketID
 		d.peerISN = hs.InitialPacketSequenceNumber
@@ -332,6 +339,10 @@ func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ 
 	}
 
 	hasExtFlags := hs.HandshakeType == packet.HandshakeTypeConclusion && hs.ExtensionField != 0
+	if hasExtFlags && !matchingCongestion(d.cong, hs) {
+		c.fail(RejectError{Code: rejCongestion})
+		return
+	}
 	if hasExtFlags && hs.HasHS && hs.SRTHS != nil && !d.negotiated {
 		d.negRecv, d.negSend = handshake.NegotiateLatency(
 			d.recvLatMS, d.sendLatMS, hs.SRTHS.RecvTSBPDDelay, hs.SRTHS.SendTSBPDDelay)
@@ -447,6 +458,7 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		Live:            d.live,
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
 		Message:         d.message,
+		Congestion:      d.cong,
 		PeerIdleTimeout: d.peerIdleTimeout,
 		CryptoCtx:       d.cryptoCtx, // nil = unencrypted
 		ActiveKey:       activeKey,

@@ -232,6 +232,11 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		return
 	}
 
+	if !matchingCongestion(l.cfg.Congestion, hs) {
+		l.reject(peer, hs.SRTSocketID, rejCongestion)
+		return
+	}
+
 	// Accept gating: let the host authorize the connection (e.g. by StreamID)
 	// before we commit to it. A reject sends a rejection handshake with the
 	// host-supplied code (default rejPeer). Runs once per peer — duplicate
