@@ -247,7 +247,9 @@ type Conn struct {
 	sentBytes        uint64
 	retransPackets   uint64
 	retransBytes     uint64
-	recvPackets      uint64
+	recvWirePackets  uint64 // data datagrams, including duplicates and undecryptable packets
+	recvWireBytes    uint64
+	recvPackets      uint64 // successful first insertions, including FEC recovery
 	recvBytes        uint64
 	recvRetrans      uint64 // received packets carrying the retransmit (R) bit
 	recvRetransBytes uint64
@@ -291,7 +293,7 @@ type Stats struct {
 	RetransBytes      uint64
 	RecvPackets       uint64
 	RecvBytes         uint64
-	RecvUniquePackets uint64 // RecvPackets minus received retransmissions
+	RecvUniquePackets uint64 // first accepted insertions, including retransmission/FEC recovery
 	RecvUniqueBytes   uint64
 	RecvRetrans       uint64 // received packets carrying the retransmit (R) bit
 	RecvRetransBytes  uint64
@@ -356,16 +358,16 @@ type Stats struct {
 // from the host's loop goroutine (the core is single-threaded).
 func (c *Conn) Stats() Stats {
 	s := Stats{
-		SentPackets:       c.sentPackets,
-		SentBytes:         c.sentBytes,
-		SentUniquePackets: c.sentPackets - c.retransPackets,
-		SentUniqueBytes:   c.sentBytes - c.retransBytes,
+		SentPackets:       c.sentPackets + c.retransPackets,
+		SentBytes:         c.sentBytes + c.retransBytes,
+		SentUniquePackets: c.sentPackets,
+		SentUniqueBytes:   c.sentBytes,
 		RetransPackets:    c.retransPackets,
 		RetransBytes:      c.retransBytes,
-		RecvPackets:       c.recvPackets,
-		RecvBytes:         c.recvBytes,
-		RecvUniquePackets: c.recvPackets - c.recvRetrans,
-		RecvUniqueBytes:   c.recvBytes - c.recvRetransBytes,
+		RecvPackets:       c.recvWirePackets,
+		RecvBytes:         c.recvWireBytes,
+		RecvUniquePackets: c.recvPackets,
+		RecvUniqueBytes:   c.recvBytes,
 		RecvRetrans:       c.recvRetrans,
 		RecvRetransBytes:  c.recvRetransBytes,
 		RecvLoss:          c.recvLoss,
@@ -1192,7 +1194,7 @@ func (c *Conn) sendData(now clock.Timestamp, seqNo seq.Number, ts uint32, f fram
 	// The buffer retains p for retransmission; emit it by reference (Owned=false).
 	c.outputs.push(SendPacket{Packet: p, Owned: false})
 	c.sentPackets++
-	c.sentBytes += uint64(len(f.payload))
+	c.sentBytes += uint64(len(p.Data))
 	c.lastSentDataTime = now // feeds the idle keepalive
 
 	c.sendCC.OnPacketSent(seqNo.Value(), len(f.payload))
@@ -1384,6 +1386,16 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 		return
 	}
 
+	// Count wire arrivals independently of successful insertion. The R bit does
+	// not imply a duplicate: a retransmit may be the first copy to arrive.
+	wireBytes := uint64(len(p.Data))
+	c.recvWirePackets++
+	c.recvWireBytes += wireBytes
+	if p.Header.Retransmitted {
+		c.recvRetrans++
+		c.recvRetransBytes += wireBytes
+	}
+
 	// FEC protects the on-wire ciphertext, so capture it before decrypting in
 	// place (CTR decryption is in-place): the FEC engine must combine source and
 	// repair packets over the same bytes the sender computed the repair from.
@@ -1431,13 +1443,10 @@ func (c *Conn) handleData(now clock.Timestamp, p packet.Packet) {
 	}
 	c.rcvPktCount++
 	c.recvPackets++
-	c.recvBytes += uint64(len(p.Data))
+	c.recvBytes += wireBytes
 
 	c.sendCC.OnPktArrival(len(p.Data), now)
-	if p.Header.Retransmitted {
-		c.recvRetrans++
-		c.recvRetransBytes += uint64(len(p.Data))
-	} else {
+	if !p.Header.Retransmitted {
 		c.sendCC.OnPacketReceived(p.Header.SequenceNumber, len(p.Data), now)
 	}
 
@@ -1546,13 +1555,14 @@ func (c *Conn) insertRecovered(now clock.Timestamp, rec []filter.RecoveredPacket
 		p.Header.PacketPosition = packet.PositionSingle
 		p.Header.Encryption = packet.PacketEncryption(rp.EncFlag)
 		p.Header.Retransmitted = true
+		wireBytes := uint64(len(p.Data))
 		if !c.decrypt(&p) { // no-op for unencrypted; recovered ciphertext otherwise
 			p.Release()
 			continue
 		}
 		if c.recvBuf.Insert(p, now).Inserted {
 			c.recvPackets++
-			c.recvBytes += uint64(len(p.Data))
+			c.recvBytes += wireBytes
 			c.recvFECRecov++
 		} else {
 			p.Release()

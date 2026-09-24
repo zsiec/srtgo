@@ -16,7 +16,8 @@ type ConnStats struct {
 	StartTime time.Time
 	Duration  time.Duration
 
-	// Sent packet/byte counters
+	// Sent data packet/byte counters. Totals include retransmissions; unique
+	// counters count original transmissions once. Bytes exclude transport headers.
 	SentPackets       uint64
 	SentBytes         uint64
 	SentUniquePackets uint64
@@ -24,7 +25,9 @@ type ConnStats struct {
 	Retransmits       uint64
 	RetransBytes      uint64
 
-	// Received packet/byte counters
+	// Received data packet/byte counters. Totals include duplicate datagrams.
+	// Unique counters count first accepted copies, including retransmission and
+	// FEC recovery; the retransmit flag does not itself indicate a duplicate.
 	RecvPackets       uint64
 	RecvBytes         uint64
 	RecvUniquePackets uint64
