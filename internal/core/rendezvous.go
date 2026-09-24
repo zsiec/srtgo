@@ -271,9 +271,6 @@ func DialRendezvous(rc RendezvousConfig, now clock.Timestamp) *Conn {
 		rc.Congestion = "live"
 	}
 	payloadSize := rc.PayloadSize
-	if payloadSize <= 0 {
-		payloadSize = int(rc.MSS) - 44
-	}
 	c := &Conn{
 		state: stateInduction, // a non-connected state; c.rdv drives dispatch
 		rdv: &rdvDial{
@@ -324,6 +321,11 @@ func (c *Conn) handleRendezvous(now clock.Timestamp, hs *packet.CIFHandshake, _ 
 	}
 
 	if d.peerSocketID == 0 && hs.SRTSocketID != 0 {
+		if hs.MaxTransmissionUnitSize < 76 {
+			c.fail(RejectError{Code: rejRogue})
+			return
+		}
+		d.mss = min(d.mss, hs.MaxTransmissionUnitSize)
 		d.peerSocketID = hs.SRTSocketID
 		d.peerISN = hs.InitialPacketSequenceNumber
 		d.peerFC = hs.MaxFlowWindowSize
@@ -453,7 +455,8 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 	}
 	c.establish(now, establishParams{
 		PeerSocketID:    peerID,
-		PayloadSize:     d.payloadSize,
+		PayloadSize:     negotiatedPayloadSize(d.payloadSize, d.mss, d.cong),
+		MSS:             d.mss,
 		SendISN:         d.isn,
 		RecvISN:         seq.Number(d.peerISN),
 		FlowWindow:      fc,

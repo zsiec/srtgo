@@ -322,7 +322,7 @@ func statsFromCore(s core.Stats, cfg Config) ConnStats {
 		RcvFilterSupply: s.RecvFECRecov,
 
 		ReorderTolerance: int32(cfg.LossMaxTTL),
-		NegotiatedMSS:    cfg.MSS,
+		NegotiatedMSS:    int(s.NegotiatedMSS),
 		NegotiatedFC:     s.FlowWindow,
 	}
 	if st.NegotiatedLatency > 0 {
