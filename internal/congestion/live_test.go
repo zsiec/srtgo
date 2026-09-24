@@ -542,3 +542,12 @@ func BenchmarkOnPacketReceived(b *testing.B) {
 		seq++
 	}
 }
+
+func TestLiveBandwidthOverheadSaturates(t *testing.T) {
+	cc := NewLiveCC(0, 1316)
+	cc.SetOverhead(100)
+	cc.UpdateBandwidth(0, 1<<63-1)
+	if got := cc.MaxBandwidth(); got != 1<<63-1 {
+		t.Fatalf("overflowed bandwidth: %d", got)
+	}
+}

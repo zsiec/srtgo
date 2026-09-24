@@ -74,6 +74,9 @@ func (c *Conn) handleConclusionResponseV4(now clock.Timestamp, hs *packet.CIFHan
 		FlowWindow:       fc,
 		BufferCapacity:   d.bufferCapacity,
 		MaxBW:            d.maxBW,
+		InputBW:          d.inputBW,
+		MinInputBW:       d.minInputBW,
+		OverheadBW:       d.overheadBW,
 		Live:             false, // HSv4: no TSBPD until the post-handshake HSREQ
 		Message:          true,  // UDT_DGRAM message framing
 		DisableNAKReport: d.disableNAKReport,

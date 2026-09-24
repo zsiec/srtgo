@@ -30,6 +30,9 @@ type ListenerConfig struct {
 	DisableNAKReport bool               // suppress periodic NAK in live mode (SRTO_NAKREPORT=false)
 	PeerIdleTimeout  clock.Microseconds // dead-peer timeout on accepted connections (0 = disabled)
 	MaxBW            int64
+	InputBW          int64
+	MinInputBW       int64
+	OverheadBW       int
 	PayloadSize      int
 	BufferCapacity   int
 	SendBufCapacity  int    // send ring capacity (0 -> BufferCapacity)
@@ -357,6 +360,9 @@ func (l *Listener) handleConclusion(now clock.Timestamp, peer PeerID, hs *packet
 		SendBufCapacity:  l.cfg.SendBufCapacity,
 		RecvBufCapacity:  l.cfg.RecvBufCapacity,
 		MaxBW:            l.cfg.MaxBW,
+		InputBW:          l.cfg.InputBW,
+		MinInputBW:       l.cfg.MinInputBW,
+		OverheadBW:       l.cfg.OverheadBW,
 		Live:             l.cfg.Live,
 		TsbpdDelay:       clock.Microseconds(recvLat) * 1000,
 		PeerTsbpdDelay:   clock.Microseconds(sendLat) * 1000,
@@ -462,6 +468,9 @@ func (l *Listener) handleConclusionV4(now clock.Timestamp, peer PeerID, hs *pack
 		SendBufCapacity: l.cfg.SendBufCapacity,
 		RecvBufCapacity: l.cfg.RecvBufCapacity,
 		MaxBW:           l.cfg.MaxBW,
+		InputBW:         l.cfg.InputBW,
+		MinInputBW:      l.cfg.MinInputBW,
+		OverheadBW:      l.cfg.OverheadBW,
 		Live:            false, // HSv4: reliable datagram, no TSBPD until/unless HSREQ
 		Message:         true,  // UDT_DGRAM message framing
 		Congestion:      l.cfg.Congestion,
