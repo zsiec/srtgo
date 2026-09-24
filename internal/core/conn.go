@@ -294,7 +294,10 @@ type Conn struct {
 // (Mbps, samples/sec) and not-yet-implemented subsystems (KM state, reorder,
 // belated arrivals) are filled in by the host / as those features land.
 type Stats struct {
-	MaxBW int64 // effective pacing limit, bytes/sec
+	RecvDroppedBytes                 uint64 // estimated for missing network packets; exact for application drops
+	AppReadDropped, AppReadDropBytes uint64 // host application-queue drops
+	AppReadQueue, AppReadBacklog     int    // host delivery queue depths
+	MaxBW                            int64  // effective pacing limit, bytes/sec
 	// Cumulative packet/byte counters.
 	SentPackets       uint64
 	SentBytes         uint64
@@ -387,6 +390,7 @@ func (c *Conn) Stats() Stats {
 		RecvLoss:          c.recvLoss,
 		LostPackets:       c.lostPackets,
 		RecvDropped:       c.recvDropped,
+		RecvDroppedBytes:  c.recvDropped * uint64(c.payloadSize),
 		RecvUndecrypt:     c.recvUndecrypt,
 		SentDropped:       c.sentDropped,
 		SentDroppedBytes:  c.sentDroppedBytes,
@@ -1943,3 +1947,6 @@ func nextMsgNo(n uint32) uint32 {
 	}
 	return n
 }
+
+// Live reports whether this connection uses timed live delivery. Call on the host loop.
+func (c *Conn) Live() bool { return c.tsbpdTimer != nil }

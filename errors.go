@@ -69,6 +69,10 @@ var (
 	// sentinel so the error returned by Read/Write matches under errors.Is.
 	ErrWouldBlock = session.ErrWouldBlock
 
+	// ErrReceiveOverflow means a reliable receiver exhausted its bounded application queue.
+	// Read returns queued data first, then this error.
+	ErrReceiveOverflow = session.ErrReceiveOverflow
+
 	// ErrGroupClosed is returned when operating on a closed Group.
 	ErrGroupClosed = errors.New("srt: group closed")
 

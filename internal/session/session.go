@@ -78,9 +78,10 @@ type Session struct {
 	clk        clock.Clock
 	core       *core.Conn
 
-	recvC  <-chan packet.Packet
-	writeC chan writeReq
-	readC  chan delivery
+	recvC      <-chan packet.Packet
+	writeC     chan writeReq
+	deliveries *deliveryQueue
+	finalStats core.Stats
 
 	connected chan error           // receives nil on Connected, err on Failed (dial)
 	statsReq  chan chan core.Stats // Stats() requests, answered on the loop goroutine
@@ -147,7 +148,7 @@ func newSession(m *mux.Mux, recvC <-chan packet.Packet, ownsMux bool, remoteAddr
 		core:       cc,
 		recvC:      recvC,
 		writeC:     make(chan writeReq, 256),
-		readC:      make(chan delivery, 2048),
+		deliveries: newDeliveryQueue(sessionReadQueueSize, sessionDeliveryBacklogSize, sessionDeliveryByteLimit),
 		connected:  make(chan error, 1),
 		statsReq:   make(chan chan core.Stats),
 		ctrl:       make(chan func(), 8),
@@ -171,7 +172,7 @@ func (s *Session) Stats() (core.Stats, error) {
 	case s.statsReq <- resp:
 		return <-resp, nil
 	case <-s.loopDone:
-		return core.Stats{}, ErrClosed
+		return s.deliveries.stats(s.finalStats), ErrClosed
 	}
 }
 
@@ -443,47 +444,54 @@ func (s *Session) Read(b []byte) (int, error) {
 // ReadMsg reads the next message into b and returns its metadata — the read half
 // of the public ReadMsgCtrl. Blocking, deadline, and EOF behavior match Read.
 func (s *Session) ReadMsg(b []byte) (int, MsgMetadata, error) {
-	if !s.rcvSyn.Load() {
-		select {
-		case d := <-s.readC:
-			n := copy(b, d.data)
-			core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
-			return n, d.meta, nil
-		case <-s.loopDone:
-			return s.drainRead(b)
-		default:
-			return 0, MsgMetadata{}, ErrWouldBlock
-		}
+	if len(b) == 0 {
+		return 0, MsgMetadata{}, nil
 	}
+	d, err := s.nextDelivery()
+	if err != nil {
+		return 0, MsgMetadata{}, err
+	}
+	n := copy(b, d.data)
+	core.PutPayload(d.data)
+	return n, d.meta, nil
+}
 
+// nextDelivery waits without blocking the protocol loop. Queue mutations signal a
+// separate reader notification; Watcher notifications remain independent.
+func (s *Session) nextDelivery() (delivery, error) {
 	timeout, stop, expired := s.deadlineChan(&s.readDeadline)
-	if expired {
-		return 0, MsgMetadata{}, ErrTimeout
+	if s.rcvSyn.Load() && expired {
+		return delivery{}, ErrTimeout
 	}
 	if stop != nil {
 		defer stop()
 	}
-	select {
-	case d := <-s.readC:
-		n := copy(b, d.data)
-		core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
-		return n, d.meta, nil
-	case <-timeout:
-		return 0, MsgMetadata{}, ErrTimeout
-	case <-s.loopDone:
-		return s.drainRead(b)
-	}
-}
-
-// drainRead returns any message delivered before the loop exited, else io.EOF.
-func (s *Session) drainRead(b []byte) (int, MsgMetadata, error) {
-	select {
-	case d := <-s.readC:
-		n := copy(b, d.data)
-		core.PutPayload(d.data) // recycle the pooled delivery payload; dead after copy-out
-		return n, d.meta, nil
-	default:
-		return 0, MsgMetadata{}, io.EOF
+	for {
+		d, ok, changed := s.deliveries.pop()
+		if ok {
+			return d, nil
+		}
+		select {
+		case <-s.loopDone:
+			// Check again after observing loopDone: its last drain may have queued data.
+			if d, ok, _ := s.deliveries.pop(); ok {
+				return d, nil
+			}
+			if err := s.deliveries.readError(); err != nil {
+				return delivery{}, err
+			}
+			return delivery{}, io.EOF
+		default:
+		}
+		if !s.rcvSyn.Load() {
+			return delivery{}, ErrWouldBlock
+		}
+		select {
+		case <-changed:
+		case <-s.loopDone:
+		case <-timeout:
+			return delivery{}, ErrTimeout
+		}
 	}
 }
 
@@ -660,7 +668,7 @@ func signal(ch chan struct{}) {
 }
 
 // Readable is signaled (buffered, edge-ish) when delivered data becomes
-// available; the Watcher selects on it. Use len(readC)>0 / a non-blocking Read
+// available; the Watcher selects on it. Use ReadReady() / a non-blocking Read
 // to confirm.
 func (s *Session) Readable() <-chan struct{} { return s.readable }
 
@@ -671,7 +679,7 @@ func (s *Session) Writable() <-chan struct{} { return s.writable }
 func (s *Session) Done() <-chan struct{} { return s.loopDone }
 
 // ReadReady reports whether a delivered message is buffered for Read.
-func (s *Session) ReadReady() bool { return len(s.readC) > 0 }
+func (s *Session) ReadReady() bool { return s.deliveries.ready() }
 
 // WriteReady reports whether a Write can proceed without blocking.
 func (s *Session) WriteReady() bool { return len(s.writeC) < cap(s.writeC) }
@@ -734,27 +742,27 @@ func (s *Session) LocalAddr() net.Addr { return s.mux.LocalAddr() }
 // ---- event loop ----
 
 func (s *Session) loop() {
-	defer close(s.loopDone)
+	defer func() { s.finalStats = s.core.Stats(); close(s.loopDone) }()
 
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 
-	var backlog []delivery
 	quit := s.quit // nil'd once closing so the closed channel stops re-selecting
 
 	// Drain the effects the constructor queued (initial ACK/NAK timers).
-	backlog = s.drain(s.clk.Now(), timer, backlog)
+	s.drain(s.clk.Now(), timer)
 
 	for {
-		backlog = s.flushBacklog(backlog)
 		if s.dead {
+			s.core.Shutdown(s.clk.Now())
+			s.drain(s.clk.Now(), timer)
 			return // core failed mid-stream (e.g. peer idle timeout)
 		}
 		if s.closeFinished() {
 			// Drained (or lingered out): tell the peer and exit.
 			now := s.clk.Now()
 			s.core.Shutdown(now)
-			s.drain(now, timer, nil)
+			s.drain(now, timer)
 			return
 		}
 
@@ -773,7 +781,7 @@ func (s *Session) loop() {
 			}
 			now := s.clk.Now()
 			s.core.HandlePacket(now, p)
-			backlog = s.drain(now, timer, backlog)
+			s.drain(now, timer)
 
 		case req := <-s.writeC:
 			now := s.clk.Now()
@@ -782,20 +790,20 @@ func (s *Session) loop() {
 			} else {
 				s.core.WriteMsg(now, req.payload, req.opts)
 			}
-			backlog = s.drain(now, timer, backlog)
+			s.drain(now, timer)
 			signal(s.writable) // a write slot just freed
 
 		case <-timer.C:
 			now := s.clk.Now()
 			s.fireTimers(now)
-			backlog = s.drain(now, timer, backlog)
+			s.drain(now, timer)
 
 		case resp := <-s.statsReq:
-			resp <- s.core.Stats()
+			resp <- s.deliveries.stats(s.core.Stats())
 
 		case fn := <-s.ctrl:
 			fn()
-			backlog = s.drain(s.clk.Now(), timer, backlog)
+			s.drain(s.clk.Now(), timer)
 		}
 	}
 }
@@ -833,7 +841,7 @@ func (s *Session) fireTimers(now clock.Timestamp) {
 
 // drain executes all pending core effects and queues delivered messages, then
 // re-arms the OS timer to the earliest pending deadline.
-func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delivery) []delivery {
+func (s *Session) drain(now clock.Timestamp, timer *time.Timer) {
 	for {
 		out, ok := s.core.PollOutput()
 		if !ok {
@@ -863,10 +871,8 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delive
 				data: e.Data,
 				meta: MsgMetadata{Boundary: e.Boundary, MsgNo: e.MsgNo, Seq: e.Seq},
 			}
-			select {
-			case s.readC <- d:
-			default:
-				backlog = append(backlog, d)
+			if !s.deliveries.push(d, s.core.Live()) {
+				s.dead = true
 			}
 			signal(s.readable)
 		case core.Connected:
@@ -889,22 +895,6 @@ func (s *Session) drain(now clock.Timestamp, timer *time.Timer, backlog []delive
 		}
 	}
 	s.rearm(timer, now)
-	return backlog
-}
-
-// flushBacklog pushes as many backlogged deliveries into readC as fit without
-// blocking, so a slow Reader never stalls the protocol loop.
-func (s *Session) flushBacklog(backlog []delivery) []delivery {
-	i := 0
-	for i < len(backlog) {
-		select {
-		case s.readC <- backlog[i]:
-			i++
-		default:
-			return backlog[i:]
-		}
-	}
-	return backlog[:0]
 }
 
 // rearm resets the OS timer to fire at the soonest pending core deadline.

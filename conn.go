@@ -19,6 +19,12 @@ import (
 // Close/Local-Remote-Addr/deadlines) and adds SRT-specific accessors. It is a
 // thin façade over the Sans-I/O core driven by internal/session; all protocol
 // state lives there.
+//
+// Application delivery is bounded to 98,304 messages and 128 MiB of retained
+// payload storage per connection. Live overload drops the oldest unread data
+// and reports AppReadDropped/AppReadDropBytes. Reliable file-mode overload
+// closes the connection; reads drain the queued prefix then return
+// ErrReceiveOverflow. The protocol loop never waits for the application reader.
 type Conn struct {
 	s        *session.Session
 	cfg      Config
