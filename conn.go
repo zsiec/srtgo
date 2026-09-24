@@ -20,8 +20,9 @@ import (
 // thin façade over the Sans-I/O core driven by internal/session; all protocol
 // state lives there.
 type Conn struct {
-	s   *session.Session
-	cfg Config
+	s        *session.Session
+	cfg      Config
+	optionMu sync.RWMutex
 
 	// Runtime option state (GetOption/SetOption). cfg holds the configured/
 	// updated values; these track live blocking/timeout state and the role.
@@ -145,8 +146,7 @@ func (c *Conn) GroupID() uint32 { return c.s.GroupID() }
 // SetMaxBW changes the maximum sending bandwidth in bytes/sec at runtime (0 =
 // auto). It takes effect on the running connection.
 func (c *Conn) SetMaxBW(bw int64) {
-	c.cfg.MaxBW = bw
-	c.s.SetMaxBW(bw)
+	_ = c.SetOption(SockOptMaxBW, max(int64(0), bw))
 }
 
 // ---- group bonding primitives (used by Group for sequence/time-base sync) ----
@@ -196,7 +196,7 @@ func (c *Conn) clearGroupSrcTime()        { c.groupSrcTime.Store(0) }
 
 // getRateEstimate / setRateEstimate use the configured max bandwidth as the
 // group's per-link rate estimate (matches the legacy behavior).
-func (c *Conn) getRateEstimate() int64 { return c.cfg.MaxBW }
+func (c *Conn) getRateEstimate() int64 { st, _ := c.s.Stats(); return st.MaxBW }
 func (c *Conn) setRateEstimate(rate int64) {
 	if rate > 0 {
 		c.SetMaxBW(rate)

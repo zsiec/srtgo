@@ -141,7 +141,10 @@ func (c *Conn) Stats(clear bool) ConnStats {
 	if err != nil {
 		return ConnStats{}
 	}
-	st := statsFromCore(s, c.cfg)
+	c.optionMu.RLock()
+	cfg := c.cfg
+	c.optionMu.RUnlock()
+	st := statsFromCore(s, cfg)
 	st.StartTime = c.startTime
 	st.Duration = time.Since(c.startTime)
 	const hdr = 44 // IP(20) + UDP(8) + SRT(16) per packet
@@ -162,7 +165,7 @@ func (c *Conn) Stats(clear bool) ConnStats {
 	if denom := st.RecvPackets + st.RecvDropped; denom > 0 {
 		st.RecvLossRate = float64(st.RecvDropped) / float64(denom) * 100
 	}
-	st.MbpsMaxBW = float64(c.cfg.MaxBW) * 8 / 1e6
+	st.MbpsMaxBW = float64(s.MaxBW) * 8 / 1e6
 
 	// Fields the core surfaces directly.
 	st.RecvBelated = s.RecvBelated

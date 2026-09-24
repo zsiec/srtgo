@@ -198,6 +198,9 @@ type RendezvousConfig struct {
 	PayloadSize     int
 	BufferCapacity  int
 	MaxBW           int64
+	InputBW         int64
+	MinInputBW      int64
+	OverheadBW      int
 	Live            bool
 	Message         bool
 	PeerIdleTimeout clock.Microseconds
@@ -225,6 +228,9 @@ type rdvDial struct {
 	filterCfg string
 
 	maxBW           int64
+	inputBW         int64
+	minInputBW      int64
+	overheadBW      int
 	live            bool
 	message         bool
 	payloadSize     int
@@ -285,6 +291,9 @@ func DialRendezvous(rc RendezvousConfig, now clock.Timestamp) *Conn {
 			streamID:        rc.StreamID,
 			filterCfg:       rc.FilterConfig,
 			maxBW:           rc.MaxBW,
+			inputBW:         rc.InputBW,
+			minInputBW:      rc.MinInputBW,
+			overheadBW:      rc.OverheadBW,
 			live:            rc.Live,
 			message:         rc.Message,
 			payloadSize:     payloadSize,
@@ -462,6 +471,9 @@ func (c *Conn) rendezvousEstablish(now clock.Timestamp) {
 		FlowWindow:      fc,
 		BufferCapacity:  d.bufferCapacity,
 		MaxBW:           d.maxBW,
+		InputBW:         d.inputBW,
+		MinInputBW:      d.minInputBW,
+		OverheadBW:      d.overheadBW,
 		Live:            d.live,
 		TsbpdDelay:      clock.Microseconds(recvLat) * 1000,
 		PeerTsbpdDelay:  clock.Microseconds(sendLat) * 1000,

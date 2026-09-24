@@ -189,6 +189,8 @@ var ErrPreConnectOnly = errors.New("srt: socket option can only be set before co
 // GetOption retrieves the current value of a socket option. The returned type
 // depends on the option (see the SockOpt constants).
 func (c *Conn) GetOption(opt SockOpt) (any, error) {
+	c.optionMu.RLock()
+	defer c.optionMu.RUnlock()
 	st, statsErr := c.s.Stats()
 	switch opt {
 	case SockOptState:
@@ -327,12 +329,9 @@ func (c *Conn) GetOption(opt SockOpt) (any, error) {
 
 // SetOption changes a writable socket option on a live connection. Read-only
 // options return ErrReadOnlyOption; unknown options return ErrInvalidOption.
-//
-// NOTE(cutover): the rate/CC knobs (MaxBW/InputBW/OverheadBW/MinInputBW/
-// SndDropDelay/LossMaxTTL) update the stored config so GetOption round-trips,
-// but runtime re-application to the running core is a follow-up (it needs a
-// loop control hook). Blocking modes and linger take effect immediately.
 func (c *Conn) SetOption(opt SockOpt, val any) error {
+	c.optionMu.Lock()
+	defer c.optionMu.Unlock()
 	if meta, ok := optionTable[opt]; ok {
 		if meta.readonly {
 			return fmt.Errorf("%w: %d", ErrReadOnlyOption, opt)
@@ -362,6 +361,7 @@ func (c *Conn) SetOption(opt SockOpt, val any) error {
 			return fmt.Errorf("srt: SockOptMinInputBW requires a non-negative int64, got %v", val)
 		}
 		c.cfg.MinInputBW = v
+		c.s.SetMinInputBW(v)
 	case SockOptOverheadBW:
 		v, ok := val.(int)
 		if !ok || v < 5 || v > 100 {

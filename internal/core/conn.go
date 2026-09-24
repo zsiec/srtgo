@@ -46,6 +46,9 @@ type Config struct {
 	FlowWindow     int        // negotiated max packets in flight (0 -> default)
 	BufferCapacity int        // send/recv ring capacity in packets (0 -> default)
 	MaxBW          int64      // max send bandwidth bytes/sec (0 -> LiveCC default)
+	InputBW        int64
+	MinInputBW     int64
+	OverheadBW     int
 
 	Live           bool               // true -> TSBPD playout + too-late drop (live mode)
 	TsbpdDelay     clock.Microseconds // local playout latency when Live (0 -> default 120ms)
@@ -152,13 +155,16 @@ type Conn struct {
 	hsv4DeferConnect bool               // HSv4 caller: hold Connected until the KMRSP confirms encryption
 
 	// Send side.
-	sendBuf      *buffer.SendBuffer
-	sendCC       congestion.Controller
-	sendQueue    fifo[frame]     // framed packets awaiting transmission
-	msgNumber    uint32          // 26-bit wrapping message counter
-	nextSendTime clock.Timestamp // pacing deadline for the next send
-	flowWindow   int             // negotiated FC window (max in flight)
-	rcvFlowWin   int             // dynamic window from peer ACK (0 = unknown)
+	sendBuf                              *buffer.SendBuffer
+	sendCC                               congestion.Controller
+	configuredMaxBW, inputBW, minInputBW int64
+	sampledInputBW, inputSampleBytes     int64
+	inputSampleStart                     clock.Timestamp
+	sendQueue                            fifo[frame]     // framed packets awaiting transmission
+	msgNumber                            uint32          // 26-bit wrapping message counter
+	nextSendTime                         clock.Timestamp // pacing deadline for the next send
+	flowWindow                           int             // negotiated FC window (max in flight)
+	rcvFlowWin                           int             // dynamic window from peer ACK (0 = unknown)
 
 	// Sender-side too-late drop (TLPKTDROP) + per-message TTL.
 	sendDropThresh   clock.Microseconds // age past which head packets are dropped (0 = no TSBPD-deadline drop)
@@ -288,6 +294,7 @@ type Conn struct {
 // (Mbps, samples/sec) and not-yet-implemented subsystems (KM state, reorder,
 // belated arrivals) are filled in by the host / as those features land.
 type Stats struct {
+	MaxBW int64 // effective pacing limit, bytes/sec
 	// Cumulative packet/byte counters.
 	SentPackets       uint64
 	SentBytes         uint64
@@ -430,6 +437,7 @@ func (c *Conn) Stats() Stats {
 		s.PacketRecvRate = pktRate
 		s.EstimatedBandwidth = c.sendCC.EstimatedBandwidth()
 		s.PktSndPeriodMicros = int64(c.sendCC.PacketInterval())
+		s.MaxBW = c.sendCC.MaxBandwidth()
 	}
 	if c.tsbpdTimer != nil {
 		s.DriftMicros = c.tsbpdTimer.DriftOffset()
@@ -460,6 +468,9 @@ type establishParams struct {
 	SendBufCapacity  int
 	RecvBufCapacity  int
 	MaxBW            int64
+	InputBW          int64
+	MinInputBW       int64
+	OverheadBW       int
 	Live             bool
 	TsbpdDelay       clock.Microseconds
 	PeerTsbpdDelay   clock.Microseconds
@@ -497,6 +508,9 @@ func NewEstablished(cfg Config, now clock.Timestamp) *Conn {
 		FlowWindow:       cfg.FlowWindow,
 		BufferCapacity:   cfg.BufferCapacity,
 		MaxBW:            cfg.MaxBW,
+		InputBW:          cfg.InputBW,
+		MinInputBW:       cfg.MinInputBW,
+		OverheadBW:       cfg.OverheadBW,
 		Live:             cfg.Live,
 		TsbpdDelay:       cfg.TsbpdDelay,
 		PeerTsbpdDelay:   cfg.PeerTsbpdDelay,
@@ -580,6 +594,13 @@ func (c *Conn) establish(now clock.Timestamp, ep establishParams) {
 	} else {
 		c.sendCC = congestion.NewLiveCC(ep.MaxBW, ep.PayloadSize)
 	}
+	c.configuredMaxBW, c.inputBW, c.minInputBW = ep.MaxBW, ep.InputBW, ep.MinInputBW
+	c.inputSampleStart = now
+	if ep.OverheadBW == 0 {
+		ep.OverheadBW = congestion.DefaultOverhead
+	}
+	c.sendCC.SetOverhead(ep.OverheadBW)
+	c.applyBandwidth()
 	c.recvBuf = buffer.NewRecvBuffer(rcvCap, ep.RecvISN)
 	c.flowWindow = ep.FlowWindow
 	c.rcvLastAckAck = ep.RecvISN
@@ -695,29 +716,6 @@ func (c *Conn) PollEvent() (Event, bool) { return c.events.pop() }
 // send as much as the flow-control window and pacing allow.
 func (c *Conn) Write(now clock.Timestamp, payload []byte) {
 	c.WriteMsg(now, payload, MsgOptions{InOrder: true})
-}
-
-// SetMaxBW changes the maximum sending bandwidth (bytes/sec) at runtime; 0 means
-// auto. Call it on the host loop goroutine.
-func (c *Conn) SetMaxBW(bw int64) {
-	if c.sendCC != nil {
-		c.sendCC.SetMaxBandwidth(bw)
-	}
-}
-
-// SetInputBW updates the estimated input bandwidth (bytes/sec) used for auto-rate
-// when MaxBW is 0.
-func (c *Conn) SetInputBW(bw int64) {
-	if c.sendCC != nil {
-		c.sendCC.UpdateBandwidth(c.sendCC.MaxBandwidth(), bw)
-	}
-}
-
-// SetOverhead updates the retransmit bandwidth overhead percentage (5..100).
-func (c *Conn) SetOverhead(pct int) {
-	if c.sendCC != nil {
-		c.sendCC.SetOverhead(pct)
-	}
 }
 
 // SendISN returns the local initial send sequence number.
@@ -890,6 +888,7 @@ func (c *Conn) writeMsg(now clock.Timestamp, payload []byte, opts MsgOptions, ow
 		}
 		return
 	}
+	c.inputSampleBytes += int64(len(payload))
 	if opts.ForceMsgNo {
 		c.msgNumber = opts.MsgNo & 0x03FFFFFF
 	} else {
@@ -1008,6 +1007,7 @@ func (c *Conn) HandlePacket(now clock.Timestamp, p packet.Packet) {
 
 // HandleTimer fires a logical timer the host previously armed via SetTimer.
 func (c *Conn) HandleTimer(now clock.Timestamp, id TimerID) {
+	c.sampleInputBandwidth(now)
 	c.lastNow = now
 	if c.closed {
 		return

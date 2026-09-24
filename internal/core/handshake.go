@@ -73,11 +73,14 @@ type DialConfig struct {
 	AllowUnencryptedFallback bool
 
 	// Applied once the handshake completes.
-	PayloadSize      int                // data payload per packet (0 -> mode default, capped by MSS)
-	BufferCapacity   int                // send/recv ring capacity (0 -> default)
-	SendBufCapacity  int                // send ring capacity (0 -> BufferCapacity)
-	RecvBufCapacity  int                // recv ring capacity (0 -> BufferCapacity)
-	MaxBW            int64              // max send bandwidth bytes/sec (0 -> LiveCC default)
+	PayloadSize      int   // data payload per packet (0 -> mode default, capped by MSS)
+	BufferCapacity   int   // send/recv ring capacity (0 -> default)
+	SendBufCapacity  int   // send ring capacity (0 -> BufferCapacity)
+	RecvBufCapacity  int   // recv ring capacity (0 -> BufferCapacity)
+	MaxBW            int64 // max send bandwidth bytes/sec (0 -> LiveCC default)
+	InputBW          int64
+	MinInputBW       int64
+	OverheadBW       int
 	Live             bool               // TSBPD playout (live mode)
 	Message          bool               // message-mode framing (file API; ignored when Live)
 	TLPktDrop        bool               // sender-side too-late packet drop (ignored unless Live)
@@ -127,6 +130,9 @@ type dialState struct {
 	sendBufCapacity  int
 	recvBufCapacity  int
 	maxBW            int64
+	inputBW          int64
+	minInputBW       int64
+	overheadBW       int
 	live             bool
 	message          bool
 	tlPktDrop        bool
@@ -186,6 +192,9 @@ func Dial(dc DialConfig, now clock.Timestamp) *Conn {
 			sendBufCapacity:    dc.SendBufCapacity,
 			recvBufCapacity:    dc.RecvBufCapacity,
 			maxBW:              dc.MaxBW,
+			inputBW:            dc.InputBW,
+			minInputBW:         dc.MinInputBW,
+			overheadBW:         dc.OverheadBW,
 			live:               dc.Live,
 			message:            dc.Message,
 			tlPktDrop:          dc.TLPktDrop,
@@ -436,6 +445,9 @@ func (c *Conn) handleConclusionResponse(now clock.Timestamp, hs *packet.CIFHands
 		SendBufCapacity:  d.sendBufCapacity,
 		RecvBufCapacity:  d.recvBufCapacity,
 		MaxBW:            d.maxBW,
+		InputBW:          d.inputBW,
+		MinInputBW:       d.minInputBW,
+		OverheadBW:       d.overheadBW,
 		Live:             d.live,
 		TsbpdDelay:       clock.Microseconds(recvLatMS) * 1000, // ms -> us
 		PeerTsbpdDelay:   clock.Microseconds(sendLatMS) * 1000,

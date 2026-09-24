@@ -169,7 +169,12 @@ func (cc *LiveCC) UpdateBandwidth(maxBW, inputBW int64) {
 		cc.mu.Lock()
 		ohead := cc.overhead
 		cc.mu.Unlock()
-		cc.atomicMaxBW.Store(inputBW * int64(100+ohead) / 100)
+		extra := inputBW/100*int64(ohead) + inputBW%100*int64(ohead)/100
+		if inputBW > math.MaxInt64-extra {
+			cc.atomicMaxBW.Store(math.MaxInt64)
+		} else {
+			cc.atomicMaxBW.Store(inputBW + extra)
+		}
 	}
 }
 

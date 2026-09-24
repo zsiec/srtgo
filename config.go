@@ -104,7 +104,8 @@ type Config struct {
 	// MaxBW is the maximum sending bandwidth in bytes per second.
 	// When > 0, used directly (no overhead applied).
 	// When 0 and InputBW > 0, InputBW * (1 + OverheadBW/100) is used.
-	// When 0 and InputBW == 0, defaults to 125 MB/s (1 Gbps).
+	// When 0 and InputBW == 0, samples the application input rate with
+	// MinInputBW as a floor; before a sample it uses the floor or 125 MB/s.
 	MaxBW int64
 
 	// OverheadBW is the bandwidth overhead percentage for retransmissions.
@@ -367,7 +368,7 @@ func (cfg *Config) validate() error {
 	}
 
 	// MaxBW == 0 is valid: means "auto" (use InputBW+overhead, or DefaultMaxBW).
-	// Resolved in newConn.
+	// Applied by the core congestion controller.
 
 	if cfg.OverheadBW == 0 {
 		cfg.OverheadBW = DefaultOverheadBW
@@ -524,6 +525,9 @@ func (cfg *Config) validate() error {
 		cfg.UDPRecvBufSize = cfg.MSS
 	}
 
+	if cfg.MinInputBW < 0 {
+		cfg.MinInputBW = 0
+	}
 	// InputBW: must be >= 0
 	if cfg.InputBW < 0 {
 		cfg.InputBW = 0

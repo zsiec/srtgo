@@ -535,13 +535,16 @@ func (s *Session) control(fn func()) {
 }
 
 // SetMaxBW changes the max sending bandwidth (bytes/sec) at runtime; 0 = auto.
-func (s *Session) SetMaxBW(bw int64) { s.control(func() { s.core.SetMaxBW(bw) }) }
+func (s *Session) SetMaxBW(bw int64) { s.onLoop(func() { s.core.SetMaxBW(bw) }) }
 
 // SetInputBW updates the estimated input bandwidth (bytes/sec) for auto-rate.
-func (s *Session) SetInputBW(bw int64) { s.control(func() { s.core.SetInputBW(bw) }) }
+func (s *Session) SetInputBW(bw int64) { s.onLoop(func() { s.core.SetInputBW(bw) }) }
+
+// SetMinInputBW changes the floor for automatic input-rate sampling.
+func (s *Session) SetMinInputBW(bw int64) { s.onLoop(func() { s.core.SetMinInputBW(bw) }) }
 
 // SetOverhead updates the retransmit bandwidth overhead percentage.
-func (s *Session) SetOverhead(pct int) { s.control(func() { s.core.SetOverhead(pct) }) }
+func (s *Session) SetOverhead(pct int) { s.onLoop(func() { s.core.SetOverhead(pct) }) }
 
 // SetReorderTolerance updates the reorder tolerance (SRTO_LOSSMAXTTL) at runtime.
 func (s *Session) SetReorderTolerance(n int) { s.control(func() { s.core.SetReorderTolerance(n) }) }
