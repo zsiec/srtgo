@@ -93,7 +93,11 @@ type ConnStats struct {
 
 	// Receiver-side counters
 	RecvDropped        uint64
-	RecvDroppedBytes   uint64
+	RecvDroppedBytes   uint64 // includes estimated bytes for missing network packets
+	AppReadDropped     uint64 // deliveries discarded by application queue overflow
+	AppReadDropBytes   uint64 // exact payload bytes discarded by application queue overflow
+	AppReadQueue       int    // queued deliveries in the ready tier (up to 32768)
+	AppReadBacklog     int    // queued deliveries beyond the ready tier (up to 65536)
 	RecvBelated        uint64
 	RecvBelatedBytes   uint64
 	RecvUndecrypt      uint64
@@ -137,10 +141,7 @@ type ConnStats struct {
 // are cumulative; the Mbps interval rates are computed over the window since the
 // previous clear=true call, which also resets that window.
 func (c *Conn) Stats(clear bool) ConnStats {
-	s, err := c.s.Stats()
-	if err != nil {
-		return ConnStats{}
-	}
+	s, _ := c.s.Stats()
 	c.optionMu.RLock()
 	cfg := c.cfg
 	c.optionMu.RUnlock()
@@ -157,6 +158,7 @@ func (c *Conn) Stats(clear bool) ConnStats {
 	st.RetransTotalBytes = st.RetransBytes + st.Retransmits*hdr
 	st.RecvRetransTotalBytes = st.RecvRetransBytes + st.RecvRetrans*hdr
 	st.SentDropTotalBytes = st.SentDroppedBytes + st.SentDropped*hdr
+	st.RecvDropTotalBytes = st.RecvDroppedBytes + st.RecvDropped*hdr
 
 	// Loss rates.
 	if st.SentPackets > 0 {
@@ -284,10 +286,15 @@ func statsFromCore(s core.Stats, cfg Config) ConnStats {
 		RecvRetrans:       s.RecvRetrans,
 		RecvRetransBytes:  s.RecvRetransBytes,
 
-		LostPackets:   s.LostPackets,
-		RecvLoss:      s.RecvLoss,
-		RecvDropped:   s.RecvDropped,
-		RecvUndecrypt: s.RecvUndecrypt,
+		LostPackets:      s.LostPackets,
+		RecvLoss:         s.RecvLoss,
+		RecvDropped:      s.RecvDropped,
+		RecvDroppedBytes: s.RecvDroppedBytes,
+		AppReadDropped:   s.AppReadDropped,
+		AppReadDropBytes: s.AppReadDropBytes,
+		AppReadQueue:     s.AppReadQueue,
+		AppReadBacklog:   s.AppReadBacklog,
+		RecvUndecrypt:    s.RecvUndecrypt,
 
 		SentDropped:      s.SentDropped,
 		SentDroppedBytes: s.SentDroppedBytes,
